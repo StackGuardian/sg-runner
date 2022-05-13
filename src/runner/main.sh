@@ -1,6 +1,6 @@
 #!/bin/sh
 
-set -e -o "pipefail"
+# set -e -o "pipefail"
 
 sgNodeToken=${SG_NODE_TOKEN}
 sgNodeAPIEndpoint=${SG_NODE_API_ENDPOINT}

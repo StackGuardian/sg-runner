@@ -25,14 +25,11 @@ RUN pip install pipenv && \
     adduser -s /bin/true -u 911 -D -h ${USER_DIR} ${USER} -G ${USER} && \
     mkdir -p ${RUNNER_SOURCE_DIR} && \
     apk update && \
-    apk add git curl docker=20.10.14-r1
+    apk add git curl docker=~20.10.14
 
 WORKDIR ${RUNNER_SOURCE_DIR}
 
 COPY --chown=${USER}:root . .
-
-RUN pipenv lock --requirements > requirements.txt && \
-    pip install -r requirements.txt
 
 # Remove existing crontabs, if any.
 RUN rm -fr /var/spool/cron \
@@ -101,4 +98,4 @@ RUN chmod u+r src/runner/main.sh
 
 USER ${USER}
 
-CMD /usr/local/bin/python src/runner/main.sh
+CMD /bin/sh src/runner/main.sh
