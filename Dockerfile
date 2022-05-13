@@ -97,8 +97,8 @@ RUN rm -f /etc/fstab
 # Remove any symlinks that we broke during previous steps
 RUN find /bin /etc /lib /sbin /usr -xdev -type l -exec test ! -e {} \; -delete
 
-RUN chmod u+r src/runner/main.py
+RUN chmod u+r src/runner/main.sh
 
 USER ${USER}
 
-CMD /usr/local/bin/python src/runner/main.py
+CMD /usr/local/bin/python src/runner/main.sh
