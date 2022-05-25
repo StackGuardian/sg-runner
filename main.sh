@@ -6,10 +6,10 @@ sgNodeToken=${SG_NODE_TOKEN}
 sgNodeAPIEndpoint=${SG_NODE_API_ENDPOINT}
 sgECSCluster=${SG_ECS_CLUSTER}
 
-sgNodeToken || echo "A Node Token is not provided. Read docs. Use Env var: SG_NODE_TOKEN" && exit 1
-sgNodeAPIEndpoint || echo "StackGuardian Node API is not provided. Read docs. Env var: SG_NODE_API_ENDPOINT" && exit 1
+# sgNodeToken || echo "A Node Token is not provided. Read docs. Use Env var: SG_NODE_TOKEN" && exit 1
+# sgNodeAPIEndpoint || echo "StackGuardian Node API is not provided. Read docs. Env var: SG_NODE_API_ENDPOINT" && exit 1
 
-response=$(curl -vLk -H "Authorization: apikey ${sgNodeToken}" ${sgNodeAPIEndpoint}/register_runner)
+# response=$(curl -vLk -H "Authorization: apikey ${sgNodeToken}" ${sgNodeAPIEndpoint}/register_runner)
 
 # response={
 #     "AWSDefaultRegion": "",
@@ -23,6 +23,8 @@ response=$(curl -vLk -H "Authorization: apikey ${sgNodeToken}" ${sgNodeAPIEndpoi
 
 # Set up directories the agent uses
 mkdir -p /var/log/ecs /etc/ecs /var/lib/ecs/data
+rm -rf /etc/ecs/ecs.config
+# rm -rf /var/lib/amazon/ssm/Vault/Store/*
 touch /etc/ecs/ecs.config
 
 echo ECS_CLUSTER=$sgECSCluster >> /etc/ecs/ecs.config
@@ -30,27 +32,32 @@ echo AWS_DEFAULT_REGION=${response['AWSDefaultRegion']} >> /etc/ecs/ecs.config
 echo AWS_ACCESS_KEY_ID=${response['AWSAccessKeyId']} >> /etc/ecs/ecs.config
 echo AWS_SECRET_ACCESS_KEY=${response['AWSSecretAccessKey']} >> /etc/ecs/ecs.config
 echo AWS_SESSION_TOKEN=${response['AWSSessionToken']} >> /etc/ecs/ecs.config
+echo ECS_INSTANCE_ATTRIBUTES={"sg_organization": ${response['OrgName']},"sg_externalid": ${response['ExternalId']}} >> /etc/ecs/ecs.config
+
 echo ECS_LOGLEVEL=/log/ecs-agent.log >> /etc/ecs/ecs.config
 echo ECS_DATADIR=/data/ >> /etc/ecs/ecs.config
 echo ECS_ENABLE_TASK_IAM_ROLE=true >> /etc/ecs/ecs.config
 echo ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true >> /etc/ecs/ecs.config
-echo ECS_INSTANCE_ATTRIBUTES={"sg_organization": ${response['OrgName']},"sg_externalid": ${response['ExternalId']}} >> /etc/ecs/ecs.config
+
 
 # Set up necessary rules to enable IAM roles for tasks
 sysctl -w net.ipv4.conf.all.route_localnet=1
+# sysctl -w net.ipv4.ip_forward=1
 iptables -t nat -A PREROUTING -p tcp -d 169.254.170.2 --dport 80 -j DNAT --to-destination 127.0.0.1:51679
 iptables -t nat -A OUTPUT -d 169.254.170.2 -p tcp -m tcp --dport 80 -j REDIRECT --to-ports 51679
 
+source /home/ec2-user/runner/ecs-anywhere-install.sh --region eu-central-1 --activation-code w8bFESE6yx7YHlCoRTbg --activation-id 0eecdb7e-2646-423b-b9b2-c9b3733da579 --ecs-version latest
+
 # Run the agent
 # TODO: check which volumes will be exported?
-docker run --name ecs-agent \
-    --detach=true \
-    --restart=on-failure:10 \
-    --volume=/var/run/docker.sock:/var/run/docker.sock \
-    --volume=/var/log/ecs:/log \
-    --volume=/var/lib/ecs/data:/data \
-    --net=host \
-    --env-file=/etc/ecs/ecs.config \
-    amazon/amazon-ecs-agent:latest
+# docker run --name ecs-agent9 \
+#     --detach=true \
+#     --restart=on-failure:10 \
+#     --volume=/var/run/docker.sock:/var/run/docker.sock \
+#     --volume=/var/log/ecs:/log \
+#     --volume=/var/lib/ecs/data:/data \
+#     --net=host \
+#     --env-file=/etc/ecs/ecs.config \
+#     amazon/amazon-ecs-agent:latest
 
 # TODO: API call to ping the node
