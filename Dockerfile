@@ -10,7 +10,7 @@ ENV SG_NODE_TOKEN=${SG_NODE_TOKEN:-}
 ENV SG_NODE_API_ENDPOINT=${SG_NODE_API_ENDPOINT:-https://api.beta.stackguardian.io/api/v1/}
 
 # make a pipe fail on the first failure
-SHELL ["/bin/sh", "-e", "-o", "pipefail", "-c"]
+SHELL ["/bin/bash", "-e", "-o", "pipefail", "-c"]
 
 # ensure we only use apk repositories over HTTPS (altough APK contain an embedded signature)
 RUN echo "https://alpine.global.ssl.fastly.net/alpine/v$(cut -d . -f 1,2 < /etc/alpine-release)/main" > /etc/apk/repositories \
@@ -98,4 +98,4 @@ RUN chmod u+r src/runner/main.sh
 
 USER ${USER}
 
-CMD /bin/sh src/runner/main.sh
+CMD /bin/bash src/runner/main.sh
