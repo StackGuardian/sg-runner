@@ -20,27 +20,17 @@ readonly C_CYAN="\033[0;36m"
 readonly C_RESET="\033[0m"
 readonly C_BOLD="\033[1m"
 
-## API response values
-ECS_CLUSTER=
-AWS_DEFAULT_REGION=
-SSM_ACTIVATION_ID=
-SSM_ACTIVATION_CODE=
-ORGANIZATION_NAME=
-ORGANIZATION_ID=
-EXTERNAL_ID=
-RESOURCE_ID=
-
 log_date() {
   printf "${C_MAGENTA}[%s]" "$(date +'%Y-%m-%dT%H:%M:%S%z')"
 }
 
 err() {
   printf "\n%s ${C_RED_BOLD}[ERROR] ${C_RESET}%s${C_BOLD} %s${C_RESET} %s" "$(log_date)" "${1}" "${2}" "${@:3}" >&2
-  printf "\n\n(Try ${C_BOLD}%s --help${C_RESET} for more information.)" "$(basename "${0}")"
+  printf "\n\n(Try ${C_BOLD}%s --help${C_RESET} for more information.)\n" "$(basename "${0}")"
 }
 
 show_help() {
-  printf "\n${C_BOLD}%s${C_RESET} [register deregister] arguments..\n" "$(basename "${0}")"
+  printf "\nsudo ${C_BOLD}%s${C_RESET} [register deregister] arguments..\n" "$(basename "${0}")"
   printf "\n  Required arguments:\n"
   printf "\t--sg-node-token\t\tToken provided by StackGuardian platform.\n"
   printf "\t--sg-node-api-endpoint\tStackGuardian API endpoint.\n"
@@ -58,27 +48,28 @@ show_help() {
 #   None
 # Outputs:
 #   Write to STDERR if error and exit.
+#   Set all neccessary environment variables.
 #######################################
 fetch_organization_info() {
   local response
 
   printf "\n%s ${C_GREEN}INFO:${C_RESET} Fetching data..\n" "$(log_date)"
-  if ! response=$(curl -fSsLk -H "Authorization: apikey ${SG_NODE_TOKEN}" "${SG_NODE_API_ENDPOINT}"/register_runner); then
-    err "Could not fetch data from API"
-    exit 1
-  fi
+  # if ! response=$(curl -fSsLk -H "Authorization: apikey ${SG_NODE_TOKEN}" "${SG_NODE_API_ENDPOINT}"/register_runner); then
+  #   err "Could not fetch data from API"
+  #   exit 1
+  # fi
 
-  # TODO(devops@hllvc.com): save response to env variables
-  # response={
-  #     "AWSDefaultRegion": "",
-  #     "ECSCluster": "",
-  #     "SSMActivationId": "",
-  #     "SSMActivationCode": "",
-  #     "OrgName": "",
-  #     "OrgId": "",
-  #     "ExternalId": "",
-  #     "ResourceId": ""
-  # }
+  response=$(cat data.json)
+
+  ## API response values
+  ECS_CLUSTER="${ECS_CLUSTER:=$(echo "${response}" | jq -r '.data.ECSCluster')}"
+  AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:=$(echo "${response}" | jq -r '.data.AWSDefaultRegion')}"
+  SSM_ACTIVATION_ID="${SSM_ACTIVATION_ID:=$(echo "${response}" | jq -r '.data.SSMActivationId')}"
+  SSM_ACTIVATION_CODE="${SSM_ACTIVATION_CODE:=$(echo "${response}" | jq -r '.data.SSMActivationCode')}"
+  ORGANIZATION_NAME="${ORGANIZATION_NAME:=$(echo "${response}" | jq -r '.data.OrgName')}"
+  ORGANIZATION_ID="${ORGANIZATION_ID:=$(echo "${response}" | jq -r '.data.OrgId')}"
+  EXTERNAL_ID="${EXTERNAL_ID:=$(echo "${response}" | jq -r '.data.ExternalId')}"
+  RESOURCE_ID="${RESOURCE_ID:=$(echo "${response}" | jq -r '.data.ResourceId')}"
 
 }
 
@@ -102,21 +93,21 @@ configure_local_data() {
   # rm -rf /var/lib/amazon/ssm/Vault/Store/*
 
   cat > /etc/ecs/ecs.config << EOF
-  ECS_CLUSTER=${SG_ECS_CLUSTER}
-  AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
-  ECS_INSTANCE_ATTRIBUTES={"sg_organization": "${ORGANIZATION_NAME}","sg_externalid": "${EXTERNAL_ID}"}
-  ECS_LOGLEVEL=/log/ecs-agent.log
-  ECS_DATADIR=/data/
-  ECS_ENABLE_TASK_IAM_ROLE=true
-  ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true
+ECS_CLUSTER=${ECS_CLUSTER}
+AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+ECS_INSTANCE_ATTRIBUTES={"sg_organization": "${ORGANIZATION_NAME}","sg_externalid": "${EXTERNAL_ID}"}
+ECS_LOGLEVEL=/log/ecs-agent.log
+ECS_DATADIR=/data/
+ECS_ENABLE_TASK_IAM_ROLE=true
+ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true
 EOF
 
   cat > /var/lib/ecs/ecs.config << EOF
-  AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
-  ECS_EXTERNAL=true
+AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+ECS_EXTERNAL=true
 EOF
 
-  printf "\n%s ${C_GREEN_BOLD}INFO: ${C_GREEN}Configured local data." "$(log_date)"
+  printf "\n%s ${C_GREEN_BOLD}INFO: ${C_GREEN}Configured local data.\n" "$(log_date)"
 }
 
 #######################################
@@ -129,6 +120,11 @@ EOF
 #   Writes STOUT on success.
 #######################################
 configure_local_network() {
+  # Create wf-steps-net docker network
+  docker network create --driver bridge "${SG_DOCKER_NETWORK}"
+  bridge_id="br-$(docker network ls --filter "name=${SG_DOCKER_NETWORK}")"
+  iptables -I DOCKER-USER -i "${bridge_id}" -d 169.254.169.254,10.0.0.0/24 -j DROP
+
   # Set up necessary rules to enable IAM roles for tasks
   sysctl -w net.ipv4.conf.all.route_localnet=1
   # sysctl -w net.ipv4.ip_forward=1
@@ -152,22 +148,27 @@ configure_local_network() {
 #   if successfull/error.
 #######################################
 register_instance() {
-  if ! curl -fSsL --proto "https" -o "/tmp/ecs-anywhere-install.sh" "https://amazon-ecs-agent.s3.amazonaws.com/ecs-anywhere-install-latest.sh"; then
+  # check_sg_args
+  fetch_organization_info
+  configure_local_data
+  configure_local_network
+
+  rm /tmp/ecs* >&/dev/null
+
+  curl -fSsL --proto "https" -o "/tmp/ecs-anywhere-install.sh" "https://amazon-ecs-agent.s3.amazonaws.com/ecs-anywhere-install-latest.sh" 2> /tmp/ecs_anywhere_download.log
+
+  if (( $? != 0 )); then
     err "Unable to download" "ecs-anywhere-install.sh" "script"
+    echo
+    cat /tmp/ecs_anywhere_download.log
     exit 1
   fi
 
   # TODO(devops@hllvc.com): verify ecs-anywhere script integrity
-  # gpg --keyserver hkp://keys.gnupg.net:80 --recv BCE9D9A42D51784F
+  # gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv BCE9D9A42D51784F
   # curl --proto "https" -o "/tmp/ecs-anywhere-install.sh.asc" "https://amazon-ecs-agent.s3.amazonaws.com/ecs-anywhere-install-latest.sh.asc"
-  # gpg --verify /tmp/ecs-anywhere-install.sh.asc /tmp/ecs-anywhere-install.sh
+  # gpg --verify /tmp/ecs-anywhere-install.sh.asc /tmp/ecs-anywhere-install.sh | grep "Primary key"
 
-  ## expected output
-  # gpg: Signature made Tue 25 May 2021 07:16:29 PM UTC
-  # gpg:                using RSA key 50DECCC4710E61AF
-  # gpg: Good signature from "Amazon ECS <ecs-security@amazon.com>" [unknown]
-  # gpg: WARNING: This key is not certified with a trusted signature!
-  # gpg:          There is no indication that the signature belongs to the owner.
   # Primary key fingerprint: F34C 3DDA E729 26B0 79BE  AEC6 BCE9 D9A4 2D51 784F
   #      Subkey fingerprint: D64B B6F9 0CF3 77E9 B5FB  346F 50DE CCC4 710E 61AF
 
@@ -195,8 +196,15 @@ register_instance() {
 #   if de-registration is sucessfull.
 #######################################
 deregister_instance() {
+  rm -rf /var/log/ecs /etc/ecs /var/lib/ecs
+
+  docker rm -f "$(docker ps -aq)"
+  docker network rm "${SG_DOCKER_NETWORK}"
+
   ## TODO(devops@hllvc.com): Handle de-registration process.
   return 0
+  local response
+
   response=$(curl -vLk -H "Authorization: apikey ${SG_NODE_TOKEN}" "${SG_NODE_API_ENDPOINT}"/deregister_runner)
 }
 
@@ -213,6 +221,7 @@ deregister_instance() {
 #   If error, write to STDERR and exit.
 #######################################
 check_arg_value() {
+  ## TODO(devops@hllvc.com): make sure to validate double parameter input
   if [[ "${2:0:2}" == "--" ]]; then
     err "Argument" "${1}" "has invalid value: $2"
     exit 1
@@ -232,17 +241,19 @@ is_root() {
 }
 
 init_args_are_valid() {
-  if (( $# != 5 )); then
-    err "Invalid count of arguments passed"
-  elif [[ ! "$1" =~ register|deregister ]]; then
+  if [[ ! "$1" =~ register|deregister ]]; then
     err "Provided option" "${1}" "is invalid"
+    exit 1
+  elif (( $# != 5 )); then
+    err "Arguments:" "--sg-node-token, --sg-node-api-endpoint" "are required"
+    exit 1
   fi
   return 0
 }
 
 check_sg_args() {
-  if [[ -z "$SG_NODE_TOKEN" && -z "$SG_NODE_API_ENDPOINT" && -z "$SG_ECS_CLUSTER" ]]; then
-    err "Arguments: " "--sg-node-token, --sg-node-api-endpoint, --sg-ecs-cluster" "are required"
+  if [[ -z "$SG_NODE_TOKEN" && -z "$SG_NODE_API_ENDPOINT" ]]; then
+    err "Arguments: " "--sg-node-token, --sg-node-api-endpoint" "are required"
     exit 1
   fi
   return 0
@@ -250,9 +261,13 @@ check_sg_args() {
 
 main() {
 
-[[ "${*}" =~ "--help" ]] && show_help && exit 0
+if ! type jq >&/dev/null; then
+  err "Command" "jq" "not installed" && exit 1
+fi
 
-is_root && init_args_are_valid "$@"
+# [[ "${*}" =~ "--help" || $# -lt 1 ]] && show_help && exit 0
+
+# is_root && init_args_are_valid "$@"
 
 OPTION="${1}"
 shift
@@ -277,11 +292,7 @@ while :; do
   esac
 done
 readonly SG_NODE_TOKEN SG_NODE_API_ENDPOINT
-
-check_sg_args
-#fetch_organization_info
-#configure_local_data
-#configure_local_network
+readonly SG_DOCKER_NETWORK="wf-steps-net"
 
 case "${OPTION}" in
   register)
@@ -292,7 +303,6 @@ case "${OPTION}" in
     ;;
 esac
 
-exit 0
 # Run the agent
 # TODO: check which volumes will be exported?
 # docker run --name ecs-agent9 \
