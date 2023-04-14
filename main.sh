@@ -29,6 +29,10 @@ err() {
   printf "\n\n(Try ${C_BOLD}%s --help${C_RESET} for more information.)\n" "$(basename "${0}")"
 }
 
+info() {
+  printf "%s ${C_GREEN}INFO:${C_RESET} %s\n" "$(log_date)" "${*}"
+}
+
 show_help() {
   printf "\nsudo ${C_BOLD}%s${C_RESET} [register deregister] arguments..\n" "$(basename "${0}")"
   printf "\n  Required arguments:\n"
@@ -53,7 +57,7 @@ show_help() {
 fetch_organization_info() {
   local response
 
-  printf "\n%s ${C_GREEN}INFO:${C_RESET} Fetching data..\n" "$(log_date)"
+  info "Fetching data..."
   # if ! response=$(curl -fSsLk -H "Authorization: apikey ${SG_NODE_TOKEN}" "${SG_NODE_API_ENDPOINT}"/register_runner); then
   #   err "Could not fetch data from API"
   #   exit 1
@@ -70,6 +74,8 @@ fetch_organization_info() {
   ORGANIZATION_ID="${ORGANIZATION_ID:=$(echo "${response}" | jq -r '.data.OrgId')}"
   EXTERNAL_ID="${EXTERNAL_ID:=$(echo "${response}" | jq -r '.data.ExternalId')}"
   RESOURCE_ID="${RESOURCE_ID:=$(echo "${response}" | jq -r '.data.ResourceId')}"
+  AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:=$(echo "${response}" | jq -r '.data.AWSAccessKeyId')}"
+  AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:=$(echo "${response}" | jq -r '.data.AWSSecretAccessKey')}"
 
 }
 
@@ -107,7 +113,7 @@ AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
 ECS_EXTERNAL=true
 EOF
 
-  printf "\n%s ${C_GREEN_BOLD}INFO: ${C_GREEN}Configured local data.\n" "$(log_date)"
+  info "Configured local data."
 }
 
 #######################################
@@ -122,7 +128,7 @@ EOF
 configure_local_network() {
   # Create wf-steps-net docker network
   docker network create --driver bridge "${SG_DOCKER_NETWORK}"
-  bridge_id="br-$(docker network ls --filter "name=${SG_DOCKER_NETWORK}")"
+  bridge_id="br-$(docker network ls -q --filter "name=${SG_DOCKER_NETWORK}")"
   iptables -I DOCKER-USER -i "${bridge_id}" -d 169.254.169.254,10.0.0.0/24 -j DROP
 
   # Set up necessary rules to enable IAM roles for tasks
@@ -131,7 +137,30 @@ configure_local_network() {
   iptables -t nat -A PREROUTING -p tcp -d 169.254.170.2 --dport 80 -j DNAT --to-destination 127.0.0.1:51679
   iptables -t nat -A OUTPUT -d 169.254.170.2 -p tcp -m tcp --dport 80 -j REDIRECT --to-ports 51679
 
-  printf "\n%s ${C_GREEN_BOLD}INFO: ${C_GREEN}Configured local network." "$(log_date)"
+  info "Configured local network."
+}
+
+#######################################
+# Run fluentbit Docker container for logging
+# Globals:
+#
+# Arguments:
+#   None
+# Returns:
+#   None
+# Outputs:
+#   Write to STDOUT/STERR
+#   if successfull/error.
+#######################################
+configure_fluentbit() {
+  docker run -d \
+    -p 24224:24224 \
+    -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
+    -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
+    -v "$(pwd)"/fluentbit.conf:/fluent-bit/etc/fluentbit.conf \
+    fluent/fluent-bit:2.0.9 /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf
+
+  info "Fluentbit container started."
 }
 
 #######################################
@@ -152,6 +181,7 @@ register_instance() {
   fetch_organization_info
   configure_local_data
   configure_local_network
+  configure_fluentbit
 
   rm /tmp/ecs* >&/dev/null
 
@@ -181,7 +211,7 @@ register_instance() {
     exit 1
   fi
 
-  printf "\n%s ${C_GREEN_BOLD}INFO: ${C_GREEN}Instance successfully registered to ECS cluster." "$(log_date)"
+  info "Instance successfully registered to ECS cluster."
 }
 
 #######################################
@@ -196,10 +226,10 @@ register_instance() {
 #   if de-registration is sucessfull.
 #######################################
 deregister_instance() {
-  rm -rf /var/log/ecs /etc/ecs /var/lib/ecs
-
-  docker rm -f "$(docker ps -aq)"
+  docker stop $(docker ps -q)
+  docker rm $(docker ps -aq)
   docker network rm "${SG_DOCKER_NETWORK}"
+  rm -rf /var/log/ecs /etc/ecs /var/lib/ecs
 
   ## TODO(devops@hllvc.com): Handle de-registration process.
   return 0
