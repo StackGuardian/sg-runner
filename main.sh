@@ -25,7 +25,7 @@ log_date() {
 }
 
 err() {
-  printf "\n%s ${C_RED_BOLD}[ERROR] ${C_RESET}%s${C_BOLD} %s${C_RESET} %s" "$(log_date)" "${1}" "${2}" "${@:3}" >&2
+  printf "%s ${C_RED_BOLD}[ERROR] ${C_RESET}%s${C_BOLD} %s${C_RESET} %s" "$(log_date)" "${1}" "${2}" "${@:3}" >&2
   printf "\n\n(Try ${C_BOLD}%s --help${C_RESET} for more information.)\n" "$(basename "${0}")"
 }
 
@@ -99,6 +99,7 @@ configure_local_data() {
   # rm -rf /var/lib/amazon/ssm/Vault/Store/*
 
   cat > /etc/ecs/ecs.config << EOF
+  info "Configuring local data.."
 ECS_CLUSTER=${ECS_CLUSTER}
 AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
 ECS_INSTANCE_ATTRIBUTES={"sg_organization": "${ORGANIZATION_NAME}","sg_externalid": "${EXTERNAL_ID}"}
@@ -113,7 +114,6 @@ AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
 ECS_EXTERNAL=true
 EOF
 
-  info "Configured local data."
 }
 
 #######################################
@@ -126,24 +126,73 @@ EOF
 #   Writes STOUT on success.
 #######################################
 configure_local_network() {
+  info "Configuring local network.."
+
   # Create wf-steps-net docker network
-  docker network create --driver bridge "${SG_DOCKER_NETWORK}"
+  docker network create --driver bridge "${SG_DOCKER_NETWORK}" >/dev/null
   bridge_id="br-$(docker network ls -q --filter "name=${SG_DOCKER_NETWORK}")"
   iptables -I DOCKER-USER -i "${bridge_id}" -d 169.254.169.254,10.0.0.0/24 -j DROP
+  info "Docker network ${SG_DOCKER_NETWORK} created."
 
   # Set up necessary rules to enable IAM roles for tasks
-  sysctl -w net.ipv4.conf.all.route_localnet=1
+  sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null
   # sysctl -w net.ipv4.ip_forward=1
   iptables -t nat -A PREROUTING -p tcp -d 169.254.170.2 --dport 80 -j DNAT --to-destination 127.0.0.1:51679
   iptables -t nat -A OUTPUT -d 169.254.170.2 -p tcp -m tcp --dport 80 -j REDIRECT --to-ports 51679
 
-  info "Configured local network."
 }
 
 #######################################
 # Run fluentbit Docker container for logging
 # Globals:
 #
+# Arguments:
+#   AWS_ACCESS_KEY_ID
+#   AWS_SECRET_ACCESS_KEY
+# Outputs:
+#   Write to STDOUT/STERR
+#   if successfull/error.
+#######################################
+configure_fluentbit() {
+  info "Starting fluentbit.."
+  docker run -d \
+    -p 24224:24224 \
+    -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
+    -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
+    -v "$(pwd)"/fluentbit.conf:/fluent-bit/etc/fluentbit.conf \
+    fluent/fluent-bit:2.0.9 \
+    /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf >/dev/null
+
+}
+
+#######################################
+# Check if ecs.service exists
+# and if it is healthy and running.
+# Globals:
+#   None
+# Arguments:
+#   None
+# Returns:
+#   0 if ecs.service does not exists
+# Outputs:
+#   Write to STDOUT/STERR
+#   if successfull/error.
+#######################################
+# check_systemcl_ecs_status() {
+#   systemctl status ecs --no-pager >&/dev/null
+#   if [[ "$?" =~ 4|0 ]]; then
+#     return 0
+#   else
+#     info "Restarting service.ecs.."
+#     systemctl restart ecs --no-pager --wait
+#   fi
+# }
+
+#######################################
+# Check if docker.service exists
+# and if it is healthy and running.
+# Globals:
+#   None
 # Arguments:
 #   None
 # Returns:
@@ -152,16 +201,9 @@ configure_local_network() {
 #   Write to STDOUT/STERR
 #   if successfull/error.
 #######################################
-configure_fluentbit() {
-  docker run -d \
-    -p 24224:24224 \
-    -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
-    -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
-    -v "$(pwd)"/fluentbit.conf:/fluent-bit/etc/fluentbit.conf \
-    fluent/fluent-bit:2.0.9 /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf
-
-  info "Fluentbit container started."
-}
+# check_systemcl_docker_status() {
+#   return
+# }
 
 #######################################
 # Register instance to AWS ECS.
@@ -180,8 +222,6 @@ register_instance() {
   # check_sg_args
   fetch_organization_info
   configure_local_data
-  configure_local_network
-  configure_fluentbit
 
   rm /tmp/ecs* >&/dev/null
 
@@ -202,6 +242,14 @@ register_instance() {
   # Primary key fingerprint: F34C 3DDA E729 26B0 79BE  AEC6 BCE9 D9A4 2D51 784F
   #      Subkey fingerprint: D64B B6F9 0CF3 77E9 B5FB  346F 50DE CCC4 710E 61AF
 
+  # if type docker >&/dev/null; then
+  #   if ! systemctl status docker >&/dev/null; then
+  #     systemctl restart docker --wait
+  #   fi
+  # fi
+
+  # check_systemcl_ecs_status
+
   if ! /bin/bash /tmp/ecs-anywhere-install.sh \
       --region "${AWS_DEFAULT_REGION}" \
       --cluster "${ECS_CLUSTER}" \
@@ -212,6 +260,9 @@ register_instance() {
   fi
 
   info "Instance successfully registered to ECS cluster."
+
+  configure_local_network
+  configure_fluentbit
 }
 
 #######################################
@@ -226,9 +277,13 @@ register_instance() {
 #   if de-registration is sucessfull.
 #######################################
 deregister_instance() {
-  docker stop $(docker ps -q)
-  docker rm $(docker ps -aq)
-  docker network rm "${SG_DOCKER_NETWORK}"
+  info "Stopping docker containers.."
+  docker stop $(docker ps -q) >/dev/null
+  info "Removing docker containers.."
+  docker rm $(docker ps -aq) >/dev/null
+  info "Removing docker network: ${SG_DOCKER_NETWORK}.."
+  docker network rm "${SG_DOCKER_NETWORK}" >/dev/nul
+  info "Removing local configuration.."
   rm -rf /var/log/ecs /etc/ecs /var/lib/ecs
 
   ## TODO(devops@hllvc.com): Handle de-registration process.
