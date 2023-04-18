@@ -27,10 +27,11 @@ log_date() {
 err() {
   printf "%s ${C_RED_BOLD}[ERROR] ${C_RESET}%s${C_BOLD} %s${C_RESET} %s" "$(log_date)" "${1}" "${2}" "${@:3}" >&2
   printf "\n\n(Try ${C_BOLD}%s --help${C_RESET} for more information.)\n" "$(basename "${0}")"
+  cleanup
 }
 
 info() {
-  printf "%s ${C_GREEN}INFO:${C_RESET} %s\n" "$(log_date)" "${*}"
+  printf "%s ${C_GREEN}INFO:${C_RESET} %s${C_BOLD} %s${C_RESET} %s\n" "$(log_date)" "${1}" "${2}" "${@:3}"
 }
 
 show_help() {
@@ -39,8 +40,37 @@ show_help() {
   printf "\t--sg-node-token\t\tToken provided by StackGuardian platform.\n"
   printf "\t--sg-node-api-endpoint\tStackGuardian API endpoint.\n"
   printf "\n  Optional arguments:\n"
+  printf "\t--debug\t\t\tShow log output.\n"
   printf "\t--help\t\t\tShow this help menu.\n"
   exit 2
+}
+
+spinner() {
+    local pid=$1
+    local delay=0.15
+    local spinstr='|/-\'
+    if [[ "${LOG_DEBUG}" == "false" ]]; then
+      while ps a | awk '{print $1}' | grep "${pid}" >&/dev/null; do
+          local temp=${spinstr#?}
+          printf " [%c] " "$spinstr"
+          local spinstr=$temp${spinstr%"$temp"}
+          sleep $delay
+          printf "\b\b\b\b\b\b"
+      done
+    else
+      tail -n0 -f /var/log/ecs-install.log --pid "${pid}"
+    fi
+    wait "${pid}"
+    local exit_status=$?
+    if (( "${exit_status}" != 0 )); then
+      # err "Process failed with exit code status" "${exit_status}"
+      if [[ "${LOG_DEBUG}" == "true" ]]; then
+        info "Showing 10 last lines from" "/var/log/ecs/ecs-init.log"
+        tail -n10 /var/log/ecs/ecs-init.log
+      fi
+      err "Script" "ecs-anywhere-install.sh" "failed to register external instance"
+    fi
+    printf "    \b\b\b\b"
 }
 
 #######################################
@@ -129,7 +159,7 @@ configure_local_network() {
   info "Configuring local network.."
 
   # Create wf-steps-net docker network
-  docker network create --driver bridge "${SG_DOCKER_NETWORK}" >/dev/null
+  docker network create --driver bridge "${SG_DOCKER_NETWORK}" >&/dev/null
   bridge_id="br-$(docker network ls -q --filter "name=${SG_DOCKER_NETWORK}")"
   iptables -I DOCKER-USER -i "${bridge_id}" -d 169.254.169.254,10.0.0.0/24 -j DROP
   info "Docker network ${SG_DOCKER_NETWORK} created."
@@ -154,15 +184,48 @@ configure_local_network() {
 #   if successfull/error.
 #######################################
 configure_fluentbit() {
-  info "Starting fluentbit.."
-  docker run -d \
-    -p 24224:24224 \
-    -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
-    -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
-    -v "$(pwd)"/fluentbit.conf:/fluent-bit/etc/fluentbit.conf \
-    fluent/fluent-bit:2.0.9 \
-    /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf >/dev/null
+  info "Starting fluentbit agent.."
+  local running=$(docker ps -q --filter "name=fluentbit-agent")
+  local exists=$(docker ps -aq --filter "name=fluentbit-agent")
+  if [[ -z "${exists}" ]]; then
+    docker run -d \
+      --name fluentbit-agent \
+      -p 24224:24224 \
+      -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
+      -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
+      -v "$(pwd)"/fluentbit.conf:/fluent-bit/etc/fluentbit.conf \
+      fluent/fluent-bit:2.0.9 \
+      /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf >/dev/null
+    info "Registered fluentbit agent."
+  else
+    if [[ -z "${running}" ]]; then
+      docker start fluentbit-agent >&/dev/null
+      info "Started fluentbit agent."
+    else
+      info "Fluentbit agent already running."
+    fi
+  fi
 
+}
+
+#######################################
+# Check if specific service.$1 is runing.
+# If not try reload or restart.
+# Globals:
+#   None
+# Arguments:
+#   systemctl service
+# Returns:
+#   None
+# Outputs:
+#   Write to STDOUT/STDERR
+#   if successfull/error.
+#######################################
+check_systemctl_status() {
+  if ! systemctl is-active "$1" >&/dev/null; then
+    info "Reloading/Restarting service.$1.."
+    systemctl reload-or-restart "$1"
+  fi
 }
 
 #######################################
@@ -178,15 +241,14 @@ configure_fluentbit() {
 #   Write to STDOUT/STERR
 #   if successfull/error.
 #######################################
-# check_systemcl_ecs_status() {
-#   systemctl status ecs --no-pager >&/dev/null
-#   if [[ "$?" =~ 4|0 ]]; then
-#     return 0
-#   else
-#     info "Restarting service.ecs.."
-#     systemctl restart ecs --no-pager --wait
-#   fi
-# }
+check_systemcl_ecs_status() {
+  systemctl status ecs --no-pager >&/dev/null
+  if [[ "$?" =~ 4|0 ]]; then
+    return 0
+  else
+    check_systemctl_status "ecs"
+  fi
+}
 
 #######################################
 # Check if docker.service exists
@@ -201,9 +263,11 @@ configure_fluentbit() {
 #   Write to STDOUT/STERR
 #   if successfull/error.
 #######################################
-# check_systemcl_docker_status() {
-#   return
-# }
+check_systemcl_docker_status() {
+  if type docker >&/dev/null; then
+    check_systemctl_status "docker"
+  fi
+}
 
 #######################################
 # Register instance to AWS ECS.
@@ -219,6 +283,13 @@ configure_fluentbit() {
 #   if successfull/error.
 #######################################
 register_instance() {
+  local registered=$(docker ps -q --filter "name=ecs-agent")
+  if [[ -n "${registered}" ]]; then
+    info "ECS Agent already registered and running."
+    configure_local_network
+    configure_fluentbit
+    exit 0
+  fi
   # check_sg_args
   fetch_organization_info
   configure_local_data
@@ -228,10 +299,8 @@ register_instance() {
   curl -fSsL --proto "https" -o "/tmp/ecs-anywhere-install.sh" "https://amazon-ecs-agent.s3.amazonaws.com/ecs-anywhere-install-latest.sh" 2> /tmp/ecs_anywhere_download.log
 
   if (( $? != 0 )); then
-    err "Unable to download" "ecs-anywhere-install.sh" "script"
-    echo
     cat /tmp/ecs_anywhere_download.log
-    exit 1
+    err "Unable to download" "ecs-anywhere-install.sh" "script"
   fi
 
   # TODO(devops@hllvc.com): verify ecs-anywhere script integrity
@@ -242,22 +311,38 @@ register_instance() {
   # Primary key fingerprint: F34C 3DDA E729 26B0 79BE  AEC6 BCE9 D9A4 2D51 784F
   #      Subkey fingerprint: D64B B6F9 0CF3 77E9 B5FB  346F 50DE CCC4 710E 61AF
 
-  # if type docker >&/dev/null; then
-  #   if ! systemctl status docker >&/dev/null; then
-  #     systemctl restart docker --wait
-  #   fi
+  info "Trying to register instance to ECS cluster..."
+
+  check_systemcl_docker_status
+  check_systemcl_ecs_status
+
+  [[ ! -e /var/log/ecs-install.log ]] && touch /var/log/ecs-install.log
+
+  # if [[ "${LOG_DEBUG}" == "true" ]]; then
+  #   tail -q -f /var/log/ecs-install.log &
+  #   tail_pid="$!"
   # fi
 
-  # check_systemcl_ecs_status
-
-  if ! /bin/bash /tmp/ecs-anywhere-install.sh \
+  /bin/bash /tmp/ecs-anywhere-install.sh \
       --region "${AWS_DEFAULT_REGION}" \
       --cluster "${ECS_CLUSTER}" \
       --activation-id "${SSM_ACTIVATION_ID}" \
-      --activation-code "${SSM_ACTIVATION_CODE}"; then
-    err "Script" "ecs-anywhere-install.sh" "failed to register external instance"
-    exit 1
-  fi
+      --activation-code "${SSM_ACTIVATION_CODE}" \
+      >>/var/log/ecs-install.log 2>&1 &
+  spinner "$!"
+
+  # if ! /bin/bash /tmp/ecs-anywhere-install.sh \
+  #     --region "${AWS_DEFAULT_REGION}" \
+  #     --cluster "${ECS_CLUSTER}" \
+  #     --activation-id "${SSM_ACTIVATION_ID}" \
+  #     --activation-code "${SSM_ACTIVATION_CODE}" \
+  #     >>/var/log/ecs-install.log 2>&1 & spinner $!; then
+  #   err "Script" "ecs-anywhere-install.sh" "failed to register external instance"
+  #   [[ "${LOG_DEBUG}" == "true" ]] && tail -n10 /var/log/ecs/ecs-init.log
+  #   exit 1
+  # fi
+
+  # [[ -n ${tail_pid} ]] && kill "${tail_pid}"
 
   info "Instance successfully registered to ECS cluster."
 
@@ -278,11 +363,11 @@ register_instance() {
 #######################################
 deregister_instance() {
   info "Stopping docker containers.."
-  docker stop $(docker ps -q) >/dev/null
+  docker stop ecs-agent fluentbit-agent >&/dev/null
   info "Removing docker containers.."
-  docker rm $(docker ps -aq) >/dev/null
+  docker rm ecs-agent fluentbit-agent >&/dev/null
   info "Removing docker network: ${SG_DOCKER_NETWORK}.."
-  docker network rm "${SG_DOCKER_NETWORK}" >/dev/nul
+  docker network rm "${SG_DOCKER_NETWORK}" >&/dev/nul
   info "Removing local configuration.."
   rm -rf /var/log/ecs /etc/ecs /var/lib/ecs
 
@@ -291,6 +376,82 @@ deregister_instance() {
   local response
 
   response=$(curl -vLk -H "Authorization: apikey ${SG_NODE_TOKEN}" "${SG_NODE_API_ENDPOINT}"/deregister_runner)
+}
+
+#######################################
+# Print frame for doctor check.
+# Globals:
+#   None
+# Arguments:
+#   Title
+#   Contents of frame
+# Returns:
+#   None
+# Outputs:
+#   Write to STDOUT frame with contents
+#######################################
+doctor_frame() {
+  printf " + %s " "${1}"
+  printf "\n |"
+  printf "%s" "$2"
+  printf "\n |\n"
+}
+
+#######################################
+# Check if all services is working
+# Globals:
+#
+# Arguments:
+#
+# Returns:
+#
+# Outputs:
+#  Write to STDOUT list
+#  of services with status
+#######################################
+doctor() {
+  info "Generating service doctor.."
+  echo
+
+  local status_list=""
+  local containers=( "ecs" "fluentbit" )
+  for container in "${containers[@]}"; do
+    local container_status="$(docker ps \
+      --filter "name=${container}-agent" \
+      --format '{{.Status}}'\
+      )"
+    if [[ -z ${container_status} ]]; then
+      status_list="$(printf "%s\n%s" \
+        "${status_list}" \
+        "$(printf " | * ${C_BOLD}%s${C_RESET} agent: ${C_RED}Not Running${C_RESET}\n" "${container}")")"
+    else
+      status_list="$(printf "%s\n%s" \
+        "${status_list}" \
+        "$(printf " | * ${C_BOLD}%s${C_RESET} agent: ${C_GREEN}%s${C_RESET}\n" "${container}" "${container_status}")")"
+    fi
+  done
+  doctor_frame "Container Status" "${status_list}"
+
+  echo
+
+  local status_list=""
+  local service_list=( "ecs" "docker" "jenkins" )
+  for service in "${service_list[@]}"; do
+    local service_status="$(systemctl is-active "${service}")"
+    if [[ -n ${service_status} && ${service_status} == "active" ]]; then
+      status_list="$(printf "%s\n%s" \
+        "${status_list}" \
+        "$(printf " | * ${C_BOLD}%s${C_RESET} service: ${C_GREEN}%s${C_RESET}\n" "${service}" "${service_status}")")"
+    else
+      status_list="$(printf "%s\n%s" \
+        "${status_list}" \
+        "$(printf " | * ${C_BOLD}%s${C_RESET} service: ${C_RED}%s${C_RESET}\n" "${service}" "${service_status}")")"
+    fi
+  done
+  doctor_frame "System Service" "${status_list}"
+
+  echo
+  info "Service doctor finished."
 }
 
 #######################################
@@ -350,7 +511,7 @@ if ! type jq >&/dev/null; then
   err "Command" "jq" "not installed" && exit 1
 fi
 
-# [[ "${*}" =~ "--help" || $# -lt 1 ]] && show_help && exit 0
+[[ "${*}" =~ "--help" || $# -lt 1 ]] && show_help && exit 0
 
 # is_root && init_args_are_valid "$@"
 
@@ -369,6 +530,10 @@ while :; do
     SG_NODE_API_ENDPOINT="${2}"
     shift 2
     ;;
+  --debug)
+      LOG_DEBUG=true
+      shift
+    ;;
   *)
     [[ -z "${1}" ]] && break
     err "Invalid argument:" "${1}"
@@ -378,6 +543,7 @@ while :; do
 done
 readonly SG_NODE_TOKEN SG_NODE_API_ENDPOINT
 readonly SG_DOCKER_NETWORK="wf-steps-net"
+readonly LOG_DEBUG=${LOG_DEBUG:=false}
 
 case "${OPTION}" in
   register)
@@ -385,6 +551,9 @@ case "${OPTION}" in
     ;;
   deregister)
     deregister_instance
+    ;;
+  doctor)
+    doctor
     ;;
 esac
 
@@ -403,5 +572,13 @@ esac
 # TODO: API call to ping the node
 #
 }
+
+cleanup() {
+  echo "Gracefull shutdown.."
+  [[ -n ${script_pid} ]] && kill "${script_pid}" >&/dev/null
+  exit 0
+}
+
+trap cleanup SIGINT
 
 main "$@"
