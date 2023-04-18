@@ -86,26 +86,46 @@ spinner() {
 #######################################
 fetch_organization_info() {
   local response
+  local metadata
 
-  info "Fetching data..."
-  # if ! response=$(curl -fSsLk -H "Authorization: apikey ${SG_NODE_TOKEN}" "${SG_NODE_API_ENDPOINT}"/register_runner); then
+  # info "Fetching data..."
+  # if ! response=$(curl -fSsLk -H "Authorization: apikey ${SG_NODE_TOKEN}" "${SG_NODE_API_ENDPOINT}/orgs/${ORGANIZATION_ID}/runnergroups/${RESOURCE_ID}/register/"); then
   #   err "Could not fetch data from API"
   #   exit 1
   # fi
 
   response=$(cat data.json)
 
-  ## API response values
-  ECS_CLUSTER="${ECS_CLUSTER:=$(echo "${response}" | jq -r '.data.ECSCluster')}"
-  AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:=$(echo "${response}" | jq -r '.data.AWSDefaultRegion')}"
-  SSM_ACTIVATION_ID="${SSM_ACTIVATION_ID:=$(echo "${response}" | jq -r '.data.SSMActivationId')}"
-  SSM_ACTIVATION_CODE="${SSM_ACTIVATION_CODE:=$(echo "${response}" | jq -r '.data.SSMActivationCode')}"
+  ## API response values (Registration Metadata)
+  metadata="$(echo "${response}" | jq -r '.data.RegistrationMetadata[0]')"
+  ECS_CLUSTER="${ECS_CLUSTER:=$(echo "${metadata}" | jq -r '.ECSCluster')}"
+  AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:=$(echo "${metadata}" | jq -r '.AWSDefaultRegion')}"
+  SSM_ACTIVATION_ID="${SSM_ACTIVATION_ID:=$(echo "${metadata}" | jq -r '.SSMActivationId')}"
+  SSM_ACTIVATION_CODE="${SSM_ACTIVATION_CODE:=$(echo "${metadata}" | jq -r '.SSMActivationCode')}"
+
+  if [[ "${LOG_DEBUG}" == "true" ]]; then
+    echo "ECS_CLUSTER: ${ECS_CLUSTER}"
+    echo "AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}"
+    echo "SSMActivationId: ${SSM_ACTIVATION_ID}"
+    echo "SSM_ACTIVATION_CODE: ${SSM_ACTIVATION_CODE}"
+  fi
+
+  ## Everything else
   ORGANIZATION_NAME="${ORGANIZATION_NAME:=$(echo "${response}" | jq -r '.data.OrgName')}"
   ORGANIZATION_ID="${ORGANIZATION_ID:=$(echo "${response}" | jq -r '.data.OrgId')}"
-  EXTERNAL_ID="${EXTERNAL_ID:=$(echo "${response}" | jq -r '.data.ExternalId')}"
-  RESOURCE_ID="${RESOURCE_ID:=$(echo "${response}" | jq -r '.data.ResourceId')}"
+  EXTERNAL_ID="${EXTERNAL_ID:=$(echo "${response}" | jq -r '.data.RunnerId')}"
+  RESOURCE_ID="${RESOURCE_ID:=$(echo "${response}" | jq -r '.data.RunnerGroupId')}"
   AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:=$(echo "${response}" | jq -r '.data.AWSAccessKeyId')}"
   AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:=$(echo "${response}" | jq -r '.data.AWSSecretAccessKey')}"
+
+  if [[ "${LOG_DEBUG}" == "true" ]]; then
+    echo "ORGANIZATION_NAME: ${ORGANIZATION_NAME}"
+    echo "ORGANIZATION_ID: ${ORGANIZATION_ID}"
+    echo "EXTERNAL_ID: ${EXTERNAL_ID}"
+    echo "RESOURCE_ID: ${RESOURCE_ID}"
+    echo "AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}"
+    echo "AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}"
+  fi
 
 }
 
@@ -540,6 +560,16 @@ while :; do
     SG_NODE_API_ENDPOINT="${2}"
     shift 2
     ;;
+  --organization)
+    check_arg_value "${1}" "${2}"
+    ORGANIZATION_NAME="${2}"
+    shift 2
+    ;;
+  --runner-group)
+    check_arg_value "${1}" "${2}"
+    RESOURCE_ID="${2}"
+    shift 2
+    ;;
   --debug)
       LOG_DEBUG=true
       shift
@@ -552,6 +582,7 @@ while :; do
   esac
 done
 readonly SG_NODE_TOKEN SG_NODE_API_ENDPOINT
+# readonly SG_NODE_TOKEN SG_NODE_API_ENDPOINT ORGANIZATION_ID RESOURCE_ID
 readonly SG_DOCKER_NETWORK="wf-steps-net"
 readonly LOG_DEBUG=${LOG_DEBUG:=false}
 

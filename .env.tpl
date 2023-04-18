@@ -1,0 +1,7 @@
+ORGANIZATION_ID=demo-org
+RUNNER_GROUP_ID=
+SG_NODE_TOKEN=
+SG_NODE_API_ENDPOINT=https://testapi.qa.stackguardian.io/api/v1/
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+
