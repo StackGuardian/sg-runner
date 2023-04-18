@@ -394,7 +394,8 @@ doctor_frame() {
   printf " + %s " "${1}"
   printf "\n |"
   printf "%s" "$2"
-  printf "\n |\n"
+  # printf "\n |\n"
+  printf "\n"
 }
 
 #######################################
@@ -414,7 +415,34 @@ doctor() {
   echo
 
   local status_list=""
+  local service_status
+  local service_list=( "ecs" "docker" )
+
+  for service in "${service_list[@]}"; do
+    service_status="$(systemctl is-active "${service}")"
+    if [[ -n ${service_status} && ${service_status} == "active" ]]; then
+      status_list="$(printf "%s\n%s" \
+        "${status_list}" \
+        "$(printf " | * ${C_BOLD}%s${C_RESET} service: ${C_GREEN}%s${C_RESET}\n" "${service}" "${service_status}")")"
+    else
+      status_list="$(printf "%s\n%s" \
+        "${status_list}" \
+        "$(printf " | * ${C_BOLD}%s${C_RESET} service: ${C_RED}%s${C_RESET}\n" "${service}" "${service_status}")")"
+    fi
+  done
+  doctor_frame "System Service" "${status_list}"
+
+  echo
+
+  service_status="$(systemctl is-active docker)"
+  if [[ "${service_status}" != "active" ]]; then
+    printf " + Container Status (${C_BOLD}docker ${C_RESET}service: ${C_RED}%s${C_RESET})\n\n" "${service_status}"
+    return
+  fi
+
+  status_list=""
   local containers=( "ecs" "fluentbit" )
+
   for container in "${containers[@]}"; do
     local container_status="$(docker ps \
       --filter "name=${container}-agent" \
@@ -431,24 +459,6 @@ doctor() {
     fi
   done
   doctor_frame "Container Status" "${status_list}"
-
-  echo
-
-  local status_list=""
-  local service_list=( "ecs" "docker" "jenkins" )
-  for service in "${service_list[@]}"; do
-    local service_status="$(systemctl is-active "${service}")"
-    if [[ -n ${service_status} && ${service_status} == "active" ]]; then
-      status_list="$(printf "%s\n%s" \
-        "${status_list}" \
-        "$(printf " | * ${C_BOLD}%s${C_RESET} service: ${C_GREEN}%s${C_RESET}\n" "${service}" "${service_status}")")"
-    else
-      status_list="$(printf "%s\n%s" \
-        "${status_list}" \
-        "$(printf " | * ${C_BOLD}%s${C_RESET} service: ${C_RED}%s${C_RESET}\n" "${service}" "${service_status}")")"
-    fi
-  done
-  doctor_frame "System Service" "${status_list}"
 
   echo
   info "Service doctor finished."
