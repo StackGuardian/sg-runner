@@ -67,9 +67,7 @@ spinner() {
       tail -n0 -f "${log_file}" --pid "${spinner_pid}"
     fi
     wait "${spinner_pid}"
-    local exit_status=$?
     printf "    \b\b\b\b"
-    return $exit_status
 }
 
 #######################################
@@ -107,6 +105,9 @@ fetch_organization_info() {
   else
     info "Registration data fetched. Preparing environment.."
   fi
+
+  debug "Response:"
+  echo "${response}" | jq
 
   # response=$(cat data.json)
 
@@ -332,7 +333,9 @@ register_instance() {
 
   . .env
 
-  registered=$(docker ps -q --filter "name=ecs-agent")
+  registered=$(docker ps -q --filter "name=ecs-agent" --format '{{.Status}}')
+
+  debug "Instance ecs-agent status:" "${registered}"
 
   if [[ -n "${registered}" ]]; then
     info "ECS Agent already registered and running."
@@ -436,6 +439,10 @@ deregister_instance() {
 
   [[ ${LOG_DEBUG} == "true" ]] && debug "Payload:" "${payload}"
 
+  ## Uncommend below to include API call for deregistration
+  ## This API endpoint for deregistering is not working
+  ## I hope I am not missing something
+  #
   # if ! reponse=$(curl -fSsLk \
   #   -X POST \
   #   -H "Authorization: apikey ${SG_NODE_TOKEN}" \
