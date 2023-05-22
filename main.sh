@@ -39,14 +39,17 @@ debug() {
 }
 
 show_help() {
-  printf "\nsudo ${C_BOLD}%s${C_RESET} [register deregister] arguments..\n" "$(basename "${0}")"
-  printf "\n  Required arguments:\n"
-  printf "\t--sg-node-token\t\tToken provided by StackGuardian platform.\n"
-  printf "\t--organization\tOrganization on Stackguardian with Runner Group.\n"
-  printf "\t--runner-group\tRunner Group inside organization.\n"
-  printf "\n  Optional arguments:\n"
-  printf "\t--debug\t\t\tShow log output.\n"
-  printf "\t--help\t\t\tShow this help menu.\n"
+  printf "\nsudo ${C_BOLD}%s${C_RESET} [register deregister doctor] arguments..\n" "$(basename "${0}")"
+  printf "\nRequired arguments:\n"
+  printf "  --sg-node-token '':"
+  printf "\n\tToken provided by StackGuardian platform.\n\n"
+  printf "  --organization '':"
+  printf "\n\tOrganization on Stackguardian with Runner Group.\n\n"
+  printf "  --runner-group '':"
+  printf "\n\tRunner Group inside organization.\n"
+  printf "Optional arguments:\n"
+  printf "  --debug\t\t\tShow log output.\n"
+  printf "  --help\t\t\tShow this help menu.\n"
   exit 2
 }
 
@@ -87,29 +90,29 @@ fetch_organization_info() {
   local metadata
   local url
 
-  . .env
+  [[ -e .env ]] && . .env
 
-  info "Trying to fetch registration data.."
+  #info "Trying to fetch registration data.."
 
-  url="${SG_NODE_API_ENDPOINT}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/register/"
+  #url="${SG_NODE_API_ENDPOINT}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/register/"
 
-  [[ ${LOG_DEBUG} == "true" ]] && debug "Calling URL:" "${url}"
+  #[[ ${LOG_DEBUG} == "true" ]] && debug "Calling URL:" "${url}"
 
-  if ! response=$(curl -fSsLk \
-    -X POST \
-    -H "Authorization: apikey ${SG_NODE_TOKEN}" \
-    -H "Content-Type: application/json" \
-    "${url}"); then
-    # printf "Response: %s" "${response}" | jq
-    err "Could not fetch data from API."
-  else
-    info "Registration data fetched. Preparing environment.."
-  fi
+  #if ! response=$(curl -fSsLk \
+  #  -X POST \
+  #  -H "Authorization: apikey ${SG_NODE_TOKEN}" \
+  #  -H "Content-Type: application/json" \
+  #  "${url}"); then
+  #  # printf "Response: %s" "${response}" | jq
+  #  err "Could not fetch data from API."
+  #else
+  #  info "Registration data fetched. Preparing environment.."
+  #fi
 
-  debug "Response:"
-  echo "${response}" | jq
+  response=$(cat data.json)
 
-  # response=$(cat data.json)
+  [[ "${LOG_DEBUG}" == "true" ]] && debug "Response:" \
+    && echo "${response}" | jq
 
   ## API response values (Registration Metadata)
   metadata="$(echo "${response}" | jq -r '.data.RegistrationMetadata[0]')"
@@ -134,7 +137,7 @@ fetch_organization_info() {
   ORGANIZATION_ID="${ORGANIZATION_ID:=$(echo "${response}" | jq -r '.data.OrgId')}"
   RUNNER_ID="${RUNNER_ID:=$(echo "${response}" | jq -r '.data.RunnerId')}"
   RUNNER_GROUP_ID="${RUNNER_GROUP_ID:=$(echo "${response}" | jq -r '.data.RunnerGroupId')}"
-  TAGS="${TAGS:=$(echo "${response}" | jq -r '.data.tags')}"
+  TAGS="${TAGS:=$(echo "${response}" | jq -r '.data.Tags')}"
 
   if [[ "${LOG_DEBUG}" == "true" ]]; then
     debug "ORGANIZATION_NAME:" "${ORGANIZATION_NAME}"
@@ -172,7 +175,7 @@ configure_local_data() {
   cat > /etc/ecs/ecs.config << EOF
 ECS_CLUSTER=${ECS_CLUSTER}
 AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
-ECS_INSTANCE_ATTRIBUTES={"sg_organization": "${ORGANIZATION_NAME}","sg_runner_id": "${RUNNER_ID}", "sg_runner_group_id": "${RUNNER_GROUP_ID}", "tags": ${TAGS}}
+ECS_INSTANCE_ATTRIBUTES={"sg_organization": "${ORGANIZATION_NAME}","sg_runner_id": "${RUNNER_ID}", "sg_runner_group_id": "${RUNNER_GROUP_ID}", "tags": "${TAGS}"}
 ECS_LOGLEVEL=/log/ecs-agent.log
 ECS_DATADIR=/data/
 ECS_ENABLE_TASK_IAM_ROLE=true
@@ -184,7 +187,7 @@ AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
 ECS_EXTERNAL=true
 EOF
 
-  info "Local data conifgured."
+  info "Local data configured."
 
 }
 
@@ -331,11 +334,11 @@ check_systemcl_docker_status() {
 register_instance() {
   local registered
 
-  . .env
+  [[ -e .env ]] && . .env
 
-  registered=$(docker ps -q --filter "name=ecs-agent" --format '{{.Status}}')
+  registered=$(docker ps -q --filter "name=ecs-agent")
 
-  debug "Instance ecs-agent status:" "${registered}"
+  [[ "${LOG_DEBUG}" == "true" && -n "$registered" ]] && debug "Instance ecs-agent status:" "${registered}"
 
   if [[ -n "${registered}" ]]; then
     info "ECS Agent already registered and running."
@@ -397,9 +400,14 @@ register_instance() {
       --activation-code "${SSM_ACTIVATION_CODE}" \
       >>/var/log/ecs-install.log 2>&1 &
   spinner "$!" "/var/log/ecs-install.log"; then
-    err "Script" "ecs-anywhere-install.sh" "failed to register external instance."
+    container_status="$(docker ps -a --filter='name=ecs-agent' --format '{{.Status}}')"
+    if [[ "$?" != 0 || "$container_status" =~ Exited ]]; then
+      err "Script" "ecs-anywhere-install.sh" "failed to register external instance."
+    else
+      info "Instance successfully registered to ECS cluster."
+    fi
   else
-    info "Instance successfully registered to ECS cluster."
+    err "Script" "ecs-anywhere-install.sh" "failed to register external instance."
   fi
 
   configure_local_network
@@ -421,7 +429,7 @@ deregister_instance() {
   local response
   local url
 
-  . .env
+  [[ -e .env ]] && . .env
 
   if [[ -e /etc/ecs/ecs.config ]]; then
     RUNNER_ID="$(grep ECS_INSTANCE_ATTRIBUTES /etc/ecs/ecs.config \
@@ -588,8 +596,8 @@ is_root() {
 init_args_are_valid() {
   if [[ ! "$1" =~ register|deregister|doctor ]]; then
     err "Provided option" "${1}" "is invalid"
-  elif (( $# != 7 )); then
-    err "Arguments:" "--sg-node-token, --organization, --runner-group" "are required"
+  # elif (( $# != 7 )); then
+  #   err "Arguments:" "--sg-node-token, --organization, --runner-group" "are required"
   fi
   return 0
 }
@@ -610,7 +618,7 @@ fi
 [[ "${*}" =~ "--help" || $# -lt 1 ]] && show_help && exit 0
 
 ## commented for easier testing purposes
-# is_root && init_args_are_valid "$@"
+is_root && init_args_are_valid "$@"
 
 OPTION="${1}"
 shift
