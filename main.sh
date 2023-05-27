@@ -138,6 +138,8 @@ fetch_organization_info() {
   RUNNER_ID="${RUNNER_ID:=$(echo "${response}" | jq -r '.data.RunnerId')}"
   RUNNER_GROUP_ID="${RUNNER_GROUP_ID:=$(echo "${response}" | jq -r '.data.RunnerGroupId')}"
   TAGS="${TAGS:=$(echo "${response}" | jq -r '.data.Tags')}"
+  STORAGE_ACCOUNT_NAME="${STORAGE_ACCOUNT_NAME:=$(echo "${response}" | jq -r '.data.StorageAccountName')}"
+  SHARED_KEY="${SHARED_KEY:=$(echo "${response}" | jq -r '.data.SharedKey')}"
 
   if [[ "${LOG_DEBUG}" == "true" ]]; then
     debug "ORGANIZATION_NAME:" "${ORGANIZATION_NAME}"
@@ -166,7 +168,7 @@ fetch_organization_info() {
 #######################################
 configure_local_data() {
   # Set up directories the agent uses
-  mkdir -p /var/log/ecs /etc/ecs /var/lib/ecs/data
+  mkdir -p /var/log/ecs /etc/ecs /var/lib/ecs/data /etc/fluentbit/
   rm -rf /etc/ecs/ecs.config /var/lib/ecs/ecs.config > /dev/null
   # rm -rf /var/lib/amazon/ssm/Vault/Store/*
 
@@ -186,6 +188,27 @@ EOF
 AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
 ECS_EXTERNAL=true
 EOF
+
+  cat > ./fluent-bit.conf << EOF
+[SERVICE]
+    Flush         1
+    Log_Level     info
+[INPUT]
+    Name forward
+    Listen 0.0.0.0
+    port 24224
+[OUTPUT]
+    Name  azure_blob
+    Match  *
+    account_name ${STORAGE_ACCOUNT_NAME}
+    shared_key ${SHARED_KEY}
+    path sg-orchestrator-workspaces
+    container_name logs
+    auto_create_container on
+    tls on
+EOF
+  chmod 777 ./fluent-bit.conf
+  chown azureuser:azureuser ./fluent-bit.conf
 
   info "Local data configured."
 
@@ -236,12 +259,13 @@ configure_fluentbit() {
   local running=$(docker ps -q --filter "name=fluentbit-agent")
   local exists=$(docker ps -aq --filter "name=fluentbit-agent")
   if [[ -z "${exists}" ]]; then
+    #docker build -t fluent-bit -f Dockerfile.fluentbit .
+    #docker run -d --name fluentbit-agent -p 24224:24224 fluent-bit 
     docker run -d \
       --name fluentbit-agent \
       -p 24224:24224 \
-      -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
-      -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
-      -v "$(pwd)"/fluentbit.conf:/fluent-bit/etc/fluentbit.conf \
+      -v "$(pwd)"/fluent-bit.conf:/fluent-bit/etc/fluentbit.conf \
+      --log-driver=fluentd \
       fluent/fluent-bit:2.0.9 \
       /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf >/dev/null
     info "Registered fluentbit agent."
@@ -472,7 +496,7 @@ deregister_instance() {
   info "Removing docker network: ${SG_DOCKER_NETWORK}.."
   docker network rm "${SG_DOCKER_NETWORK}" >&/dev/nul
   info "Removing local configuration.."
-  rm -rf /var/log/ecs /etc/ecs /var/lib/ecs
+  rm -rf /var/log/ecs /etc/ecs /var/lib/ecs ./fluent-bit.conf
 
   info "Local data removed."
 }
@@ -679,3 +703,4 @@ cleanup() {
 trap cleanup SIGINT
 
 main "$@"
+
