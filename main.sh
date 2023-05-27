@@ -189,6 +189,7 @@ AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
 ECS_EXTERNAL=true
 EOF
 
+#Configuring fluent-bit configuration for the blob storage. 
   cat > ./fluent-bit.conf << EOF
 [SERVICE]
     Flush         1
@@ -197,18 +198,52 @@ EOF
     Name forward
     Listen 0.0.0.0
     port 24224
+[INPUT]
+    Name tail
+    Tag ecsagent
+    path /var/lib/docker/containers/*/*-json.log
+    DB /var/log/flb_docker.db
+    Mem_Buf_Limit 50MB
 [OUTPUT]
     Name  azure_blob
-    Match  *
+    Match  adminjob
     account_name ${STORAGE_ACCOUNT_NAME}
-    shared_key ${SHARED_KEY}
-    path sg-orchestrator-workspaces
-    container_name logs
+    shared_key ${SHARED_KEY} 
+    path adminjob
+    container_name sgprivaterunner
+    auto_create_container on
+    tls on
+
+[OUTPUT]
+    Name  azure_blob
+    Match  userjob
+    account_name ${STORAGE_ACCOUNT_NAME}
+    shared_key ${SHARED_KEY} 
+    path userjob
+    container_name sgprivaterunner
+    auto_create_container on
+    tls on
+
+[OUTPUT]
+    Name  azure_blob
+    Match  logging
+    account_name ${STORAGE_ACCOUNT_NAME}
+    shared_key ${SHARED_KEY} 
+    path logging
+    container_name sgprivaterunner
+    auto_create_container on
+    tls on
+
+[OUTPUT]
+    Name  azure_blob
+    Match  ecsagent
+    account_name ${STORAGE_ACCOUNT_NAME}
+    shared_key ${SHARED_KEY} 
+    path  ecsagent 
+    container_name sgprivaterunner
     auto_create_container on
     tls on
 EOF
-  chmod 777 ./fluent-bit.conf
-  chown azureuser:azureuser ./fluent-bit.conf
 
   info "Local data configured."
 
@@ -264,8 +299,11 @@ configure_fluentbit() {
     docker run -d \
       --name fluentbit-agent \
       -p 24224:24224 \
+      -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
+      -v ./volumes/db-state/:/var/log/ \
       -v "$(pwd)"/fluent-bit.conf:/fluent-bit/etc/fluentbit.conf \
       --log-driver=fluentd \
+      --log-opt tag=logging \
       fluent/fluent-bit:2.0.9 \
       /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf >/dev/null
     info "Registered fluentbit agent."
@@ -503,7 +541,7 @@ deregister_instance() {
   info "Removing docker network: ${SG_DOCKER_NETWORK}.."
   docker network rm "${SG_DOCKER_NETWORK}" >&/dev/nul
   info "Removing local configuration.."
-  rm -rf /var/log/ecs /etc/ecs /var/lib/ecs ./fluent-bit.conf
+  rm -rf /var/log/ecs /etc/ecs /var/lib/ecs ./fluent-bit.conf volumes/
 
   info "Local data removed."
 }
@@ -710,4 +748,3 @@ cleanup() {
 trap cleanup SIGINT
 
 main "$@"
-
