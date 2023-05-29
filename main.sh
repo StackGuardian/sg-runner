@@ -120,8 +120,8 @@ fetch_organization_info() {
   AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:=$(echo "${metadata}" | jq -r '.AWSDefaultRegion')}"
   SSM_ACTIVATION_ID="${SSM_ACTIVATION_ID:=$(echo "${metadata}" | jq -r '.SSMActivationId')}"
   SSM_ACTIVATION_CODE="${SSM_ACTIVATION_CODE:=$(echo "${metadata}" | jq -r '.SSMActivationCode')}"
-  AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:=$(echo "${metadata}" | jq -r '.AWSAccessKeyId')}"
-  AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:=$(echo "${metadata}" | jq -r '.AWSSecretAccessKey')}"
+  AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:=$(echo "${metadata}" | jq -r '.RunnerGroup.StorageBackendConfig.auth.config[].awsAccessKeyId')}"
+  AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:=$(echo "${metadata}" | jq -r '.RunnerGroup.StorageBackendConfig.auth.config[].AWSSecretAccessKey')}"
 
   if [[ "${LOG_DEBUG}" == "true" ]]; then
     debug "ECS_CLUSTER:" "${ECS_CLUSTER}"
@@ -138,8 +138,16 @@ fetch_organization_info() {
   RUNNER_ID="${RUNNER_ID:=$(echo "${response}" | jq -r '.data.RunnerId')}"
   RUNNER_GROUP_ID="${RUNNER_GROUP_ID:=$(echo "${response}" | jq -r '.data.RunnerGroupId')}"
   TAGS="${TAGS:=$(echo "${response}" | jq -r '.data.Tags')}"
-  STORAGE_ACCOUNT_NAME="${STORAGE_ACCOUNT_NAME:=$(echo "${response}" | jq -r '.data.StorageAccountName')}"
-  SHARED_KEY="${SHARED_KEY:=$(echo "${response}" | jq -r '.data.SharedKey')}"
+  STORAGE_ACCOUNT_NAME="${STORAGE_ACCOUNT_NAME:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.storageAccountName')}"
+  SHARED_KEY="${SHARED_KEY=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.sharedKey')}"
+  STORAGE_BACKEND_TYPE="${STORAGE_BACKEND_TYPE:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.type')}"
+  S3_ROLE_ARN="${S3_ROLE_ARN:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.roleARN')}"
+  S3_BUCKET_NAME="${S3_BUCKET_NAME:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.s3BucketName')}"
+  S3_AWS_REGION="${S3_AWS_REGION:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.awsRegion')}"
+  S3_AWS_ACCESS_KEY_ID="${S3_AWS_ACCESS_KEY_ID:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].awsAccessKeyId')}"
+  S3_AWS_SECRET_ACCESS_KEY="${S3_AWS_SECRET_ACCESS_KEY:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].awsSecretAccessKey')}"
+
+
 
   if [[ "${LOG_DEBUG}" == "true" ]]; then
     debug "ORGANIZATION_NAME:" "${ORGANIZATION_NAME}"
@@ -147,8 +155,15 @@ fetch_organization_info() {
     debug "RUNNER_ID:" "${RUNNER_ID}"
     debug "RUNNER_GROUP_ID:" "${RUNNER_GROUP_ID}"
     debug "TAGS:" "${TAGS}"
+    debug "SHARED_KEY:" "${SHARED_KEY}"
+    debug "STORAGE_ACCOUNT_NAME:" "${STORAGE_ACCOUNT_NAME}"
+    debug "STORAGE_BACKEND_TYPE:" "${STORAGE_BACKEND_TYPE}"
+    debug "ROLE_ARN:" "${S3_ROLE_ARN}"
+    debug "S3_BUCKET_NAME:" "${S3_BUCKET_NAME}"
+    debug "S3_AWS_REGION:" "${S3_AWS_REGION}"
+    debug "S3_AWS_ACCESS_KEY_ID:" "${S3_AWS_ACCESS_KEY_ID}"
+    debug "S3_AWS_SECRET_ACCESS_KEY:" "${S3_AWS_SECRET_ACCESS_KEY}"
   fi
-
   info "Environment ready."
 
 }
@@ -189,7 +204,8 @@ AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
 ECS_EXTERNAL=true
 EOF
 
-#Configuring fluent-bit configuration for the blob storage. 
+#Fluentbit configuration for aws_s3 output
+if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob" ]]; then 
   cat > ./fluent-bit.conf << EOF
 [SERVICE]
     Flush         1
@@ -244,6 +260,85 @@ EOF
     auto_create_container on
     tls on
 EOF
+fi
+
+#Fluentbit configuration for aws_s3 output
+if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then 
+  cat > ./fluent-bit.conf << EOF
+[SERVICE]
+    Flush         1
+    Log_Level     info
+    Buffer_Chunk_size 1M 
+    Buffer_Max_Size 6M
+
+[INPUT]
+    Name forward
+    Listen 0.0.0.0
+    port 24224
+
+[INPUT]
+    Name tail
+    Tag ecsagent
+    path /var/lib/docker/containers/*/*-json.log
+    DB /var/log/flb_docker.db
+    Mem_Buf_Limit 50MB
+
+[OUTPUT]
+    Name s3
+    Match ecsagent
+    region              ${S3_AWS_REGION}
+    upload_timeout      10m
+    total_file_size     100M
+    use_put_object  On
+    compression gzip
+    bucket              ${S3_BUCKET_NAME}
+    role_arn            ${S3_ROLE_ARN}
+    s3_key_format       /\$TAG/\$TAG
+
+[OUTPUT]
+    Name s3
+    Match adminjob
+    region              ${S3_AWS_REGION}
+    upload_timeout      10m
+    total_file_size     100M
+    use_put_object  On
+    compression gzip
+    bucket              ${S3_BUCKET_NAME}
+    role_arn            ${S3_ROLE_ARN}
+    s3_key_format       /\$TAG/\$TAG
+
+[OUTPUT]
+    Name s3
+    Match userjob
+    region              ${S3_AWS_REGION}
+    upload_timeout      10m
+    total_file_size     100M
+    use_put_object  On
+    compression gzip
+    bucket              ${S3_BUCKET_NAME}
+    role_arn            ${S3_ROLE_ARN}
+    s3_key_format       /\$TAG/\$TAG
+
+[OUTPUT]
+    Name s3
+    Match logging
+    region              ${S3_AWS_REGION}
+    upload_timeout      10m
+    total_file_size     100M
+    use_put_object  On
+    compression gzip
+    bucket              ${S3_BUCKET_NAME}
+    role_arn            ${S3_ROLE_ARN}
+    s3_key_format       /\$TAG/\$TAG
+EOF
+  cat > ./aws-credentials << EOF
+[default]
+region = ${S3_AWS_REGION}
+aws_access_key_id = ${S3_AWS_ACCESS_KEY_ID}
+aws_secret_access_key = ${S3_AWS_SECRET_ACCESS_KEY}
+EOF
+
+fi
 
   info "Local data configured."
 
@@ -288,14 +383,16 @@ configure_local_network() {
 #   Write to STDOUT/STERR
 #   if successfull/error.
 #######################################
+# This portion checks whether the STORAGE_BACKEND_TYPE is 
+# aws_s3 or azure_blob and runs the container accordingly. 
+########################################
 configure_fluentbit() {
   info "Starting fluentbit agent.."
 
   local running=$(docker ps -q --filter "name=fluentbit-agent")
   local exists=$(docker ps -aq --filter "name=fluentbit-agent")
   if [[ -z "${exists}" ]]; then
-    #docker build -t fluent-bit -f Dockerfile.fluentbit .
-    #docker run -d --name fluentbit-agent -p 24224:24224 fluent-bit 
+    if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob" ]]; then
     docker run -d \
       --name fluentbit-agent \
       -p 24224:24224 \
@@ -306,8 +403,22 @@ configure_fluentbit() {
       --log-opt tag=logging \
       fluent/fluent-bit:2.0.9 \
       /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf >/dev/null
+    fi
+    if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
+    docker run -d \
+      --name fluentbit-agent \
+      -p 24224:24224 \
+      -v "$(pwd)"/aws-credentials:/root/.aws/credentials \
+      -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
+      -v ./volumes/db-state/:/var/log/ \
+      -v "$(pwd)"/fluent-bit.conf:/fluent-bit/etc/fluentbit.conf \
+      --log-driver=fluentd \
+      --log-opt tag=logging \
+      fluent/fluent-bit:2.0.9 \
+      /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf >/dev/null
+    fi
     info "Registered fluentbit agent."
-  else
+   else
     if [[ -z "${running}" ]]; then
       docker start fluentbit-agent >&/dev/null
       info "Started fluentbit agent."
@@ -315,7 +426,6 @@ configure_fluentbit() {
       info "Fluentbit agent already running."
     fi
   fi
-
 }
 
 #######################################
@@ -534,7 +644,7 @@ deregister_instance() {
   info "Removing docker network: ${SG_DOCKER_NETWORK}.."
   docker network rm "${SG_DOCKER_NETWORK}" >&/dev/nul
   info "Removing local configuration.."
-  rm -rf /var/log/ecs /etc/ecs /var/lib/ecs ./fluent-bit.conf volumes/
+  rm -rf /var/log/ecs /etc/ecs /var/lib/ecs ./fluent-bit.conf volumes/ ./aws-credentials
 
   info "Local data removed."
 }
