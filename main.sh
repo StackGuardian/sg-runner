@@ -309,7 +309,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     Name s3
     Match ecsagent
     region              ${S3_AWS_REGION}
-    upload_timeout      10m
+    upload_timeout      5h
     total_file_size     100M
     use_put_object  On
     compression gzip
@@ -321,7 +321,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     Name s3
     Match adminjob
     region              ${S3_AWS_REGION}
-    upload_timeout      10m
+    upload_timeout      5h
     total_file_size     100M
     use_put_object  On
     compression gzip
@@ -333,7 +333,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     Name s3
     Match userjob
     region              ${S3_AWS_REGION}
-    upload_timeout      10m
+    upload_timeout      5h
     total_file_size     100M
     use_put_object  On
     compression gzip
@@ -345,7 +345,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     Name s3
     Match logging
     region              ${S3_AWS_REGION}
-    upload_timeout      10m
+    upload_timeout      5h
     total_file_size     100M
     use_put_object  On
     compression gzip
