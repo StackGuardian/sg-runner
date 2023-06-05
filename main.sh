@@ -117,21 +117,21 @@ fetch_organization_info() {
   #info "Trying to fetch registration data.."
 
   #url="${SG_NODE_API_ENDPOINT}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/register/"
-
+  url="https://testapi.qa.stackguardian.io/api/v1/orgs/demo-org/runnergroups/test-rg-505/register/"
   #[[ ${LOG_DEBUG} == "true" ]] && debug "Calling URL:" "${url}"
 
-  #if ! response=$(curl -fSsLk \
-  #  -X POST \
-  #  -H "Authorization: apikey ${SG_NODE_TOKEN}" \
-  #  -H "Content-Type: application/json" \
-  #  "${url}"); then
-  #  # printf "Response: %s" "${response}" | jq
-  #  err "Could not fetch data from API."
-  #else
-  #  info "Registration data fetched. Preparing environment.."
-  #fi
+  if ! response=$(curl -fSsLk \
+    -X POST \
+    -H "Authorization: apikey ${SG_NODE_TOKEN}" \
+    -H "Content-Type: application/json" \
+    "${url}"); then
+    # printf "Response: %s" "${response}" | jq
+    err "Could not fetch data from API."
+  else
+    info "Registration data fetched. Preparing environment.."
+  fi
 
-  response=$(cat data.json)
+  #response=$(cat data.json)
 
   [[ "${LOG_DEBUG}" == "true" ]] && debug "Response:" \
     && echo "${response}" | jq
@@ -214,7 +214,7 @@ configure_local_data() {
   cat > /etc/ecs/ecs.config << EOF
 ECS_CLUSTER=${ECS_CLUSTER}
 AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
-ECS_INSTANCE_ATTRIBUTES={"sg_organization": "${ORGANIZATION_NAME}","sg_runner_id": "${RUNNER_ID}", "sg_runner_group_id": "${RUNNER_GROUP_ID}", "tags": "${TAGS}"}
+ECS_INSTANCE_ATTRIBUTES={"sg_organization": "${ORGANIZATION_NAME}","sg_runner_id": "${RUNNER_ID}", "sg_runner_group_id": "${RUNNER_GROUP_ID}", "tags": "private1"}
 ECS_LOGLEVEL=/log/ecs-agent.log
 ECS_DATADIR=/data/
 ECS_ENABLE_TASK_IAM_ROLE=true
@@ -307,51 +307,38 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
 
 [OUTPUT]
     Name s3
+    region              ${S3_AWS_REGION}
+    upload_timeout      5s
+    total_file_size     1M
+    use_put_object  On
+    compression gzip
+    bucket              ${S3_BUCKET_NAME}
+    role_arn            ${S3_ROLE_ARN}
+    s3_key_format /\$TAG/logs/log
+
+[OUTPUT]
+    Name s3
+    Match fluentbit
+    region              ${S3_AWS_REGION}
+    upload_timeout      5s
+    total_file_size     1M  
+    use_put_object  On
+    compression gzip
+    bucket              ${S3_BUCKET_NAME}
+    role_arn            ${S3_ROLE_ARN}
+    s3_key_format /system/\$TAG
+
+[OUTPUT]
+    Name s3
     Match ecsagent
     region              ${S3_AWS_REGION}
-    upload_timeout      5h
-    total_file_size     100M
+    upload_timeout      5s
+    total_file_size     1M
     use_put_object  On
     compression gzip
     bucket              ${S3_BUCKET_NAME}
     role_arn            ${S3_ROLE_ARN}
-    s3_key_format       /\$TAG/\$TAG
-
-[OUTPUT]
-    Name s3
-    Match adminjob
-    region              ${S3_AWS_REGION}
-    upload_timeout      5h
-    total_file_size     100M
-    use_put_object  On
-    compression gzip
-    bucket              ${S3_BUCKET_NAME}
-    role_arn            ${S3_ROLE_ARN}
-    s3_key_format       /\$TAG/\$TAG
-
-[OUTPUT]
-    Name s3
-    Match userjob
-    region              ${S3_AWS_REGION}
-    upload_timeout      5h
-    total_file_size     100M
-    use_put_object  On
-    compression gzip
-    bucket              ${S3_BUCKET_NAME}
-    role_arn            ${S3_ROLE_ARN}
-    s3_key_format       /\$TAG/\$TAG
-
-[OUTPUT]
-    Name s3
-    Match logging
-    region              ${S3_AWS_REGION}
-    upload_timeout      5h
-    total_file_size     100M
-    use_put_object  On
-    compression gzip
-    bucket              ${S3_BUCKET_NAME}
-    role_arn            ${S3_ROLE_ARN}
-    s3_key_format       /\$TAG/\$TAG
+    s3_key_format /system/\$TAG
 EOF
   cat > ./aws-credentials << EOF
 [default]
@@ -422,7 +409,7 @@ configure_fluentbit() {
       -v ./volumes/db-state/:/var/log/ \
       -v "$(pwd)"/fluent-bit.conf:/fluent-bit/etc/fluentbit.conf \
       --log-driver=fluentd \
-      --log-opt tag=logging \
+      --log-opt tag=fluentbit \
       fluent/fluent-bit:2.0.9 \
       /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf >/dev/null
     fi
@@ -435,7 +422,7 @@ configure_fluentbit() {
       -v ./volumes/db-state/:/var/log/ \
       -v "$(pwd)"/fluent-bit.conf:/fluent-bit/etc/fluentbit.conf \
       --log-driver=fluentd \
-      --log-opt tag=logging \
+      --log-opt tag=fluentbit \
       fluent/fluent-bit:2.0.9 \
       /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf >/dev/null
     fi
