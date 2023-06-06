@@ -433,6 +433,9 @@ check_systemctl_status() {
     info "Reloading/Restarting service.$1.."
     systemctl reload-or-restart "$1"
     info "Done. Continuing registration.."
+    return 0
+  else
+    return 1
   fi
 }
 
@@ -474,6 +477,9 @@ check_systemcl_ecs_status() {
 check_systemcl_docker_status() {
   if type docker >&/dev/null; then
     check_systemctl_status "docker"
+    return $?
+  else
+    return 1
   fi
 }
 
@@ -495,7 +501,8 @@ register_instance() {
 
   [[ -e .env ]] && . .env
 
-  registered=$(docker ps -q --filter "name=ecs-agent")
+  check_systemcl_docker_status && \
+    registered=$(docker ps -q --filter "name=ecs-agent")
 
   [[ "${LOG_DEBUG}" == "true" && -n "$registered" ]] && debug "Instance ecs-agent status:" "${registered}"
 
