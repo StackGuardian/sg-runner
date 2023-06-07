@@ -264,7 +264,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob" ]]; then
 
 [OUTPUT]
     Name  azure_blob
-    Match  *
+    Match /^(?!ecsagent$|fluentbit$).*$/
     account_name ${STORAGE_ACCOUNT_NAME}
     shared_key ${SHARED_KEY} 
     path  /\$TAG 
