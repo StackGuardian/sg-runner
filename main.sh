@@ -244,31 +244,11 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob" ]]; then
     Mem_Buf_Limit 50MB
 [OUTPUT]
     Name  azure_blob
-    Match  adminjob
+    Match  fluentbit
     account_name ${STORAGE_ACCOUNT_NAME}
     shared_key ${SHARED_KEY} 
-    path adminjob
-    container_name sgprivaterunner
-    auto_create_container on
-    tls on
-
-[OUTPUT]
-    Name  azure_blob
-    Match  userjob
-    account_name ${STORAGE_ACCOUNT_NAME}
-    shared_key ${SHARED_KEY} 
-    path userjob
-    container_name sgprivaterunner
-    auto_create_container on
-    tls on
-
-[OUTPUT]
-    Name  azure_blob
-    Match  logging
-    account_name ${STORAGE_ACCOUNT_NAME}
-    shared_key ${SHARED_KEY} 
-    path logging
-    container_name sgprivaterunner
+    path system
+    container_name fluentbit
     auto_create_container on
     tls on
 
@@ -277,8 +257,18 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob" ]]; then
     Match  ecsagent
     account_name ${STORAGE_ACCOUNT_NAME}
     shared_key ${SHARED_KEY} 
-    path  ecsagent 
-    container_name sgprivaterunner
+    path system
+    container_name ecsagent
+    auto_create_container on
+    tls on
+
+[OUTPUT]
+    Name  azure_blob
+    Match  *
+    account_name ${STORAGE_ACCOUNT_NAME}
+    shared_key ${SHARED_KEY} 
+    path  /\$TAG 
+    container_name logs
     auto_create_container on
     tls on
 EOF
@@ -307,17 +297,6 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
 
 [OUTPUT]
     Name s3
-    region              ${S3_AWS_REGION}
-    upload_timeout      5s
-    total_file_size     1M
-    use_put_object  On
-    compression gzip
-    bucket              ${S3_BUCKET_NAME}
-    role_arn            ${S3_ROLE_ARN}
-    s3_key_format /\$TAG/logs/log
-
-[OUTPUT]
-    Name s3
     Match fluentbit
     region              ${S3_AWS_REGION}
     upload_timeout      5s
@@ -339,6 +318,18 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     bucket              ${S3_BUCKET_NAME}
     role_arn            ${S3_ROLE_ARN}
     s3_key_format /system/\$TAG
+
+[OUTPUT]
+    Name s3
+    Match *
+    region              ${S3_AWS_REGION}
+    upload_timeout      5s
+    total_file_size     1M
+    use_put_object  On
+    compression gzip
+    bucket              ${S3_BUCKET_NAME}
+    role_arn            ${S3_ROLE_ARN}
+    s3_key_format /\$TAG/logs/log
 EOF
   cat > ./aws-credentials << EOF
 [default]
@@ -406,7 +397,7 @@ configure_fluentbit() {
       --name fluentbit-agent \
       -p 24224:24224 \
       -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
-      -v ./volumes/db-state/:/var/log/ \
+      -v "$(pwd)"/volumes/db-state/:/var/log/ \
       -v "$(pwd)"/fluent-bit.conf:/fluent-bit/etc/fluentbit.conf \
       --log-driver=fluentd \
       --log-opt tag=fluentbit \
@@ -419,7 +410,7 @@ configure_fluentbit() {
       -p 24224:24224 \
       -v "$(pwd)"/aws-credentials:/root/.aws/credentials \
       -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
-      -v ./volumes/db-state/:/var/log/ \
+      -v "$(pwd)"/volumes/db-state/:/var/log/ \
       -v "$(pwd)"/fluent-bit.conf:/fluent-bit/etc/fluentbit.conf \
       --log-driver=fluentd \
       --log-opt tag=fluentbit \
