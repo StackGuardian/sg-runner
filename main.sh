@@ -116,8 +116,8 @@ fetch_organization_info() {
 
   #info "Trying to fetch registration data.."
 
-  #url="${SG_NODE_API_ENDPOINT}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/register/"
-  url="https://testapi.qa.stackguardian.io/api/v1/orgs/demo-org/runnergroups/test-rg-505/register/"
+  url="${SG_NODE_API_ENDPOINT}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/register/"
+  #url="https://testapi.qa.stackguardian.io/api/v1/orgs/demo-org/runnergroups/test-rg-505/register/"
   #[[ ${LOG_DEBUG} == "true" ]] && debug "Calling URL:" "${url}"
 
   if ! response=$(curl -fSsLk \
