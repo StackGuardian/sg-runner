@@ -304,7 +304,6 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     use_put_object  On
     compression gzip
     bucket              ${S3_BUCKET_NAME}
-    role_arn            ${S3_ROLE_ARN}
     s3_key_format /system/\$TAG
 
 [OUTPUT]
@@ -316,7 +315,6 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     use_put_object  On
     compression gzip
     bucket              ${S3_BUCKET_NAME}
-    role_arn            ${S3_ROLE_ARN}
     s3_key_format /system/\$TAG
 
 [OUTPUT]
@@ -328,7 +326,6 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     use_put_object  On
     compression gzip
     bucket              ${S3_BUCKET_NAME}
-    role_arn            ${S3_ROLE_ARN}
     s3_key_format /\$TAG/logs/log
 EOF
   cat > ./aws-credentials << EOF
@@ -408,7 +405,7 @@ configure_fluentbit() {
     docker run -d \
       --name fluentbit-agent \
       -p 24224:24224 \
-      -v "$(pwd)"/aws-credentials:/root/.aws/credentials \
+      -v "$(pwd)"/aws-credentials:/$HOME/.aws/credentials \
       -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
       -v "$(pwd)"/volumes/db-state/:/var/log/ \
       -v "$(pwd)"/fluent-bit.conf:/fluent-bit/etc/fluentbit.conf \
