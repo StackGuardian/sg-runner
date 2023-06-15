@@ -297,7 +297,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
 
 [OUTPUT]
     Name s3
-    Match /^(?!ecsagent$|fluentbit$).*$/
+    Match_Regex orgs**
     region              ${S3_AWS_REGION}
     upload_timeout      5s
     total_file_size     1M
