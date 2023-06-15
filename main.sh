@@ -393,6 +393,7 @@ configure_fluentbit() {
     docker run -d \
       --name fluentbit-agent \
       -p 24224:24224 \
+      --network sg-net \
       -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
       -v "$(pwd)"/volumes/db-state/:/var/log/ \
       -v "$(pwd)"/fluent-bit.conf:/fluent-bit/etc/fluentbit.conf \
@@ -405,6 +406,7 @@ configure_fluentbit() {
     docker run -d \
       --name fluentbit-agent \
       -p 24224:24224 \
+      --network sg-net \
       -v "$(pwd)"/aws-credentials:/$HOME/.aws/credentials \
       -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
       -v "$(pwd)"/volumes/db-state/:/var/log/ \
@@ -827,7 +829,7 @@ while :; do
   esac
 done
 
-readonly SG_DOCKER_NETWORK="wf-steps-net"
+readonly SG_DOCKER_NETWORK="sg-net"
 readonly LOG_DEBUG=${LOG_DEBUG:=false}
 
 case "${OPTION}" in
