@@ -278,7 +278,8 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     Match fluentbit
     region              ${S3_AWS_REGION}
     upload_timeout      5s
-    total_file_size     1M  
+    total_file_size     1M
+    log_key log
     use_put_object  On
     compression gzip
     bucket              ${S3_BUCKET_NAME}
@@ -290,6 +291,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     region              ${S3_AWS_REGION}
     upload_timeout      5s
     total_file_size     1M
+    log_key log
     use_put_object  On
     compression gzip
     bucket              ${S3_BUCKET_NAME}
@@ -301,6 +303,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     region              ${S3_AWS_REGION}
     upload_timeout      5s
     total_file_size     1M
+    log_key log
     use_put_object  On
     compression gzip
     bucket              ${S3_BUCKET_NAME}
