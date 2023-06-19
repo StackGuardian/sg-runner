@@ -396,7 +396,6 @@ configure_fluentbit() {
     docker run -d \
       --name fluentbit-agent \
       -p 24224:24224 \
-      --network sg-net \
       -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
       -v "$(pwd)"/volumes/db-state/:/var/log/ \
       -v "$(pwd)"/fluent-bit.conf:/fluent-bit/etc/fluentbit.conf \
@@ -409,7 +408,6 @@ configure_fluentbit() {
     docker run -d \
       --name fluentbit-agent \
       -p 24224:24224 \
-      --network sg-net \
       -v "$(pwd)"/aws-credentials:/$HOME/.aws/credentials \
       -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
       -v "$(pwd)"/volumes/db-state/:/var/log/ \
@@ -653,7 +651,7 @@ deregister_instance() {
   info "Removing docker network: ${SG_DOCKER_NETWORK}.."
   docker network rm "${SG_DOCKER_NETWORK}" >&/dev/nul
   info "Removing local configuration.."
-  rm -rf /var/log/ecs /etc/ecs /var/lib/ecs ./fluent-bit.conf volumes/ ./aws-credentials
+  rm -rf /var/log/ecs /etc/ecs /var/lib/ecs ./fluent-bit.conf volumes/ ./aws-credentials ./db-state
 
   info "Local data removed."
 }
