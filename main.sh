@@ -385,43 +385,37 @@ configure_local_network() {
 ########################################
 configure_fluentbit() {
   info "Starting fluentbit agent.."
-
+  docker_run_command="docker run -d \
+      --name fluentbit-agent \
+      -p 24224:24224 \
+      --network bridge \
+      -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
+      -v "$(pwd)"/volumes/db-state/:/var/log/ \
+      -v "$(pwd)"/fluent-bit.conf:/fluent-bit/etc/fluentbit.conf \
+      --log-driver=fluentd \
+      --log-opt tag=fluentbit
+       "
   local running=$(docker ps -q --filter "name=fluentbit-agent")
   local exists=$(docker ps -aq --filter "name=fluentbit-agent")
   if [[ -z "${exists}" ]]; then
     if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob" ]]; then
-    docker run -d \
-      --name fluentbit-agent \
-      -p 24224:24224 \
-      -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
-      -v "$(pwd)"/volumes/db-state/:/var/log/ \
-      -v "$(pwd)"/fluent-bit.conf:/fluent-bit/etc/fluentbit.conf \
-      --log-driver=fluentd \
-      --log-opt tag=fluentbit \
-      fluent/fluent-bit:2.0.9 \
-      /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf >/dev/null
+      extra_options="fluent/fluent-bit:2.0.9 \
+        /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf >/dev/null"
+      $docker_run_command $extra_options
     fi
     if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
-    docker run -d \
-      --name fluentbit-agent \
-      -p 24224:24224 \
-      --network bridge \
-      -v "$(pwd)"/aws-credentials:/$HOME/.aws/credentials \
-      -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
-      -v "$(pwd)"/volumes/db-state/:/var/log/ \
-      -v "$(pwd)"/fluent-bit.conf:/fluent-bit/etc/fluentbit.conf \
-      --log-driver=fluentd \
-      --log-opt tag=fluentbit \
-      fluent/fluent-bit:2.0.9 \
-      /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf >/dev/null
+      extra_options="-v "$(pwd)"/aws-credentials:$HOME/.aws/credentials \
+        fluent/fluent-bit:2.0.9 \
+        /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf >/dev/null"
+      $docker_run_command $extra_options
     fi
     info "Registered fluentbit agent."
-   else
-    if [[ -z "${running}" ]]; then
-      docker start fluentbit-agent >&/dev/null
-      info "Started fluentbit agent."
     else
-      info "Fluentbit agent already running."
+      if [[ -z "${running}" ]]; then
+        docker start fluentbit-agent >&/dev/null
+        info "Started fluentbit agent."
+      else
+        info "Fluentbit agent already running."
     fi
   fi
 }
