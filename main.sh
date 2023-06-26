@@ -39,18 +39,40 @@ debug() {
 }
 
 show_help() {
-  printf "\nsudo ${C_BOLD}%s${C_RESET} [register deregister doctor] arguments..\n" "$(basename "${0}")"
-  printf "\nRequired arguments:\n"
-  printf "  --sg-node-token '':"
-  printf "\n\tToken provided by StackGuardian platform.\n\n"
-  printf "  --organization '':"
-  printf "\n\tOrganization on Stackguardian with Runner Group.\n\n"
-  printf "  --runner-group '':"
-  printf "\n\tRunner Group inside organization.\n"
-  printf "Optional arguments:\n"
-  printf "  --debug\t\t\tShow log output.\n"
-  printf "  --help\t\t\tShow this help menu.\n"
-  exit 2
+  cat <<EOF
+
+main.sh is script for registration of Private Runner Nodes on Stackguardian.
+
+  More information available at: https://docs.qa.stackguardian.io/docs/
+
+Examples:
+  # Register new runner
+  ./$(basename "$0") register --sg-node-token "some-token" --organization "demo-org" --runner-group "private-runner-group"
+
+  # De-Register new runner
+  ./$(basename "$0") deregister --sg-node-token "some-token" --organization "demo-org" --runner-group "private-runner-group"
+
+Available commands:
+  register              Register new Private Runner
+  deregsiter            Deregister existing Private Runner
+  doctor                Show health status of used services/containers
+
+Options:
+  --sg-node-token '': (required)
+    The runner node token acquired from Stackguardian platform.
+
+  --organization '': (required)
+    The organization name on Stackguardian platform.
+
+  --runner-group '': (required)
+    The runner group where new runner will be registered.
+
+  --debug
+    Print more verbose output during command execution.
+
+Usage:
+  ./$(basename "$0") <command> [options]
+EOF
 }
 
 spinner() {
@@ -622,7 +644,7 @@ if ! type jq >&/dev/null; then
   err "Command" "jq" "not installed"
 fi
 
-[[ "${*}" =~ "--help" || $# -lt 1 ]] && show_help && exit 0
+[[ "${*}" =~ --help|-h || $# -lt 1 ]] && show_help && exit 0
 
 ## commented for easier testing purposes
 is_root && init_args_are_valid "$@"
