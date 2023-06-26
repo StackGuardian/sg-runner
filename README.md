@@ -8,7 +8,9 @@
   * [3.1 Registration](#31-registration)
     * [3.1.1 Get credentials from StackGuardian](#311-get-credentials-from-stackguardian)
     * [3.1.2 Run the script for registration](#312-run-the-script-for-registration)
-  * [3.2 De-registration](#31-de-registration)
+  * [3.2 De-registration](#32-de-registration)
+  * [3.3 Restart](#33-restart)
+* [Other options](#other-options)
 
 ## 1.0 Introduction
 
@@ -37,13 +39,14 @@ provided credentials from *StackGuardian* platform.
 
 > For more details  the `main.sh` script has integrated *help* menu:
 > ```
-> main.sh --help
+> ./main.sh --help
 > ```
 
-Each option has two **required** arguments:
+Each option has three **required** arguments:
 ```
 --sg-node-token
---sg-node-api-endpoint
+--organization
+--runner-group
 ```
 
 We will explain each option in detail below.
@@ -60,9 +63,12 @@ Registration can be done in a few steps described below:
 #### 3.1.2  Run the script for registration
 
 After getting credentials, run script like below while providing
-`SG_NODE_TOKEN` and `SG_NODE_API_ENDPOINT`:
+`SG_NODE_TOKEN`, `ORGANIZATION` and `RUNNER_GROUP`:
 ```
-main.sh register --sg-node-token ${SG_NODE_TOKEN} --sg-node-api-endpoint ${SG_NODE_API_ENDPOINT}
+main.sh register \
+    --sg-node-token ${SG_NODE_TOKEN} \
+    --organization ${ORGANIZATION} \
+    --runner-group ${RUNNER_GROUP}
 ```
 
 ### 3.2 De-registration
@@ -70,5 +76,27 @@ main.sh register --sg-node-token ${SG_NODE_TOKEN} --sg-node-api-endpoint ${SG_NO
 De-registration is run almost the same way as registration:
 
 ```
-main.sh deregister --sg-node-token ${SG_NODE_TOKEN} --sg-node-api-endpoint ${SG_NODE_API_ENDPOINT}
+main.sh deregister \
+    --sg-node-token ${SG_NODE_TOKEN} \
+    --organization ${ORGANIZATION} \
+    --runner-group ${RUNNER_GROUP}
 ```
+
+### 3.3 Restart
+
+As of now, restart is not nativly supported.
+But, to achieve similar experinece it is enough to [`deregister`](#32-de-registration) and then [`register`](#31-registration) again.
+
+> This should fix all troubles if something is not working.
+
+## Other options
+
+Besides `register` and `deregister`, script offers easy health checking:
+```
+./main.sh doctor
+```
+This command will print status of `ecs` and `docker` services.
+Also, including all related Docker containers (`ecs-agent`, `fluentbit-agent`).
+
+Additionally, with any command you can provide `--debug` flag.
+With this, you will get more output while running commands.
