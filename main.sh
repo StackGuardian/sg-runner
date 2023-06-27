@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Register external instance to AWS ECS with ecs-anywhere script.
+# Register external instance to Stackguardian platform.
 
 set -o pipefail
 
@@ -112,26 +112,21 @@ fetch_organization_info() {
   local metadata
   local url
 
-  [[ -e .env ]] && . .env
-
   #info "Trying to fetch registration data.."
 
   url="${SG_NODE_API_ENDPOINT}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/register/"
-  #url="https://testapi.qa.stackguardian.io/api/v1/orgs/demo-org/runnergroups/test-rg-505/register/"
-  #[[ ${LOG_DEBUG} == "true" ]] && debug "Calling URL:" "${url}"
+
+  [[ ${LOG_DEBUG} == "true" ]] && debug "Calling URL:" "${url}"
 
   if ! response=$(curl -fSsLk \
     -X POST \
     -H "Authorization: apikey ${SG_NODE_TOKEN}" \
     -H "Content-Type: application/json" \
     "${url}"); then
-    # printf "Response: %s" "${response}" | jq
     err "Could not fetch data from API."
   else
     info "Registration data fetched. Preparing environment.."
   fi
-
-  #response=$(cat data.json)
 
   [[ "${LOG_DEBUG}" == "true" ]] && debug "Response:" \
     && echo "${response}" | jq
@@ -169,8 +164,6 @@ fetch_organization_info() {
   S3_AWS_ACCESS_KEY_ID="${S3_AWS_ACCESS_KEY_ID:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].awsAccessKeyId')}"
   S3_AWS_SECRET_ACCESS_KEY="${S3_AWS_SECRET_ACCESS_KEY:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].awsSecretAccessKey')}"
 
-
-
   if [[ "${LOG_DEBUG}" == "true" ]]; then
     debug "ORGANIZATION_NAME:" "${ORGANIZATION_NAME}"
     debug "ORGANIZATION_ID:" "${ORGANIZATION_ID}"
@@ -207,14 +200,13 @@ configure_local_data() {
   # Set up directories the agent uses
   mkdir -p /var/log/ecs /etc/ecs /var/lib/ecs/data /etc/fluentbit/
   rm -rf /etc/ecs/ecs.config /var/lib/ecs/ecs.config > /dev/null
-  # rm -rf /var/lib/amazon/ssm/Vault/Store/*
 
   info "Configuring local data.."
 
   cat > /etc/ecs/ecs.config << EOF
 ECS_CLUSTER=${ECS_CLUSTER}
 AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
-ECS_INSTANCE_ATTRIBUTES={"sg_organization": "${ORGANIZATION_NAME}","sg_runner_id": "${RUNNER_ID}", "sg_runner_group_id": "${RUNNER_GROUP_ID}", "tags": "private1"}
+ECS_INSTANCE_ATTRIBUTES={"sg_organization": "${ORGANIZATION_NAME}","sg_runner_id": "${RUNNER_ID}", "sg_runner_group_id": "${RUNNER_GROUP_ID}", "tags": "${TAGS}"}
 ECS_LOGLEVEL=/log/ecs-agent.log
 ECS_DATADIR=/data/
 ECS_ENABLE_TASK_IAM_ROLE=true
@@ -227,7 +219,7 @@ ECS_EXTERNAL=true
 EOF
 
 #Fluentbit configuration for aws_s3 output
-if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob" ]]; then 
+if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob" ]]; then
   cat > ./fluent-bit.conf << EOF
 [SERVICE]
     Flush         1
@@ -246,7 +238,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob" ]]; then
     Name  azure_blob
     Match  fluentbit
     account_name ${STORAGE_ACCOUNT_NAME}
-    shared_key ${SHARED_KEY} 
+    shared_key ${SHARED_KEY}
     path system
     container_name fluentbit
     auto_create_container on
@@ -256,7 +248,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob" ]]; then
     Name  azure_blob
     Match  ecsagent
     account_name ${STORAGE_ACCOUNT_NAME}
-    shared_key ${SHARED_KEY} 
+    shared_key ${SHARED_KEY}
     path system
     container_name ecsagent
     auto_create_container on
@@ -266,8 +258,8 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob" ]]; then
     Name  azure_blob
     Match_Regex orgs**
     account_name ${STORAGE_ACCOUNT_NAME}
-    shared_key ${SHARED_KEY} 
-    path  /\$TAG 
+    shared_key ${SHARED_KEY}
+    path  /\$TAG
     container_name logs
     auto_create_container on
     tls on
@@ -275,12 +267,12 @@ EOF
 fi
 
 #Fluentbit configuration for aws_s3 output
-if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then 
+if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
   cat > ./fluent-bit.conf << EOF
 [SERVICE]
     Flush         1
     Log_Level     info
-    Buffer_Chunk_size 1M 
+    Buffer_Chunk_size 1M
     Buffer_Max_Size 6M
     HTTP_Server On
     HTTP_Listen 0.0.0.0
@@ -335,6 +327,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     bucket              ${S3_BUCKET_NAME}
     s3_key_format /\$TAG/logs/log
 EOF
+
   cat > ./aws-credentials << EOF
 [default]
 region = ${S3_AWS_REGION}
@@ -387,10 +380,13 @@ configure_local_network() {
 #   Write to STDOUT/STERR
 #   if successfull/error.
 #######################################
-# This portion checks whether the STORAGE_BACKEND_TYPE is 
-# aws_s3 or azure_blob and runs the container accordingly. 
+# This portion checks whether the STORAGE_BACKEND_TYPE is
+# aws_s3 or azure_blob and runs the container accordingly.
 ########################################
 configure_fluentbit() {
+  local running
+  local exists
+
   info "Starting fluentbit agent.."
   docker_run_command="docker run -d \
       --name fluentbit-agent \
@@ -398,13 +394,14 @@ configure_fluentbit() {
       -p 2020:2020 \
       --network bridge \
       -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
-      -v "$(pwd)"/volumes/db-state/:/var/log/ \
-      -v "$(pwd)"/fluent-bit.conf:/fluent-bit/etc/fluentbit.conf \
+      -v $(pwd)/volumes/db-state/:/var/log/ \
+      -v $(pwd)/fluent-bit.conf:/fluent-bit/etc/fluentbit.conf \
       --log-driver=fluentd \
-      --log-opt tag=fluentbit 
+      --log-opt tag=fluentbit
        "
-  local running=$(docker ps -q --filter "name=fluentbit-agent")
-  local exists=$(docker ps -aq --filter "name=fluentbit-agent")
+  running=$(docker ps -q --filter "name=fluentbit-agent")
+  exists=$(docker ps -aq --filter "name=fluentbit-agent")
+
   if [[ -z "${exists}" ]]; then
     if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob" ]]; then
       extra_options="fluent/fluent-bit:2.0.9 \
@@ -412,7 +409,7 @@ configure_fluentbit() {
       $docker_run_command $extra_options
     fi
     if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
-      extra_options="-v "$(pwd)"/aws-credentials:$HOME/.aws/credentials \
+      extra_options="-v $(pwd)/aws-credentials:$HOME/.aws/credentials \
         fluent/fluent-bit:2.0.9-debug \
         /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf >/dev/null"
       $docker_run_command $extra_options
@@ -443,7 +440,7 @@ configure_fluentbit() {
 #######################################
 check_systemctl_status() {
   if ! systemctl is-active "$1" >&/dev/null; then
-    info "Reloading/Restarting service.$1.."
+    info "Reloading/Restarting neccessary services.."
     systemctl reload-or-restart "$1"
     info "Done. Continuing registration.."
     return 0
@@ -496,6 +493,19 @@ check_systemcl_docker_status() {
   fi
 }
 
+print_details() {
+  cat <<EOF
+Registration Details:
+
+  Organization: ${ORGANIZATION_NAME}
+  Runner Group: ${RUNNER_GROUP_ID}
+
+  Runner ID: ${RUNNER_ID}
+  Tags: ${TAGS}
+
+EOF
+}
+
 #######################################
 # Register instance to AWS ECS.
 # Globals:
@@ -512,28 +522,24 @@ check_systemcl_docker_status() {
 register_instance() {
   local registered
 
-  [[ -e .env ]] && . .env
-
   check_systemcl_docker_status && \
     registered=$(docker ps -q --filter "name=ecs-agent")
 
   [[ "${LOG_DEBUG}" == "true" && -n "$registered" ]] && debug "Instance ecs-agent status:" "${registered}"
 
   if [[ -n "${registered}" ]]; then
-    info "ECS Agent already registered and running."
+    info "Instance agent already registered and running."
     configure_local_network
     configure_fluentbit
+    print_details
     exit 0
   fi
-  # check_sg_args
+
   fetch_organization_info
   configure_local_data
 
-  ## It is not neccessary to remove script each time
-  # rm /tmp/ecs* >&/dev/null
-
   if [[ ! -e /tmp/ecs-anywhere-install.sh ]]; then
-    info "Downloading ecs-anywhere-install.sh.."
+    info "Downloading necessary files.."
 
     if ! curl -fSsLk \
       --proto "https" \
@@ -547,24 +553,10 @@ register_instance() {
       info "Download completed. Continuing.."
     fi
   else
-    info "Script ecs-anywhere-install.sh already exists."
+    info "Skiping download. Files already exist."
   fi
 
-  ## old code
-  # if (( $? != 0 )); then
-  #   cat /tmp/ecs_anywhere_download.log
-  #   err "Unable to download" "ecs-anywhere-install.sh" "script"
-  # fi
-
-  # TODO(adis.halilovic@stackguardian.io): verify ecs-anywhere script integrity
-  # gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv BCE9D9A42D51784F
-  # curl --proto "https" -o "/tmp/ecs-anywhere-install.sh.asc" "https://amazon-ecs-agent.s3.amazonaws.com/ecs-anywhere-install-latest.sh.asc"
-  # gpg --verify /tmp/ecs-anywhere-install.sh.asc /tmp/ecs-anywhere-install.sh | grep "Primary key"
-
-  # Primary key fingerprint: F34C 3DDA E729 26B0 79BE  AEC6 BCE9 D9A4 2D51 784F
-  #      Subkey fingerprint: D64B B6F9 0CF3 77E9 B5FB  346F 50DE CCC4 710E 61AF
-
-  info "Trying to register instance to ECS cluster.."
+  info "Trying to register instance.."
 
   check_systemcl_docker_status
   check_systemcl_ecs_status
@@ -581,16 +573,17 @@ register_instance() {
   spinner "$!" "/var/log/ecs-install.log"; then
     container_status="$(docker ps -a --filter='name=ecs-agent' --format '{{.Status}}')"
     if [[ "$?" != 0 || "$container_status" =~ Exited ]]; then
-      err "Script" "ecs-anywhere-install.sh" "failed to register external instance."
+      err "Failed to register external instance."
     else
-      info "Instance successfully registered to ECS cluster."
+      info "Instance successfully registered to Stackguardian platform."
     fi
   else
-    err "Script" "ecs-anywhere-install.sh" "failed to register external instance."
+    err "Failed to register external instance."
   fi
 
   configure_local_network
   configure_fluentbit
+  print_details
 }
 
 #######################################
@@ -608,8 +601,6 @@ deregister_instance() {
   local response
   local url
 
-  [[ -e .env ]] && . .env
-
   if [[ -e /etc/ecs/ecs.config ]]; then
     RUNNER_ID="$(grep ECS_INSTANCE_ATTRIBUTES /etc/ecs/ecs.config \
       | cut -d "=" -f2 \
@@ -626,23 +617,18 @@ deregister_instance() {
 
   [[ ${LOG_DEBUG} == "true" ]] && debug "Payload:" "${payload}"
 
-  ## Uncommend below to include API call for deregistration
-  ## This API endpoint for deregistering is not working
-  ## I hope I am not missing something
-  #
-  # if ! reponse=$(curl -fSsLk \
-  #   -X POST \
-  #   -H "Authorization: apikey ${SG_NODE_TOKEN}" \
-  #   -H "Content-Type: application/json" \
-  #   "${url}" \
-  #   -d "${payload}"); then
-  #   err "Could not fetch data from API."
-  # else
-  #   echo "${reponse}"
-  #   info "Instance de-registered. Removing local data.."
-  # fi
+  if ! response=$(curl -fSsLk \
+    -X POST \
+    -H "Authorization: apikey ${SG_NODE_TOKEN}" \
+    -H "Content-Type: application/json" \
+    "${url}" \
+    -d "${payload}"); then
+    err "Could not fetch data from API."
+  else
+    info "Instance de-registered. Removing local data.."
+  fi
 
-  info "Stopping service.ecs.."
+  info "Stopping services.."
   systemctl stop ecs
   info "Stopping docker containers.."
   docker stop ecs-agent fluentbit-agent >&/dev/null
@@ -775,8 +761,8 @@ is_root() {
 init_args_are_valid() {
   if [[ ! "$1" =~ register|deregister|doctor ]]; then
     err "Provided option" "${1}" "is invalid"
-  # elif (( $# != 7 )); then
-  #   err "Arguments:" "--sg-node-token, --organization, --runner-group" "are required"
+  elif (( $# < 7 )); then
+    err "Arguments:" "--sg-node-token, --organization, --runner-group" "are required"
   fi
   return 0
 }
@@ -820,8 +806,8 @@ while :; do
     shift 2
     ;;
   --debug)
-      LOG_DEBUG=true
-      shift
+    LOG_DEBUG=true
+    shift
     ;;
   *)
     [[ -z "${1}" ]] && break
@@ -829,6 +815,8 @@ while :; do
     ;;
   esac
 done
+
+check_sg_args
 
 readonly SG_DOCKER_NETWORK="sg-net"
 readonly LOG_DEBUG=${LOG_DEBUG:=false}
