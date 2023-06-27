@@ -95,21 +95,17 @@ fetch_organization_info() {
   #info "Trying to fetch registration data.."
 
   url="${SG_NODE_API_ENDPOINT}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/register/"
-  #url="https://testapi.qa.stackguardian.io/api/v1/orgs/demo-org/runnergroups/test-rg-505/register/"
-  #[[ ${LOG_DEBUG} == "true" ]] && debug "Calling URL:" "${url}"
 
   if ! response=$(curl -fSsLk \
     -X POST \
     -H "Authorization: apikey ${SG_NODE_TOKEN}" \
     -H "Content-Type: application/json" \
     "${url}"); then
-    # printf "Response: %s" "${response}" | jq
     err "Could not fetch data from API."
   else
     info "Registration data fetched. Preparing environment.."
   fi
 
-  #response=$(cat data.json)
 
   [[ "${LOG_DEBUG}" == "true" ]] && debug "Response:" \
     && echo "${response}" | jq
