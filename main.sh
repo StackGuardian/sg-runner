@@ -153,7 +153,6 @@ fetch_organization_info() {
     debug "SHARED_KEY:" "${SHARED_KEY}"
     debug "STORAGE_ACCOUNT_NAME:" "${STORAGE_ACCOUNT_NAME}"
     debug "STORAGE_BACKEND_TYPE:" "${STORAGE_BACKEND_TYPE}"
-    debug "ROLE_ARN:" "${S3_ROLE_ARN}"
     debug "S3_BUCKET_NAME:" "${S3_BUCKET_NAME}"
     debug "S3_AWS_REGION:" "${S3_AWS_REGION}"
     debug "S3_AWS_ACCESS_KEY_ID:" "${S3_AWS_ACCESS_KEY_ID}"
