@@ -177,7 +177,6 @@ fetch_organization_info() {
     debug "ORGANIZATION_ID:" "${ORGANIZATION_ID}"
     debug "RUNNER_ID:" "${RUNNER_ID}"
     debug "RUNNER_GROUP_ID:" "${RUNNER_GROUP_ID}"
-    debug "TAGS:" "${TAGS}"
     debug "SHARED_KEY:" "${SHARED_KEY}"
     debug "STORAGE_ACCOUNT_NAME:" "${STORAGE_ACCOUNT_NAME}"
     debug "STORAGE_BACKEND_TYPE:" "${STORAGE_BACKEND_TYPE}"
@@ -434,14 +433,14 @@ configure_fluentbit() {
   if [[ -z "${exists}" ]]; then
     if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob" ]]; then
       extra_options="fluent/fluent-bit:2.0.9 \
-        /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf >/dev/null"
-      $docker_run_command $extra_options
+        /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf"
+      $docker_run_command $extra_options >/dev/null
     fi
     if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
       extra_options="-v $(pwd)/aws-credentials:$HOME/.aws/credentials \
         fluent/fluent-bit:2.0.9-debug \
-        /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf >/dev/null"
-      $docker_run_command $extra_options
+        /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf"
+      $docker_run_command $extra_options >/dev/null
     fi
     info "Registered fluentbit agent."
     else
@@ -522,17 +521,22 @@ check_systemcl_docker_status() {
   fi
 }
 
+details_frame() {
+  printf " + ${C_BOLD}%s${C_RESET} " "${1}"
+  printf "\n |\n"
+}
+
+details_items() {
+  printf " | * %s: ${C_GREEN_BOLD}%s${C_RESET}\n" "$1" "$2"
+}
+
 print_details() {
-  cat <<EOF
-Registration Details:
-
-  Organization: ${ORGANIZATION_NAME}
-  Runner Group: ${RUNNER_GROUP_ID}
-
-  Runner ID: ${RUNNER_ID}
-  Tags: ${TAGS}
-
-EOF
+  echo 
+  details_frame "Registration Details"
+  details_items "Organization" "${ORGANIZATION_NAME}"
+  details_items "Runner Group" "${RUNNER_GROUP_ID}"
+  details_items "Runner ID" "${RUNNER_ID}"
+  echo
 }
 
 #######################################
