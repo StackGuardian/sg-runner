@@ -4,6 +4,8 @@
 
 set -o pipefail
 
+[[ -e .env ]] && . .env
+
 ## colors for printf
 readonly C_RED_BOLD="\033[1;31m"
 readonly C_RED="\033[0;31m"
@@ -113,7 +115,7 @@ fetch_organization_info() {
   local url
 
   #info "Trying to fetch registration data.."
-
+  SG_NODE_API_ENDPOINT=https://testapi.qa.stackguardian.io/api/v1
   url="${SG_NODE_API_ENDPOINT}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/register/"
 
   [[ ${LOG_DEBUG} == "true" ]] && debug "Calling URL:" "${url}"
@@ -137,8 +139,8 @@ fetch_organization_info() {
   AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:=$(echo "${metadata}" | jq -r '.AWSDefaultRegion')}"
   SSM_ACTIVATION_ID="${SSM_ACTIVATION_ID:=$(echo "${metadata}" | jq -r '.SSMActivationId')}"
   SSM_ACTIVATION_CODE="${SSM_ACTIVATION_CODE:=$(echo "${metadata}" | jq -r '.SSMActivationCode')}"
-  AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:=$(echo "${metadata}" | jq -r '.RunnerGroup.StorageBackendConfig.auth.config[].awsAccessKeyId')}"
-  AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:=$(echo "${metadata}" | jq -r '.RunnerGroup.StorageBackendConfig.auth.config[].AWSSecretAccessKey')}"
+  #AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:=$(echo "${metadata}" | jq -r '.RunnerGroup.StorageBackendConfig.auth.config[].awsAccessKeyId')}"
+  #AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:=$(echo "${metadata}" | jq -r '.RunnerGroup.StorageBackendConfig.auth.config[].AWSSecretAccessKey')}"
 
   if [[ "${LOG_DEBUG}" == "true" ]]; then
     debug "ECS_CLUSTER:" "${ECS_CLUSTER}"
@@ -158,7 +160,6 @@ fetch_organization_info() {
   STORAGE_ACCOUNT_NAME="${STORAGE_ACCOUNT_NAME:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.storageAccountName')}"
   SHARED_KEY="${SHARED_KEY=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.sharedKey')}"
   STORAGE_BACKEND_TYPE="${STORAGE_BACKEND_TYPE:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.type')}"
-  S3_ROLE_ARN="${S3_ROLE_ARN:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.roleARN')}"
   S3_BUCKET_NAME="${S3_BUCKET_NAME:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.s3BucketName')}"
   S3_AWS_REGION="${S3_AWS_REGION:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.awsRegion')}"
   S3_AWS_ACCESS_KEY_ID="${S3_AWS_ACCESS_KEY_ID:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].awsAccessKeyId')}"
@@ -173,7 +174,6 @@ fetch_organization_info() {
     debug "SHARED_KEY:" "${SHARED_KEY}"
     debug "STORAGE_ACCOUNT_NAME:" "${STORAGE_ACCOUNT_NAME}"
     debug "STORAGE_BACKEND_TYPE:" "${STORAGE_BACKEND_TYPE}"
-    debug "ROLE_ARN:" "${S3_ROLE_ARN}"
     debug "S3_BUCKET_NAME:" "${S3_BUCKET_NAME}"
     debug "S3_AWS_REGION:" "${S3_AWS_REGION}"
     debug "S3_AWS_ACCESS_KEY_ID:" "${S3_AWS_ACCESS_KEY_ID}"
@@ -206,7 +206,7 @@ configure_local_data() {
   cat > /etc/ecs/ecs.config << EOF
 ECS_CLUSTER=${ECS_CLUSTER}
 AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
-ECS_INSTANCE_ATTRIBUTES={"sg_organization": "${ORGANIZATION_NAME}","sg_runner_id": "${RUNNER_ID}", "sg_runner_group_id": "${RUNNER_GROUP_ID}", "tags": "${TAGS}"}
+ECS_INSTANCE_ATTRIBUTES={"sg_organization": "${ORGANIZATION_NAME}","sg_runner_id": "${RUNNER_ID}", "sg_runner_group_id": "${RUNNER_GROUP_ID}" }
 ECS_LOGLEVEL=/log/ecs-agent.log
 ECS_DATADIR=/data/
 ECS_ENABLE_TASK_IAM_ROLE=true
@@ -608,7 +608,7 @@ deregister_instance() {
   else
     err "Local data could not be found:" "/etc/ecs/ecs.config"
   fi
-
+  SG_NODE_API_ENDPOINT=https://testapi.qa.stackguardian.io/api/v1
   url="${SG_NODE_API_ENDPOINT}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/deregister/"
 
   [[ ${LOG_DEBUG} == "true" ]] && debug "Calling URL:" "${url}"
@@ -776,6 +776,9 @@ check_sg_args() {
 
 main() {
 
+#API EndPoint for dash.qa
+SG_NODE_API_ENDPOINT=https://testapi.qa.stackguardian.io/api/v1
+
 if ! type jq >&/dev/null; then
   err "Command" "jq" "not installed"
 fi
@@ -797,7 +800,7 @@ while :; do
     ;;
   --organization)
     check_arg_value "${1}" "${2}"
-    ORGANIZATION_NAME="${2}"
+    ORGANIZATION_ID="${2}"
     shift 2
     ;;
   --runner-group)
