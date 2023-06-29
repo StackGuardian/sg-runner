@@ -4,7 +4,13 @@
 
 set -o pipefail
 
-[[ -e .env ]] && . .env
+# Environment variables
+SG_NODE_API_ENDPOINT="https://testapi.qa.stackguardian.io/api/v1"
+LOG_DEBUG=${LOG_DEBUG:=false}
+SG_DOCKER_NETWORK="sg-net"
+
+# Source .env if exists (testing purposes)
+[[ -f .env ]] && . .env
 
 ## colors for printf
 readonly C_RED_BOLD="\033[1;31m"
@@ -24,6 +30,12 @@ readonly C_BOLD="\033[1m"
 
 log_date() {
   printf "${C_BLUE}[%s]" "$(date +'%Y-%m-%dT%H:%M:%S%z')"
+}
+
+cleanup() {
+  echo "Gracefull shutdown.."
+  [[ -n ${spinner_pid} ]] && kill "${spinner_pid}" >&/dev/null
+  exit 0
 }
 
 err() {
@@ -114,8 +126,7 @@ fetch_organization_info() {
   local metadata
   local url
 
-  #info "Trying to fetch registration data.."
-  SG_NODE_API_ENDPOINT=https://testapi.qa.stackguardian.io/api/v1
+  info "Trying to fetch registration data.."
   url="${SG_NODE_API_ENDPOINT}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/register/"
 
   [[ ${LOG_DEBUG} == "true" ]] && debug "Calling URL:" "${url}"
@@ -139,16 +150,12 @@ fetch_organization_info() {
   AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:=$(echo "${metadata}" | jq -r '.AWSDefaultRegion')}"
   SSM_ACTIVATION_ID="${SSM_ACTIVATION_ID:=$(echo "${metadata}" | jq -r '.SSMActivationId')}"
   SSM_ACTIVATION_CODE="${SSM_ACTIVATION_CODE:=$(echo "${metadata}" | jq -r '.SSMActivationCode')}"
-  #AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:=$(echo "${metadata}" | jq -r '.RunnerGroup.StorageBackendConfig.auth.config[].awsAccessKeyId')}"
-  #AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:=$(echo "${metadata}" | jq -r '.RunnerGroup.StorageBackendConfig.auth.config[].AWSSecretAccessKey')}"
 
   if [[ "${LOG_DEBUG}" == "true" ]]; then
     debug "ECS_CLUSTER:" "${ECS_CLUSTER}"
     debug "AWS_DEFAULT_REGION:" "${AWS_DEFAULT_REGION}"
     debug "SSM_ACTIVATION_ID:" "${SSM_ACTIVATION_ID:0:5}*****"
     debug "SSM_ACTIVATION_CODE:" "${SSM_ACTIVATION_CODE:0:5}*****"
-    debug "AWS_ACCESS_KEY_ID:" "${AWS_ACCESS_KEY_ID:0:5}*****"
-    debug "AWS_SECRET_ACCESS_KEY:" "${AWS_SECRET_ACCESS_KEY:0:5}*****"
   fi
 
   ## Everything else
@@ -206,7 +213,7 @@ configure_local_data() {
   cat > /etc/ecs/ecs.config << EOF
 ECS_CLUSTER=${ECS_CLUSTER}
 AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
-ECS_INSTANCE_ATTRIBUTES={"sg_organization": "${ORGANIZATION_NAME}","sg_runner_id": "${RUNNER_ID}", "sg_runner_group_id": "${RUNNER_GROUP_ID}" }
+ECS_INSTANCE_ATTRIBUTES={"sg_organization": "${ORGANIZATION_NAME}","sg_runner_id": "${RUNNER_ID}", "sg_runner_group_id": "${RUNNER_GROUP_ID}"}
 ECS_LOGLEVEL=/log/ecs-agent.log
 ECS_DATADIR=/data/
 ECS_ENABLE_TASK_IAM_ROLE=true
@@ -356,14 +363,36 @@ configure_local_network() {
   # Create wf-steps-net docker network
   docker network create --driver bridge "${SG_DOCKER_NETWORK}" >&/dev/null
   bridge_id="br-$(docker network ls -q --filter "name=${SG_DOCKER_NETWORK}")"
-  iptables -I DOCKER-USER -i "${bridge_id}" -d 169.254.169.254,10.0.0.0/24 -j DROP
+  iptables \
+    -I DOCKER-USER \
+    -i "${bridge_id}" \
+    -d 169.254.169.254,10.0.0.0/24 \
+    -j DROP
+
   info "Docker network ${SG_DOCKER_NETWORK} created."
 
   # Set up necessary rules to enable IAM roles for tasks
   sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null
   # sysctl -w net.ipv4.ip_forward=1
-  iptables -t nat -A PREROUTING -p tcp -d 169.254.170.2 --dport 80 -j DNAT --to-destination 127.0.0.1:51679
-  iptables -t nat -A OUTPUT -d 169.254.170.2 -p tcp -m tcp --dport 80 -j REDIRECT --to-ports 51679
+
+  iptables \
+    -t nat \
+    -A PREROUTING \
+    -p tcp \
+    -d 169.254.170.2 \
+    --dport 80 \
+    -j DNAT \
+    --to-destination 127.0.0.1:51679
+
+  iptables \
+    -t nat \
+    -A OUTPUT \
+    -d 169.254.170.2 \
+    -p tcp \
+    -m tcp \
+    --dport 80 \
+    -j REDIRECT \
+    --to-ports 51679
 
   info "Local network configured."
 
@@ -525,7 +554,8 @@ register_instance() {
   check_systemcl_docker_status && \
     registered=$(docker ps -q --filter "name=ecs-agent")
 
-  [[ "${LOG_DEBUG}" == "true" && -n "$registered" ]] && debug "Instance ecs-agent status:" "${registered}"
+  [[ "${LOG_DEBUG}" == "true" && -n "$registered" ]] && \
+    debug "Instance ecs-agent status:" "${registered}"
 
   if [[ -n "${registered}" ]]; then
     info "Instance agent already registered and running."
@@ -546,8 +576,8 @@ register_instance() {
       -o "/tmp/ecs-anywhere-install.sh" \
       "https://amazon-ecs-agent.s3.amazonaws.com/ecs-anywhere-install-latest.sh" \
       >&/tmp/ecs_anywhere_download.log; then
-      [[ "${LOG_DEBUG}" == "true" ]] \
-        && debug "Response:" "$(cat /tmp/ecs_anywhere_download.log)"
+      [[ "${LOG_DEBUG}" == "true" ]] && \
+        debug "Response:" "$(cat /tmp/ecs_anywhere_download.log)"
       err "Unable to download" "ecs-anywhere-install.sh" "script"
     else
       info "Download completed. Continuing.."
@@ -608,7 +638,7 @@ deregister_instance() {
   else
     err "Local data could not be found:" "/etc/ecs/ecs.config"
   fi
-  SG_NODE_API_ENDPOINT=https://testapi.qa.stackguardian.io/api/v1
+
   url="${SG_NODE_API_ENDPOINT}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/deregister/"
 
   [[ ${LOG_DEBUG} == "true" ]] && debug "Calling URL:" "${url}"
@@ -617,6 +647,7 @@ deregister_instance() {
 
   [[ ${LOG_DEBUG} == "true" ]] && debug "Payload:" "${payload}"
 
+  info "Trying to deregsiter instance.."
   if ! response=$(curl -fSsLk \
     -X POST \
     -H "Authorization: apikey ${SG_NODE_TOKEN}" \
@@ -625,7 +656,7 @@ deregister_instance() {
     -d "${payload}"); then
     err "Could not fetch data from API."
   else
-    info "Instance de-registered. Removing local data.."
+    info "Instance deregistered. Removing local data.."
   fi
 
   info "Stopping services.."
@@ -761,23 +792,55 @@ is_root() {
 init_args_are_valid() {
   if [[ ! "$1" =~ register|deregister|doctor ]]; then
     err "Provided option" "${1}" "is invalid"
-  elif (( $# < 7 )); then
+  elif [[ "$1" =~ register|deregister && \
+    ( ! "$*" =~ --sg-node-token || \
+    ! "$*" =~ --organization || \
+    ! "$*" =~ --runner-group ) ]]; then
     err "Arguments:" "--sg-node-token, --organization, --runner-group" "are required"
   fi
   return 0
 }
 
 check_sg_args() {
-  if [[ -z "${SG_NODE_TOKEN}" && -z "${ORGANIZATION_ID}" && -z "${RUNNER_GROUP_ID}" ]]; then
+  if [[ -z "${SG_NODE_TOKEN}" \
+    || -z "${ORGANIZATION_ID}" \
+    || -z "${RUNNER_GROUP_ID}" ]]; then
     err "Arguments: " "--sg-node-token, --organization, --runner-group" "are required"
   fi
   return 0
 }
 
-main() {
+parse_arguments() {
+  while :; do
+    case "${1}" in
+    --sg-node-token)
+      check_arg_value "${1}" "${2}"
+      SG_NODE_TOKEN="${2}"
+      shift 2
+      ;;
+    --organization)
+      check_arg_value "${1}" "${2}"
+      ORGANIZATION_ID="${2}"
+      shift 2
+      ;;
+    --runner-group)
+      check_arg_value "${1}" "${2}"
+      RUNNER_GROUP_ID="${2}"
+      shift 2
+      ;;
+    --debug)
+      LOG_DEBUG=true
+      shift
+      ;;
+    *)
+      [[ -z "${1}" ]] && break
+      err "Invalid argument:" "${1}"
+      ;;
+    esac
+  done
+}
 
-#API EndPoint for dash.qa
-SG_NODE_API_ENDPOINT=https://testapi.qa.stackguardian.io/api/v1
+main() {
 
 if ! type jq >&/dev/null; then
   err "Command" "jq" "not installed"
@@ -785,65 +848,29 @@ fi
 
 [[ "${*}" =~ --help|-h || $# -lt 1 ]] && show_help && exit 0
 
-## commented for easier testing purposes
 is_root && init_args_are_valid "$@"
 
-OPTION="${1}"
-shift
-
-while :; do
-  case "${1}" in
-  --sg-node-token)
-    check_arg_value "${1}" "${2}"
-    SG_NODE_TOKEN="${2}"
-    shift 2
-    ;;
-  --organization)
-    check_arg_value "${1}" "${2}"
-    ORGANIZATION_ID="${2}"
-    shift 2
-    ;;
-  --runner-group)
-    check_arg_value "${1}" "${2}"
-    RUNNER_GROUP_ID="${2}"
-    shift 2
-    ;;
-  --debug)
-    LOG_DEBUG=true
-    shift
-    ;;
-  *)
-    [[ -z "${1}" ]] && break
-    err "Invalid argument:" "${1}"
-    ;;
-  esac
-done
-
-check_sg_args
-
-readonly SG_DOCKER_NETWORK="sg-net"
-readonly LOG_DEBUG=${LOG_DEBUG:=false}
-
-case "${OPTION}" in
+case "${1}" in
   register)
+    shift
+    parse_arguments "$@"
+    check_sg_args
     register_instance
     ;;
   deregister)
+    shift
+    parse_arguments "$@"
+    check_sg_args
     deregister_instance
     ;;
   doctor)
     doctor
+    exit 0
     ;;
 esac
 
 # TODO: API call to ping the node
 
-}
-
-cleanup() {
-  echo "Gracefull shutdown.."
-  [[ -n ${spinner_pid} ]] && kill "${spinner_pid}" >&/dev/null
-  exit 0
 }
 
 trap cleanup SIGINT
