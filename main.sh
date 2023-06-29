@@ -521,21 +521,32 @@ check_systemcl_docker_status() {
   fi
 }
 
+#######################################
+# Print details at the end of registration
+# Globals:
+#   ORGANIZATION_NAME
+#   RUNNER_GROUP_ID
+#   RUNNER_ID
+# Arguments:
+#   None
+# Outputs:
+#   Write to STDOUT
+#######################################
 details_frame() {
   printf " + ${C_BOLD}%s${C_RESET} " "${1}"
   printf "\n |\n"
 }
 
-details_items() {
+details_item() {
   printf " | * %s: ${C_GREEN_BOLD}%s${C_RESET}\n" "$1" "$2"
 }
 
 print_details() {
-  echo 
+  echo
   details_frame "Registration Details"
-  details_items "Organization" "${ORGANIZATION_NAME}"
-  details_items "Runner Group" "${RUNNER_GROUP_ID}"
-  details_items "Runner ID" "${RUNNER_ID}"
+  details_item "Organization" "${ORGANIZATION_NAME}"
+  details_item "Runner Group" "${RUNNER_GROUP_ID}"
+  details_item "Runner ID" "${RUNNER_ID}"
   echo
 }
 
