@@ -230,6 +230,14 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob" ]]; then
 [SERVICE]
     Flush         1
     Log_Level     info
+    Buffer_Chunk_size 1M
+    Buffer_Max_Size 6M
+    HTTP_Server On
+    HTTP_Listen 0.0.0.0
+    HTTP_PORT 2020
+    Health_Check On
+    HC_Errors_Count 5
+    HC_Period 5
 [INPUT]
     Name forward
     Listen 0.0.0.0
@@ -245,8 +253,8 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob" ]]; then
     Match  fluentbit
     account_name ${STORAGE_ACCOUNT_NAME}
     shared_key ${SHARED_KEY}
-    path system
-    container_name fluentbit
+    path fluentbit/log
+    container_name system
     auto_create_container on
     tls on
 
@@ -255,8 +263,8 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob" ]]; then
     Match  ecsagent
     account_name ${STORAGE_ACCOUNT_NAME}
     shared_key ${SHARED_KEY}
-    path system
-    container_name ecsagent
+    path ecsagent/log
+    container_name system
     auto_create_container on
     tls on
 
@@ -265,8 +273,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob" ]]; then
     Match_Regex orgs**
     account_name ${STORAGE_ACCOUNT_NAME}
     shared_key ${SHARED_KEY}
-    path  /\$TAG
-    container_name logs
+    container_name runner
     auto_create_container on
     tls on
 EOF
@@ -432,7 +439,7 @@ configure_fluentbit() {
 
   if [[ -z "${exists}" ]]; then
     if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob" ]]; then
-      extra_options="fluent/fluent-bit:2.0.9 \
+      extra_options="fluent/fluent-bit:2.0.9-debug \
         /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf"
       $docker_run_command $extra_options >/dev/null
     fi
