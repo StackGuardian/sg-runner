@@ -342,7 +342,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     use_put_object  On
     compression gzip
     bucket              ${S3_BUCKET_NAME}
-    s3_key_format /system/\$TAG
+    s3_key_format /system/fluentbit/fluentbit
 
 [OUTPUT]
     Name s3
@@ -353,7 +353,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     use_put_object  On
     compression gzip
     bucket              ${S3_BUCKET_NAME}
-    s3_key_format /system/\$TAG
+    s3_key_format /system/ecsagent/ecsagent
 
 [OUTPUT]
     Name s3
