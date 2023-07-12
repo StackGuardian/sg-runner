@@ -190,8 +190,8 @@ fetch_organization_info() { #{{{
   RUNNER_ID="${RUNNER_ID:=$(echo "${response}" | jq -r '.data.RunnerId')}"
   RUNNER_GROUP_ID="${RUNNER_GROUP_ID:=$(echo "${response}" | jq -r '.data.RunnerGroupId')}"
   TAGS="${TAGS:=$(echo "${response}" | jq -r '.data.Tags')}"
-  STORAGE_ACCOUNT_NAME="${STORAGE_ACCOUNT_NAME:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.storageAccountName')}"
-  SHARED_KEY="${SHARED_KEY=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.sharedKey')}"
+  STORAGE_ACCOUNT_NAME="${STORAGE_ACCOUNT_NAME:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.azureBlobStorageAccountName')}"
+  SHARED_KEY="${SHARED_KEY=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.azureBlobStorageAccessKey')}"
   STORAGE_BACKEND_TYPE="${STORAGE_BACKEND_TYPE:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.type')}"
   S3_BUCKET_NAME="${S3_BUCKET_NAME:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.s3BucketName')}"
   S3_AWS_REGION="${S3_AWS_REGION:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.awsRegion')}"
@@ -251,7 +251,7 @@ ECS_EXTERNAL=true
 EOF
 
 #Fluentbit configuration for aws_s3 output
-if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob" ]]; then
+if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
   cat > ./fluent-bit.conf << EOF
 [SERVICE]
     Flush         1
@@ -466,7 +466,7 @@ configure_fluentbit() { #{{{
   exists=$(docker ps -aq --filter "name=fluentbit-agent")
 
   if [[ -z "${exists}" ]]; then
-    if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob" ]]; then
+    if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
       extra_options="fluent/fluent-bit:2.0.9-debug \
         /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf"
       $docker_run_command $extra_options >/dev/null
