@@ -53,7 +53,8 @@ info() { #{{{
 #}}}
 
 debug() { #{{{
-  printf "%s ${C_MAGENTA_BOLD}[DEBUG]${C_RESET} %s${C_BOLD} %s${C_RESET} %s\n" "$(log_date)" "${1}" "${2}" "${@:3}"
+  [[ "$LOG_DEBUG" =~ true|True ]] && \
+    printf "%s ${C_MAGENTA_BOLD}[DEBUG]${C_RESET} %s${C_BOLD} %s${C_RESET} %s\n" "$(log_date)" "${1}" "${2}" "${@:3}"
 }
 #}}}
 
@@ -136,7 +137,7 @@ fetch_organization_info() { #{{{
   info "Trying to fetch registration data.."
   url="${SG_NODE_API_ENDPOINT}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/register/"
 
-  [[ ${LOG_DEBUG} == "true" ]] && debug "Calling URL:" "${url}"
+  debug "Calling URL:" "${url}"
 
   if ! response=$(curl -fSsLk \
     -X POST \
@@ -148,7 +149,7 @@ fetch_organization_info() { #{{{
     info "Registration data fetched. Preparing environment.."
   fi
 
-  [[ "${LOG_DEBUG}" == "true" ]] && debug "Response:" \
+  debug "Response:" \
     && echo "${response}" | jq
 
   ## API response values (Registration Metadata)
@@ -158,12 +159,10 @@ fetch_organization_info() { #{{{
   SSM_ACTIVATION_ID="${SSM_ACTIVATION_ID:=$(echo "${metadata}" | jq -r '.SSMActivationId')}"
   SSM_ACTIVATION_CODE="${SSM_ACTIVATION_CODE:=$(echo "${metadata}" | jq -r '.SSMActivationCode')}"
 
-  if [[ "${LOG_DEBUG}" == "true" ]]; then
-    debug "ECS_CLUSTER:" "${ECS_CLUSTER}"
-    debug "AWS_DEFAULT_REGION:" "${AWS_DEFAULT_REGION}"
-    debug "SSM_ACTIVATION_ID:" "${SSM_ACTIVATION_ID:0:5}*****"
-    debug "SSM_ACTIVATION_CODE:" "${SSM_ACTIVATION_CODE:0:5}*****"
-  fi
+  debug "ECS_CLUSTER:" "${ECS_CLUSTER}"
+  debug "AWS_DEFAULT_REGION:" "${AWS_DEFAULT_REGION}"
+  debug "SSM_ACTIVATION_ID:" "${SSM_ACTIVATION_ID:0:5}*****"
+  debug "SSM_ACTIVATION_CODE:" "${SSM_ACTIVATION_CODE:0:5}*****"
 
   ## Everything else
   ORGANIZATION_NAME="${ORGANIZATION_NAME:=$(echo "${response}" | jq -r '.data.OrgName')}"
@@ -179,19 +178,18 @@ fetch_organization_info() { #{{{
   S3_AWS_ACCESS_KEY_ID="${S3_AWS_ACCESS_KEY_ID:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].awsAccessKeyId')}"
   S3_AWS_SECRET_ACCESS_KEY="${S3_AWS_SECRET_ACCESS_KEY:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].awsSecretAccessKey')}"
 
-  if [[ "${LOG_DEBUG}" == "true" ]]; then
-    debug "ORGANIZATION_NAME:" "${ORGANIZATION_NAME}"
-    debug "ORGANIZATION_ID:" "${ORGANIZATION_ID}"
-    debug "RUNNER_ID:" "${RUNNER_ID}"
-    debug "RUNNER_GROUP_ID:" "${RUNNER_GROUP_ID}"
-    debug "SHARED_KEY:" "${SHARED_KEY}"
-    debug "STORAGE_ACCOUNT_NAME:" "${STORAGE_ACCOUNT_NAME}"
-    debug "STORAGE_BACKEND_TYPE:" "${STORAGE_BACKEND_TYPE}"
-    debug "S3_BUCKET_NAME:" "${S3_BUCKET_NAME}"
-    debug "S3_AWS_REGION:" "${S3_AWS_REGION}"
-    debug "S3_AWS_ACCESS_KEY_ID:" "${S3_AWS_ACCESS_KEY_ID}"
-    debug "S3_AWS_SECRET_ACCESS_KEY:" "${S3_AWS_SECRET_ACCESS_KEY:0:5}*****"
-  fi
+  debug "ORGANIZATION_NAME:" "${ORGANIZATION_NAME}"
+  debug "ORGANIZATION_ID:" "${ORGANIZATION_ID}"
+  debug "RUNNER_ID:" "${RUNNER_ID}"
+  debug "RUNNER_GROUP_ID:" "${RUNNER_GROUP_ID}"
+  debug "SHARED_KEY:" "${SHARED_KEY}"
+  debug "STORAGE_ACCOUNT_NAME:" "${STORAGE_ACCOUNT_NAME}"
+  debug "STORAGE_BACKEND_TYPE:" "${STORAGE_BACKEND_TYPE}"
+  debug "S3_BUCKET_NAME:" "${S3_BUCKET_NAME}"
+  debug "S3_AWS_REGION:" "${S3_AWS_REGION}"
+  debug "S3_AWS_ACCESS_KEY_ID:" "${S3_AWS_ACCESS_KEY_ID}"
+  debug "S3_AWS_SECRET_ACCESS_KEY:" "${S3_AWS_SECRET_ACCESS_KEY:0:5}*****"
+
   info "Environment ready."
 
 }
@@ -586,7 +584,7 @@ register_instance() { #{{{
   check_systemcl_docker_status && \
     registered=$(docker ps -q --filter "name=ecs-agent")
 
-  [[ "${LOG_DEBUG}" == "true" && -n "$registered" ]] && \
+  [[ -n "$registered" ]] && \
     debug "Instance ecs-agent status:" "${registered}"
 
   if [[ -n "${registered}" ]]; then
@@ -608,8 +606,7 @@ register_instance() { #{{{
       -o "/tmp/ecs-anywhere-install.sh" \
       "https://amazon-ecs-agent.s3.amazonaws.com/ecs-anywhere-install-latest.sh" \
       >&/tmp/ecs_anywhere_download.log; then
-      [[ "${LOG_DEBUG}" == "true" ]] && \
-        debug "Response:" "$(cat /tmp/ecs_anywhere_download.log)"
+      debug "Response:" "$(cat /tmp/ecs_anywhere_download.log)"
       err "Unable to download" "ecs-anywhere-install.sh" "script"
     else
       info "Download completed. Continuing.."
@@ -674,11 +671,11 @@ deregister_instance() { #{{{
 
   url="${SG_NODE_API_ENDPOINT}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/deregister/"
 
-  [[ ${LOG_DEBUG} == "true" ]] && debug "Calling URL:" "${url}"
+  debug "Calling URL:" "${url}"
 
   payload="{ \"RunnerId\": \"${RUNNER_ID}\" }"
 
-  [[ ${LOG_DEBUG} == "true" ]] && debug "Payload:" "${payload}"
+  debug "Payload:" "${payload}"
 
   info "Trying to deregsiter instance.."
   if ! response=$(curl -fSsLk \
