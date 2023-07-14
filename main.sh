@@ -279,6 +279,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
     Match  fluentbit
     account_name ${STORAGE_ACCOUNT_NAME}
     shared_key ${SHARED_KEY}
+    blob_type blockblob
     path fluentbit/log
     container_name system
     auto_create_container on
@@ -289,6 +290,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
     Match  ecsagent
     account_name ${STORAGE_ACCOUNT_NAME}
     shared_key ${SHARED_KEY}
+    blob_type blockblob
     path ecsagent/log
     container_name system
     auto_create_container on
