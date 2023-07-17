@@ -90,6 +90,9 @@ Options:
   --debug
     Print more verbose output during command execution.
 
+  --force
+    Execute some commands with force. Skip some sections in case of errors.
+
 Usage:
   ./$(basename "$0") <command> [options]
 EOF
@@ -114,6 +117,22 @@ spinner() { #{{{
     fi
     wait "${spinner_pid}"
     printf "    \b\b\b\b"
+}
+#}}}
+
+clean_local_setup() { #{{{
+  info "Stopping services.."
+  systemctl stop ecs
+  info "Stopping docker containers.."
+  docker stop ecs-agent fluentbit-agent >&/dev/null
+  info "Removing docker containers.."
+  docker rm ecs-agent fluentbit-agent >&/dev/null
+  info "Removing docker network: ${SG_DOCKER_NETWORK}.."
+  docker network rm "${SG_DOCKER_NETWORK}" >&/dev/nul
+  info "Removing local configuration.."
+  rm -rf /var/log/ecs /etc/ecs /var/lib/ecs ./fluent-bit.conf volumes/ ./aws-credentials ./db-state
+
+  info "Local data removed."
 }
 #}}}
 
@@ -144,6 +163,7 @@ fetch_organization_info() { #{{{
     -H "Authorization: apikey ${SG_NODE_TOKEN}" \
     -H "Content-Type: application/json" \
     "${url}"); then
+    clean_local_setup
     err "Could not fetch data from API."
   else
     info "Registration data fetched. Preparing environment.."
@@ -684,23 +704,14 @@ deregister_instance() { #{{{
     -H "Content-Type: application/json" \
     "${url}" \
     -d "${payload}"); then
+  # if -f/--force is passed, clean stuff anyway in case that API call fails
+  [[ "$FORCE_PASS" == "true" ]] && \
+    clean_local_setup
     err "Could not fetch data from API."
   else
     info "Instance deregistered. Removing local data.."
+    clean_local_setup
   fi
-
-  info "Stopping services.."
-  systemctl stop ecs
-  info "Stopping docker containers.."
-  docker stop ecs-agent fluentbit-agent >&/dev/null
-  info "Removing docker containers.."
-  docker rm ecs-agent fluentbit-agent >&/dev/null
-  info "Removing docker network: ${SG_DOCKER_NETWORK}.."
-  docker network rm "${SG_DOCKER_NETWORK}" >&/dev/nul
-  info "Removing local configuration.."
-  rm -rf /var/log/ecs /etc/ecs /var/lib/ecs ./fluent-bit.conf volumes/ ./aws-credentials ./db-state
-
-  info "Local data removed."
 }
 #}}}
 
@@ -864,6 +875,10 @@ parse_arguments() { #{{{
       check_arg_value "${1}" "${2}"
       RUNNER_GROUP_ID="${2}"
       shift 2
+      ;;
+    -f | --force)
+      FORCE_PASS=true
+      shift
       ;;
     --debug)
       LOG_DEBUG=true
