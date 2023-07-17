@@ -28,31 +28,37 @@ readonly C_MAGENTA_BOLD="\033[1;35m"
 readonly C_RESET="\033[0m"
 readonly C_BOLD="\033[1m"
 
-log_date() {
+log_date() { #{{{
   printf "${C_BLUE}[%s]" "$(date +'%Y-%m-%dT%H:%M:%S%z')"
 }
+#}}}
 
-cleanup() {
+cleanup() { #{{{
   echo "Gracefull shutdown.."
   [[ -n ${spinner_pid} ]] && kill "${spinner_pid}" >&/dev/null
   exit 0
 }
+#}}}
 
-err() {
+err() { #{{{
   printf "%s ${C_RED_BOLD}[ERROR] ${C_RESET}%s${C_BOLD} %s${C_RESET} %s" "$(log_date)" "${1}" "${2}" "${@:3}" >&2
   printf "\n\n(Try ${C_BOLD}%s --help${C_RESET} for more information.)\n" "$(basename "${0}")"
   cleanup
 }
+#}}}
 
-info() {
+info() { #{{{
   printf "%s ${C_GREEN_BOLD}[INFO]${C_RESET} %s${C_BOLD} %s${C_RESET} %s\n" "$(log_date)" "${1}" "${2}" "${@:3}"
 }
+#}}}
 
-debug() {
-  printf "%s ${C_MAGENTA_BOLD}[DEBUG]${C_RESET} %s${C_BOLD} %s${C_RESET} %s\n" "$(log_date)" "${1}" "${2}" "${@:3}"
+debug() { #{{{
+  [[ "$LOG_DEBUG" =~ true|True ]] && \
+    printf "%s ${C_MAGENTA_BOLD}[DEBUG]${C_RESET} %s${C_BOLD} %s${C_RESET} %s\n" "$(log_date)" "${1}" "${2}" "${@:3}"
 }
+#}}}
 
-show_help() {
+show_help() { #{{{
   cat <<EOF
 
 main.sh is script for registration of Private Runner Nodes on Stackguardian.
@@ -84,12 +90,16 @@ Options:
   --debug
     Print more verbose output during command execution.
 
+  --force
+    Execute some commands with force. Skip some sections in case of errors.
+
 Usage:
   ./$(basename "$0") <command> [options]
 EOF
 }
+#}}}
 
-spinner() {
+spinner() { #{{{
     spinner_pid=$1
     local log_file="$2"
     local delay=0.15
@@ -108,6 +118,23 @@ spinner() {
     wait "${spinner_pid}"
     printf "    \b\b\b\b"
 }
+#}}}
+
+clean_local_setup() { #{{{
+  info "Stopping services.."
+  systemctl stop ecs
+  info "Stopping docker containers.."
+  docker stop ecs-agent fluentbit-agent >&/dev/null
+  info "Removing docker containers.."
+  docker rm ecs-agent fluentbit-agent >&/dev/null
+  info "Removing docker network: ${SG_DOCKER_NETWORK}.."
+  docker network rm "${SG_DOCKER_NETWORK}" >&/dev/nul
+  info "Removing local configuration.."
+  rm -rf /var/log/ecs /etc/ecs /var/lib/ecs ./fluent-bit.conf volumes/ ./aws-credentials ./db-state
+
+  info "Local data removed."
+}
+#}}}
 
 #######################################
 # Fetch necessary info from API.
@@ -121,7 +148,7 @@ spinner() {
 #   Write to STDERR if error and exit.
 #   Set all neccessary environment variables.
 #######################################
-fetch_organization_info() {
+fetch_organization_info() { #{{{
   local response
   local metadata
   local url
@@ -129,19 +156,20 @@ fetch_organization_info() {
   info "Trying to fetch registration data.."
   url="${SG_NODE_API_ENDPOINT}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/register/"
 
-  [[ ${LOG_DEBUG} == "true" ]] && debug "Calling URL:" "${url}"
+  debug "Calling URL:" "${url}"
 
   if ! response=$(curl -fSsLk \
     -X POST \
     -H "Authorization: apikey ${SG_NODE_TOKEN}" \
     -H "Content-Type: application/json" \
     "${url}"); then
+    clean_local_setup
     err "Could not fetch data from API."
   else
     info "Registration data fetched. Preparing environment.."
   fi
 
-  [[ "${LOG_DEBUG}" == "true" ]] && debug "Response:" \
+  debug "Response:" \
     && echo "${response}" | jq
 
   ## API response values (Registration Metadata)
@@ -151,12 +179,10 @@ fetch_organization_info() {
   SSM_ACTIVATION_ID="${SSM_ACTIVATION_ID:=$(echo "${metadata}" | jq -r '.SSMActivationId')}"
   SSM_ACTIVATION_CODE="${SSM_ACTIVATION_CODE:=$(echo "${metadata}" | jq -r '.SSMActivationCode')}"
 
-  if [[ "${LOG_DEBUG}" == "true" ]]; then
-    debug "ECS_CLUSTER:" "${ECS_CLUSTER}"
-    debug "AWS_DEFAULT_REGION:" "${AWS_DEFAULT_REGION}"
-    debug "SSM_ACTIVATION_ID:" "${SSM_ACTIVATION_ID:0:5}*****"
-    debug "SSM_ACTIVATION_CODE:" "${SSM_ACTIVATION_CODE:0:5}*****"
-  fi
+  debug "ECS_CLUSTER:" "${ECS_CLUSTER}"
+  debug "AWS_DEFAULT_REGION:" "${AWS_DEFAULT_REGION}"
+  debug "SSM_ACTIVATION_ID:" "${SSM_ACTIVATION_ID:0:5}*****"
+  debug "SSM_ACTIVATION_CODE:" "${SSM_ACTIVATION_CODE:0:5}*****"
 
   ## Everything else
   ORGANIZATION_NAME="${ORGANIZATION_NAME:=$(echo "${response}" | jq -r '.data.OrgName')}"
@@ -172,22 +198,22 @@ fetch_organization_info() {
   S3_AWS_ACCESS_KEY_ID="${S3_AWS_ACCESS_KEY_ID:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].awsAccessKeyId')}"
   S3_AWS_SECRET_ACCESS_KEY="${S3_AWS_SECRET_ACCESS_KEY:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].awsSecretAccessKey')}"
 
-  if [[ "${LOG_DEBUG}" == "true" ]]; then
-    debug "ORGANIZATION_NAME:" "${ORGANIZATION_NAME}"
-    debug "ORGANIZATION_ID:" "${ORGANIZATION_ID}"
-    debug "RUNNER_ID:" "${RUNNER_ID}"
-    debug "RUNNER_GROUP_ID:" "${RUNNER_GROUP_ID}"
-    debug "SHARED_KEY:" "${SHARED_KEY}"
-    debug "STORAGE_ACCOUNT_NAME:" "${STORAGE_ACCOUNT_NAME}"
-    debug "STORAGE_BACKEND_TYPE:" "${STORAGE_BACKEND_TYPE}"
-    debug "S3_BUCKET_NAME:" "${S3_BUCKET_NAME}"
-    debug "S3_AWS_REGION:" "${S3_AWS_REGION}"
-    debug "S3_AWS_ACCESS_KEY_ID:" "${S3_AWS_ACCESS_KEY_ID}"
-    debug "S3_AWS_SECRET_ACCESS_KEY:" "${S3_AWS_SECRET_ACCESS_KEY:0:5}*****"
-  fi
+  debug "ORGANIZATION_NAME:" "${ORGANIZATION_NAME}"
+  debug "ORGANIZATION_ID:" "${ORGANIZATION_ID}"
+  debug "RUNNER_ID:" "${RUNNER_ID}"
+  debug "RUNNER_GROUP_ID:" "${RUNNER_GROUP_ID}"
+  debug "SHARED_KEY:" "${SHARED_KEY}"
+  debug "STORAGE_ACCOUNT_NAME:" "${STORAGE_ACCOUNT_NAME}"
+  debug "STORAGE_BACKEND_TYPE:" "${STORAGE_BACKEND_TYPE}"
+  debug "S3_BUCKET_NAME:" "${S3_BUCKET_NAME}"
+  debug "S3_AWS_REGION:" "${S3_AWS_REGION}"
+  debug "S3_AWS_ACCESS_KEY_ID:" "${S3_AWS_ACCESS_KEY_ID}"
+  debug "S3_AWS_SECRET_ACCESS_KEY:" "${S3_AWS_SECRET_ACCESS_KEY:0:5}*****"
+
   info "Environment ready."
 
 }
+#}}}
 
 #######################################
 # Configure local direcotries and files.
@@ -202,7 +228,7 @@ fetch_organization_info() {
 # Outputs:
 #   Writes STOUT on success.
 #######################################
-configure_local_data() {
+configure_local_data() { #{{{
   # Set up directories the agent uses
   mkdir -p /var/log/ecs /etc/ecs /var/lib/ecs/data /etc/fluentbit/
   rm -rf /etc/ecs/ecs.config /var/lib/ecs/ecs.config > /dev/null
@@ -346,6 +372,7 @@ fi
   info "Local data configured."
 
 }
+#}}}
 
 #######################################
 # Configure local network.
@@ -356,7 +383,7 @@ fi
 # Outputs:
 #   Writes STOUT on success.
 #######################################
-configure_local_network() {
+configure_local_network() { #{{{
   info "Configuring local network.."
 
   # Create wf-steps-net docker network
@@ -396,6 +423,7 @@ configure_local_network() {
   info "Local network configured."
 
 }
+#}}}
 
 #######################################
 # Run fluentbit Docker container for logging
@@ -411,7 +439,7 @@ configure_local_network() {
 # This portion checks whether the STORAGE_BACKEND_TYPE is
 # aws_s3 or azure_blob and runs the container accordingly.
 ########################################
-configure_fluentbit() {
+configure_fluentbit() { #{{{
   local running
   local exists
 
@@ -452,6 +480,7 @@ configure_fluentbit() {
     fi
   fi
 }
+#}}}
 
 #######################################
 # Check if specific service.$1 is runing.
@@ -466,7 +495,7 @@ configure_fluentbit() {
 #   Write to STDOUT/STDERR
 #   if successfull/error.
 #######################################
-check_systemctl_status() {
+check_systemctl_status() { #{{{
   if ! systemctl is-active "$1" >&/dev/null; then
     info "Reloading/Restarting neccessary services.."
     systemctl reload-or-restart "$1"
@@ -476,6 +505,7 @@ check_systemctl_status() {
     return 1
   fi
 }
+#}}}
 
 #######################################
 # Check if ecs.service exists
@@ -490,7 +520,7 @@ check_systemctl_status() {
 #   Write to STDOUT/STERR
 #   if successfull/error.
 #######################################
-check_systemcl_ecs_status() {
+check_systemcl_ecs_status() { #{{{
   systemctl status ecs --no-pager >&/dev/null
   if [[ "$?" =~ 4|0 ]]; then
     return 0
@@ -498,6 +528,7 @@ check_systemcl_ecs_status() {
     check_systemctl_status "ecs"
   fi
 }
+#}}}
 
 #######################################
 # Check if docker.service exists
@@ -512,7 +543,7 @@ check_systemcl_ecs_status() {
 #   Write to STDOUT/STERR
 #   if successfull/error.
 #######################################
-check_systemcl_docker_status() {
+check_systemcl_docker_status() { #{{{
   if type docker >&/dev/null; then
     check_systemctl_status "docker"
     return $?
@@ -520,6 +551,7 @@ check_systemcl_docker_status() {
     return 1
   fi
 }
+#}}}
 
 #######################################
 # Print details at the end of registration
@@ -532,16 +564,18 @@ check_systemcl_docker_status() {
 # Outputs:
 #   Write to STDOUT
 #######################################
-details_frame() {
+details_frame() { #{{{
   printf " + ${C_BOLD}%s${C_RESET} " "${1}"
   printf "\n |\n"
 }
+#}}}
 
-details_item() {
+details_item() { #{{{
   printf " | * %s: ${C_GREEN_BOLD}%s${C_RESET}\n" "$1" "$2"
 }
+#}}}
 
-print_details() {
+print_details() { #{{{
   echo
   details_frame "Registration Details"
   details_item "Organization" "${ORGANIZATION_NAME}"
@@ -549,6 +583,7 @@ print_details() {
   details_item "Runner ID" "${RUNNER_ID}"
   echo
 }
+#}}}
 
 #######################################
 # Register instance to AWS ECS.
@@ -563,13 +598,13 @@ print_details() {
 #   Write to STDOUT/STERR
 #   if successfull/error.
 #######################################
-register_instance() {
+register_instance() { #{{{
   local registered
 
   check_systemcl_docker_status && \
     registered=$(docker ps -q --filter "name=ecs-agent")
 
-  [[ "${LOG_DEBUG}" == "true" && -n "$registered" ]] && \
+  [[ -n "$registered" ]] && \
     debug "Instance ecs-agent status:" "${registered}"
 
   if [[ -n "${registered}" ]]; then
@@ -591,8 +626,7 @@ register_instance() {
       -o "/tmp/ecs-anywhere-install.sh" \
       "https://amazon-ecs-agent.s3.amazonaws.com/ecs-anywhere-install-latest.sh" \
       >&/tmp/ecs_anywhere_download.log; then
-      [[ "${LOG_DEBUG}" == "true" ]] && \
-        debug "Response:" "$(cat /tmp/ecs_anywhere_download.log)"
+      debug "Response:" "$(cat /tmp/ecs_anywhere_download.log)"
       err "Unable to download" "ecs-anywhere-install.sh" "script"
     else
       info "Download completed. Continuing.."
@@ -630,6 +664,7 @@ register_instance() {
   configure_fluentbit
   print_details
 }
+#}}}
 
 #######################################
 # Make API call for de-registering.
@@ -642,7 +677,7 @@ register_instance() {
 #   Writes to STDOUT/STDERR
 #   if de-registration is sucessfull.
 #######################################
-deregister_instance() {
+deregister_instance() { #{{{
   local response
   local url
 
@@ -656,11 +691,11 @@ deregister_instance() {
 
   url="${SG_NODE_API_ENDPOINT}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/deregister/"
 
-  [[ ${LOG_DEBUG} == "true" ]] && debug "Calling URL:" "${url}"
+  debug "Calling URL:" "${url}"
 
   payload="{ \"RunnerId\": \"${RUNNER_ID}\" }"
 
-  [[ ${LOG_DEBUG} == "true" ]] && debug "Payload:" "${payload}"
+  debug "Payload:" "${payload}"
 
   info "Trying to deregsiter instance.."
   if ! response=$(curl -fSsLk \
@@ -669,24 +704,16 @@ deregister_instance() {
     -H "Content-Type: application/json" \
     "${url}" \
     -d "${payload}"); then
+  # if -f/--force is passed, clean stuff anyway in case that API call fails
+  [[ "$FORCE_PASS" == "true" ]] && \
+    clean_local_setup
     err "Could not fetch data from API."
   else
     info "Instance deregistered. Removing local data.."
+    clean_local_setup
   fi
-
-  info "Stopping services.."
-  systemctl stop ecs
-  info "Stopping docker containers.."
-  docker stop ecs-agent fluentbit-agent >&/dev/null
-  info "Removing docker containers.."
-  docker rm ecs-agent fluentbit-agent >&/dev/null
-  info "Removing docker network: ${SG_DOCKER_NETWORK}.."
-  docker network rm "${SG_DOCKER_NETWORK}" >&/dev/nul
-  info "Removing local configuration.."
-  rm -rf /var/log/ecs /etc/ecs /var/lib/ecs ./fluent-bit.conf volumes/ ./aws-credentials ./db-state
-
-  info "Local data removed."
 }
+#}}}
 
 #######################################
 # Print frame for doctor check.
@@ -700,13 +727,14 @@ deregister_instance() {
 # Outputs:
 #   Write to STDOUT frame with contents
 #######################################
-doctor_frame() {
+doctor_frame() { #{{{
   printf " + %s " "${1}"
   printf "\n |"
   printf "%s" "$2"
   # printf "\n |\n"
   printf "\n"
 }
+#}}}
 
 #######################################
 # Check if all services is working
@@ -720,7 +748,7 @@ doctor_frame() {
 #  Write to STDOUT list
 #  of services with status
 #######################################
-doctor() {
+doctor() { #{{{
   info "Checking services health status.."
   echo
 
@@ -774,6 +802,7 @@ doctor() {
   echo
   info "Services health status generated."
 }
+#}}}
 
 #######################################
 # Check if provided argument is valid.
@@ -787,7 +816,7 @@ doctor() {
 # Outputs:
 #   If error, write to STDERR and exit.
 #######################################
-check_arg_value() {
+check_arg_value() { #{{{
   ## TODO(adis.halilovic@stackguardian.io): make sure to validate double parameter input
   if [[ "${2:0:2}" == "--" ]]; then
     err "Argument" "${1}" "has invalid value: $2"
@@ -796,15 +825,17 @@ check_arg_value() {
   fi
   return 0
 }
+#}}}
 
-is_root() {
+is_root() { #{{{
   if (( $(id -u) != 0 )); then
     err "This script must be run as" "root"
   fi
   return 0
 }
+#}}}
 
-init_args_are_valid() {
+init_args_are_valid() { #{{{
   if [[ ! "$1" =~ register|deregister|doctor ]]; then
     err "Provided option" "${1}" "is invalid"
   elif [[ "$1" =~ register|deregister && \
@@ -815,8 +846,9 @@ init_args_are_valid() {
   fi
   return 0
 }
+#}}}
 
-check_sg_args() {
+check_sg_args() { #{{{
   if [[ -z "${SG_NODE_TOKEN}" \
     || -z "${ORGANIZATION_ID}" \
     || -z "${RUNNER_GROUP_ID}" ]]; then
@@ -824,8 +856,9 @@ check_sg_args() {
   fi
   return 0
 }
+#}}}
 
-parse_arguments() {
+parse_arguments() { #{{{
   while :; do
     case "${1}" in
     --sg-node-token)
@@ -843,6 +876,10 @@ parse_arguments() {
       RUNNER_GROUP_ID="${2}"
       shift 2
       ;;
+    -f | --force)
+      FORCE_PASS=true
+      shift
+      ;;
     --debug)
       LOG_DEBUG=true
       shift
@@ -854,8 +891,9 @@ parse_arguments() {
     esac
   done
 }
+#}}}
 
-main() {
+main() { #{{{
 
 if ! type jq >&/dev/null; then
   err "Command" "jq" "not installed"
@@ -887,6 +925,7 @@ esac
 # TODO: API call to ping the node
 
 }
+#}}}
 
 trap cleanup SIGINT
 
