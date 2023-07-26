@@ -341,6 +341,9 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     region              ${S3_AWS_REGION}
     upload_timeout      5s
     total_file_size     1M
+    store_dir_limit_size 2G
+    total_file_size 250M
+    retry_limit 50
     use_put_object  On
     compression gzip
     bucket              ${S3_BUCKET_NAME}
@@ -352,6 +355,9 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     region              ${S3_AWS_REGION}
     upload_timeout      5s
     total_file_size     1M
+    store_dir_limit_size 2G
+    total_file_size 250M
+    retry_limit 50
     use_put_object  On
     compression gzip
     bucket              ${S3_BUCKET_NAME}
@@ -364,6 +370,9 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     upload_timeout      5s
     total_file_size     1M
     use_put_object  On
+    store_dir_limit_size 2G
+    total_file_size 250M
+    retry_limit 50
     compression gzip
     bucket              ${S3_BUCKET_NAME}
     s3_key_format /\$TAG/logs/log
