@@ -5,7 +5,7 @@
 set -o pipefail
 
 # Environment variables
-SG_NODE_API_ENDPOINT="https://testapi.qa.stackguardian.io/api/v1"
+SG_NODE_API_ENDPOINT="https://api.app.stackguardian.io/api/v1"
 LOG_DEBUG=${LOG_DEBUG:=false}
 SG_DOCKER_NETWORK="sg-net"
 
@@ -906,6 +906,10 @@ main() { #{{{
 
 if ! type jq >&/dev/null; then
   err "Command" "jq" "not installed"
+fi
+
+if ! type docker >&/dev/null; then
+  err "Command" "docker" "not installed or running"
 fi
 
 [[ "${*}" =~ --help|-h || $# -lt 1 ]] && show_help && exit 0
