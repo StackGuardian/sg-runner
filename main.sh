@@ -912,7 +912,7 @@ if ! type docker >&/dev/null; then
   err "Command" "docker" "not installed or running"
 fi
 
-[[ "${*}" =~ --help|-h || $# -lt 1 ]] && show_help && exit 0
+[[ "${*}" =~ --help || $# -lt 1 ]] && show_help && exit 0
 
 is_root && init_args_are_valid "$@"
 
