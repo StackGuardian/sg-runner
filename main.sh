@@ -177,6 +177,13 @@ print_details() { #{{{
   details_item "Organization" "${ORGANIZATION_NAME}"
   details_item "Runner Group" "${RUNNER_GROUP_ID}"
   details_item "Runner ID" "${RUNNER_ID}"
+  details_item "Hostaname" "$HOSTNAME"
+  details_item "OS_Release" "$(cat /etc/*release | grep -oP '(?<=PRETTY_NAME=").*?(?=")')"
+  details_item "Registration Date" "$(date +'%Y-%m-%dT%H:%M:%S%z')"
+  details_item "CPU Cores" "$(nproc)"
+  details_item "Memory" "$(free -h | awk '/^Mem:/ {print $2}')"
+  details_item "Disk Size" "$(df -h --total | awk '/^total/ {print $2}')"
+  details_item "Uptime" "$(uptime)"
   echo
 }
 #}}}: print_details
@@ -847,6 +854,7 @@ register_instance() { #{{{
     configure_local_network
     configure_fluentbit
     print_details
+    print_details | sed 's/\x1B\[[0-9;]*[JKmsu]//g' >> "registration_details_$(date +'%Y-%m-%dT%H-%M-%S%z').txt"
     exit 0
   fi
 
@@ -903,6 +911,7 @@ register_instance() { #{{{
   configure_local_network
   setup_cron
   print_details
+  print_details | sed 's/\x1B\[[0-9;]*[JKmsu]//g' >> "registration_details_$(date +'%Y-%m-%dT%H-%M-%S%z').txt"
 }
 #}}}: register_instance
 
