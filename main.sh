@@ -9,6 +9,14 @@ SG_NODE_API_ENDPOINT="https://api.app.stackguardian.io/api/v1"
 LOG_DEBUG=${LOG_DEBUG:=false}
 SG_DOCKER_NETWORK="sg-net"
 
+DIAGNOSTIC_FILE="/tmp/diagnostic.json"
+TMP_FILE="/tmp/diagnostic.json.tmp"
+
+if [[ ! -e "$DIAGNOSTIC_FILE" ]]; then
+  touch "$DIAGNOSTIC_FILE"
+  echo "{}" > "$DIAGNOSTIC_FILE"
+fi
+
 # Source .env if exists (testing purposes)
 [[ -f .env ]] && . .env
 
@@ -543,37 +551,6 @@ configure_fluentbit() { #{{{
 #}}}
 
 #######################################
-# Run fluentbit Docker container for logging
-# Globals:
-#
-# Arguments:
-#   AWS_ACCESS_KEY_ID
-#   AWS_SECRET_ACCESS_KEY
-# Outputs:
-#   Write to STDOUT/STERR
-#   if successfull/error.
-#######################################
-# This portion checks whether the STORAGE_BACKEND_TYPE is
-# aws_s3 or azure_blob and runs the container accordingly.
-########################################
-setup_cron() { #{{{
-  cron_file="/var/spool/cron/root"
-  if [[ ! -e "$cron_file" ]]; then
-    info "Cron file does not exist, creating.."
-    touch "$cron_file"
-  fi
-
-  if ! grep -qi "doctor" "$cron_file"; then
-    {
-      crontab -l >> "$cron_file",
-      echo "*/5 * * * * /bin/bash $PWD/main.sh doctor"
-    } >> "$cron_file"
-  fi
-  /usr/bin/crontab "$cron_file"
-}
-#}}}
-
-#######################################
 # Check if specific service.$1 is runing.
 # If not try reload or restart.
 # Globals:
@@ -840,16 +817,8 @@ doctor() { #{{{
   info "Checking services health status.."
   echo
 
-  local diagnostic_file="/tmp/diagnostic.json"
-  local tmp_file="/tmp/diagnostic.json.tmp"
-
-  if [[ ! -e "$diagnostic_file" ]]; then
-    touch "$diagnostic_file"
-    echo "{}" > "$diagnostic_file"
-  fi
-
-  jq ".meta.last_check = \"$(date)\"" "$diagnostic_file" >> "$tmp_file"
-  mv "$tmp_file" "$diagnostic_file"
+  jq ".system.last_check = \"$(date)\"" "$DIAGNOSTIC_FILE" >> "$TMP_FILE"
+  mv "$TMP_FILE" "$DIAGNOSTIC_FILE"
 
   local status_list=""
   local service_status
@@ -857,8 +826,8 @@ doctor() { #{{{
 
   for service in "${service_list[@]}"; do
     service_status="$(systemctl is-active "${service}")"
-    jq ".health.service.${service} = \"$service_status\"" $diagnostic_file > $tmp_file
-    mv $tmp_file $diagnostic_file
+    jq ".health.service.${service} = \"$service_status\"" $DIAGNOSTIC_FILE > $TMP_FILE
+    mv $TMP_FILE $DIAGNOSTIC_FILE
     if [[ -n ${service_status} && ${service_status} == "active" ]]; then
       status_list="$(printf "%s\n%s" \
         "${status_list}" \
@@ -876,8 +845,8 @@ doctor_frame "System Service" "${status_list}"
 
   service_status="$(systemctl is-active docker)"
   if [[ "${service_status}" != "active" ]]; then
-    jq ".health.service.docker = \"$service_status\"" $diagnostic_file > $tmp_file
-    mv $tmp_file $diagnostic_file
+    jq ".health.service.docker = \"$service_status\"" $DIAGNOSTIC_FILE > $TMP_FILE
+    mv $TMP_FILE $DIAGNOSTIC_FILE
     printf " + Container Status (${C_BOLD}docker ${C_RESET}service: ${C_RED}%s${C_RESET})\n\n" "${service_status}"
     return
   fi
@@ -892,14 +861,14 @@ doctor_frame "System Service" "${status_list}"
       --format '{{.Status}}'\
       )"
     if [[ -z ${container_status} ]]; then
-      jq ".health.container.$container = \"not_running\"" $diagnostic_file > $tmp_file
-      mv $tmp_file $diagnostic_file
+      jq ".health.container.$container = \"Not Running\"" $DIAGNOSTIC_FILE > $TMP_FILE
+      mv $TMP_FILE $DIAGNOSTIC_FILE
       status_list="$(printf "%s\n%s" \
         "${status_list}" \
         "$(printf " | * ${C_BOLD}%s${C_RESET} agent: ${C_RED}Not Running${C_RESET}\n" "${container}")")"
     else
-      jq ".health.container.$container = \"$container_status\"" $diagnostic_file > $tmp_file
-      mv $tmp_file $diagnostic_file
+      jq ".health.container.$container = \"$container_status\"" $DIAGNOSTIC_FILE > $TMP_FILE
+      mv $TMP_FILE $DIAGNOSTIC_FILE
       status_list="$(printf "%s\n%s" \
         "${status_list}" \
         "$(printf " | * ${C_BOLD}%s${C_RESET} agent: ${C_GREEN}%s${C_RESET}\n" "${container}" "${container_status}")")"
@@ -911,6 +880,56 @@ doctor_frame "System Service" "${status_list}"
   info "Services health status generated."
 }
 #}}}
+
+prune() { #{{{
+  local reclaimed
+
+  info "Cleaning up system.."
+
+  reclaimed=$(docker system prune -f \
+    --filter "until=$(date -d "10 days ago" +%Y-%m-%d)" \
+    | cut -d: -f2 | tr -d ' ')
+
+  jq ".system.docker.last_prune = \"$(date)\"" "$DIAGNOSTIC_FILE" >> "$TMP_FILE"
+  mv "$TMP_FILE" "$DIAGNOSTIC_FILE"
+  jq ".system.docker.reclaimed = \"$reclaimed\"" "$DIAGNOSTIC_FILE" >> "$TMP_FILE"
+  mv "$TMP_FILE" "$DIAGNOSTIC_FILE"
+
+  info "System cleaned. Reclimed:" "$reclaimed"
+}
+#}}}
+
+#######################################
+# Run fluentbit Docker container for logging
+# Globals:
+#
+# Arguments:
+#   AWS_ACCESS_KEY_ID
+#   AWS_SECRET_ACCESS_KEY
+# Outputs:
+#   Write to STDOUT/STERR
+#   if successfull/error.
+#######################################
+# This portion checks whether the STORAGE_BACKEND_TYPE is
+# aws_s3 or azure_blob and runs the container accordingly.
+########################################
+setup_cron() { #{{{
+  local temp_file
+
+  temp_file=$(mktemp)
+  crontab -l > "$temp_file" || echo "" > "$temp_file"
+
+  if ! grep -qi -E "doctor|prune" "$temp_file"; then
+    {
+      echo "* * * * * /bin/bash $PWD/main.sh doctor";
+      echo "0 0 * * * /bin/bash $PWD/main.sh prune"
+    } >> "$temp_file"
+  fi
+  /usr/bin/crontab "$temp_file"
+  doctor
+}
+#}}}
+
 
 #######################################
 # Check if provided argument is valid.
@@ -947,7 +966,7 @@ is_root() { #{{{
 #}}}
 
 init_args_are_valid() { #{{{
-  if [[ ! "$1" =~ register|deregister|doctor ]]; then
+  if [[ ! "$1" =~ register|deregister|doctor|prune ]]; then
     err "Provided option" "${1}" "is invalid"
     exit 1
   elif [[ "$1" =~ register|deregister && \
@@ -1031,6 +1050,10 @@ case "${1}" in
     parse_arguments "$@"
     check_sg_args
     deregister_instance
+    ;;
+  prune)
+    prune
+    exit 0
     ;;
   doctor)
     doctor
