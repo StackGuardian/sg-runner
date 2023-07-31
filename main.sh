@@ -40,10 +40,14 @@ cleanup() { #{{{
 }
 #}}}
 
+force_exec() { #{{{
+  [[ "$FORCE_PASS" == true ]] && return 0
+  return 1
+}
+#}}}
+
 err() { #{{{
-  printf "%s ${C_RED_BOLD}[ERROR] ${C_RESET}%s${C_BOLD} %s${C_RESET} %s" "$(log_date)" "${1}" "${2}" "${@:3}" >&2
-  printf "\n\n(Try ${C_BOLD}%s --help${C_RESET} for more information.)\n" "$(basename "${0}")"
-  cleanup
+  printf "%s ${C_RED_BOLD}[ERROR] ${C_RESET}%s${C_BOLD} %s${C_RESET} %s\n" "$(log_date)" "${1}" "${2}" "${@:3}" >&2
 }
 #}}}
 
@@ -55,6 +59,13 @@ info() { #{{{
 debug() { #{{{
   [[ "$LOG_DEBUG" =~ true|True ]] && \
     printf "%s ${C_MAGENTA_BOLD}[DEBUG]${C_RESET} %s${C_BOLD} %s${C_RESET} %s\n" "$(log_date)" "${1}" "${2}" "${@:3}"
+}
+#}}}
+
+exit_help() { #{{{
+  exit_code=$?
+  (( "$exit_code" != 0 )) && \
+    printf "\n(Try ${C_BOLD}%s --help${C_RESET} for more information.)\n" "$(basename "${0}")"
 }
 #}}}
 
@@ -130,9 +141,50 @@ clean_local_setup() { #{{{
   info "Removing docker network: ${SG_DOCKER_NETWORK}.."
   docker network rm "${SG_DOCKER_NETWORK}" >&/dev/nul
   info "Removing local configuration.."
-  rm -rf /var/log/ecs /etc/ecs /var/lib/ecs ./fluent-bit.conf volumes/ ./aws-credentials ./db-state
+  rm -rf /var/log/ecs /etc/ecs /var/lib/ecs ./fluent-bit.conf volumes/ ./aws-credentials ./db-state ./ssm-binaries >&/dev/null
 
   info "Local data removed."
+}
+#}}}
+
+api_call() { #{{{
+  response=$(curl -i -s \
+    -X POST \
+    -H "Authorization: apikey ${SG_NODE_TOKEN}" \
+    -H "Content-Type: application/json" \
+    "${url}")
+
+  if [[ -z "$response" ]]; then
+    exit 1
+  else
+    full_response="$response"
+  fi
+
+  debug "Response:" \
+    && echo "${response}"
+
+  # get first status code from response
+  status_code="$(echo "$response" \
+    | awk '/^HTTP/ {print $2}')"
+
+  # actual response data
+  response="$(echo "$response" \
+    | awk '/^Response/ {print $2}')"
+  [[ -z "$response" ]] && \
+  response="$(echo "$full_response" | sed -n '/^{.*/,$p' | tr '\n' ' ')"
+
+  # msg from data
+  message="$(echo "$response" \
+    | jq -r '.msg // .message //  "Unknown error"')"
+
+  if [[ -z "$status_code" ]]; then
+    err "Unknown status code."
+    exit 1
+  elif [ "$status_code" != "200" ] && [ "$status_code" != "201" ] && [ "$status_code" != "100" ]; then
+    return 1
+  else
+    return 0
+  fi
 }
 #}}}
 
@@ -149,7 +201,6 @@ clean_local_setup() { #{{{
 #   Set all neccessary environment variables.
 #######################################
 fetch_organization_info() { #{{{
-  local response
   local metadata
   local url
 
@@ -158,19 +209,12 @@ fetch_organization_info() { #{{{
 
   debug "Calling URL:" "${url}"
 
-  if ! response=$(curl -fSsLk \
-    -X POST \
-    -H "Authorization: apikey ${SG_NODE_TOKEN}" \
-    -H "Content-Type: application/json" \
-    "${url}"); then
-    clean_local_setup
-    err "Could not fetch data from API."
-  else
+  if api_call; then
     info "Registration data fetched. Preparing environment.."
+  else
+    err "Could not fetch data from API. >>" "$message $status_code" "<<"
+    exit 1
   fi
-
-  debug "Response:" \
-    && echo "${response}" | jq
 
   ## API response values (Registration Metadata)
   metadata="$(echo "${response}" | jq -r '.data.RegistrationMetadata[0]')"
@@ -461,6 +505,7 @@ configure_fluentbit() { #{{{
   info "Starting fluentbit agent.."
   docker_run_command="docker run -d \
       --name fluentbit-agent \
+      --restart=always \
       -p 24224:24224 \
       -p 2020:2020 \
       --network bridge \
@@ -494,6 +539,37 @@ configure_fluentbit() { #{{{
         info "Fluentbit agent already running."
     fi
   fi
+}
+#}}}
+
+#######################################
+# Run fluentbit Docker container for logging
+# Globals:
+#
+# Arguments:
+#   AWS_ACCESS_KEY_ID
+#   AWS_SECRET_ACCESS_KEY
+# Outputs:
+#   Write to STDOUT/STERR
+#   if successfull/error.
+#######################################
+# This portion checks whether the STORAGE_BACKEND_TYPE is
+# aws_s3 or azure_blob and runs the container accordingly.
+########################################
+setup_cron() { #{{{
+  cron_file="/var/spool/cron/root"
+  if [[ ! -e "$cron_file" ]]; then
+    info "Cron file does not exist, creating.."
+    touch "$cron_file"
+  fi
+
+  if ! grep -qi "doctor" "$cron_file"; then
+    {
+      crontab -l >> "$cron_file",
+      echo "*/5 * * * * /bin/bash $PWD/main.sh doctor"
+    } >> "$cron_file"
+  fi
+  /usr/bin/crontab "$cron_file"
 }
 #}}}
 
@@ -619,10 +695,8 @@ register_instance() { #{{{
   check_systemcl_docker_status && \
     registered=$(docker ps -q --filter "name=ecs-agent")
 
-  [[ -n "$registered" ]] && \
-    debug "Instance ecs-agent status:" "${registered}"
-
   if [[ -n "${registered}" ]]; then
+    debug "Instance ecs-agent status:" "${registered}"
     info "Instance agent already registered and running."
     configure_local_network
     configure_fluentbit
@@ -643,6 +717,7 @@ register_instance() { #{{{
       >&/tmp/ecs_anywhere_download.log; then
       debug "Response:" "$(cat /tmp/ecs_anywhere_download.log)"
       err "Unable to download" "ecs-anywhere-install.sh" "script"
+      exit 1
     else
       info "Download completed. Continuing.."
     fi
@@ -668,15 +743,19 @@ register_instance() { #{{{
     container_status="$(docker ps -a --filter='name=ecs-agent' --format '{{.Status}}')"
     if [[ "$?" != 0 || "$container_status" =~ Exited ]]; then
       err "Failed to register external instance."
+      grep Error /var/lib/docker/containers/*/*-json.log
+      exit 1
     else
       info "Instance successfully registered to Stackguardian platform."
     fi
   else
     err "Failed to register external instance."
+    exit 1
   fi
 
   configure_local_network
   configure_fluentbit
+  setup_cron
   print_details
 }
 #}}}
@@ -693,7 +772,6 @@ register_instance() { #{{{
 #   if de-registration is sucessfull.
 #######################################
 deregister_instance() { #{{{
-  local response
   local url
 
   if [[ -e /etc/ecs/ecs.config ]]; then
@@ -702,6 +780,8 @@ deregister_instance() { #{{{
       | jq -r '.sg_runner_id')"
   else
     err "Local data could not be found:" "/etc/ecs/ecs.config"
+    force_exec && clean_local_setup
+    exit 1
   fi
 
   url="${SG_NODE_API_ENDPOINT}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/deregister/"
@@ -713,19 +793,12 @@ deregister_instance() { #{{{
   debug "Payload:" "${payload}"
 
   info "Trying to deregsiter instance.."
-  if ! response=$(curl -fSsLk \
-    -X POST \
-    -H "Authorization: apikey ${SG_NODE_TOKEN}" \
-    -H "Content-Type: application/json" \
-    "${url}" \
-    -d "${payload}"); then
-  # if -f/--force is passed, clean stuff anyway in case that API call fails
-  [[ "$FORCE_PASS" == "true" ]] && \
-    clean_local_setup
-    err "Could not fetch data from API."
-  else
+  if api_call; then
     info "Instance deregistered. Removing local data.."
     clean_local_setup
+  else
+    err "Could not fetch data from API. >>" "$message - $status_code" "<<"
+    force_exec && clean_local_setup
   fi
 }
 #}}}
@@ -767,12 +840,25 @@ doctor() { #{{{
   info "Checking services health status.."
   echo
 
+  local diagnostic_file="/tmp/diagnostic.json"
+  local tmp_file="/tmp/diagnostic.json.tmp"
+
+  if [[ ! -e "$diagnostic_file" ]]; then
+    touch "$diagnostic_file"
+    echo "{}" > "$diagnostic_file"
+  fi
+
+  jq ".meta.last_check = \"$(date)\"" "$diagnostic_file" >> "$tmp_file"
+  mv "$tmp_file" "$diagnostic_file"
+
   local status_list=""
   local service_status
   local service_list=( "ecs" "docker" )
 
   for service in "${service_list[@]}"; do
     service_status="$(systemctl is-active "${service}")"
+    jq ".health.service.${service} = \"$service_status\"" $diagnostic_file > $tmp_file
+    mv $tmp_file $diagnostic_file
     if [[ -n ${service_status} && ${service_status} == "active" ]]; then
       status_list="$(printf "%s\n%s" \
         "${status_list}" \
@@ -783,12 +869,15 @@ doctor() { #{{{
         "$(printf " | * ${C_BOLD}%s${C_RESET} service: ${C_RED}%s${C_RESET}\n" "${service}" "${service_status}")")"
     fi
   done
-  doctor_frame "System Service" "${status_list}"
+doctor_frame "System Service" "${status_list}"
+
 
   echo
 
   service_status="$(systemctl is-active docker)"
   if [[ "${service_status}" != "active" ]]; then
+    jq ".health.service.docker = \"$service_status\"" $diagnostic_file > $tmp_file
+    mv $tmp_file $diagnostic_file
     printf " + Container Status (${C_BOLD}docker ${C_RESET}service: ${C_RED}%s${C_RESET})\n\n" "${service_status}"
     return
   fi
@@ -803,10 +892,14 @@ doctor() { #{{{
       --format '{{.Status}}'\
       )"
     if [[ -z ${container_status} ]]; then
+      jq ".health.container.$container = \"not_running\"" $diagnostic_file > $tmp_file
+      mv $tmp_file $diagnostic_file
       status_list="$(printf "%s\n%s" \
         "${status_list}" \
         "$(printf " | * ${C_BOLD}%s${C_RESET} agent: ${C_RED}Not Running${C_RESET}\n" "${container}")")"
     else
+      jq ".health.container.$container = \"$container_status\"" $diagnostic_file > $tmp_file
+      mv $tmp_file $diagnostic_file
       status_list="$(printf "%s\n%s" \
         "${status_list}" \
         "$(printf " | * ${C_BOLD}%s${C_RESET} agent: ${C_GREEN}%s${C_RESET}\n" "${container}" "${container_status}")")"
@@ -835,8 +928,10 @@ check_arg_value() { #{{{
   ## TODO(adis.halilovic@stackguardian.io): make sure to validate double parameter input
   if [[ "${2:0:2}" == "--" ]]; then
     err "Argument" "${1}" "has invalid value: $2"
+    exit 1
   elif [[ -z "${2}" ]]; then
     err "Argument" "${1}" "can't be empty"
+    exit 1
   fi
   return 0
 }
@@ -845,6 +940,7 @@ check_arg_value() { #{{{
 is_root() { #{{{
   if (( $(id -u) != 0 )); then
     err "This script must be run as" "root"
+    exit 1
   fi
   return 0
 }
@@ -853,11 +949,13 @@ is_root() { #{{{
 init_args_are_valid() { #{{{
   if [[ ! "$1" =~ register|deregister|doctor ]]; then
     err "Provided option" "${1}" "is invalid"
+    exit 1
   elif [[ "$1" =~ register|deregister && \
     ( ! "$*" =~ --sg-node-token || \
     ! "$*" =~ --organization || \
     ! "$*" =~ --runner-group ) ]]; then
     err "Arguments:" "--sg-node-token, --organization, --runner-group" "are required"
+    exit 1
   fi
   return 0
 }
@@ -868,6 +966,7 @@ check_sg_args() { #{{{
     || -z "${ORGANIZATION_ID}" \
     || -z "${RUNNER_GROUP_ID}" ]]; then
     err "Arguments: " "--sg-node-token, --organization, --runner-group" "are required"
+    exit 1
   fi
   return 0
 }
@@ -902,6 +1001,7 @@ parse_arguments() { #{{{
     *)
       [[ -z "${1}" ]] && break
       err "Invalid argument:" "${1}"
+      exit 1
       ;;
     esac
   done
@@ -912,10 +1012,7 @@ main() { #{{{
 
 if ! type jq >&/dev/null; then
   err "Command" "jq" "not installed"
-fi
-
-if ! type docker >&/dev/null; then
-  err "Command" "docker" "not installed or running"
+  exit 1
 fi
 
 [[ "${*}" =~ --help || $# -lt 1 ]] && show_help && exit 0
@@ -947,5 +1044,6 @@ esac
 #}}}
 
 trap cleanup SIGINT
+trap exit_help EXIT
 
 main "$@"
