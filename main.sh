@@ -1030,10 +1030,12 @@ parse_arguments() { #{{{
 
 main() { #{{{
 
-if ! type jq >&/dev/null; then
-  err "Command" "jq" "not installed"
-  exit 1
-fi
+for command in jq crontab; do
+  if ! type $command >&/dev/null; then
+    err "Command" "$command" "not installed"
+    exit 1
+  fi
+done
 
 [[ "${*}" =~ --help || $# -lt 1 ]] && show_help && exit 0
 
