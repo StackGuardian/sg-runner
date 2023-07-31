@@ -109,7 +109,7 @@ Options:
   --debug
     Print more verbose output during command execution.
 
-  --force
+  --force, -f
     Execute some commands with force. Skip some sections in case of errors.
 
 Usage:
@@ -531,6 +531,7 @@ configure_fluentbit() { #{{{
       extra_options="fluent/fluent-bit:2.0.9-debug \
         /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf"
       $docker_run_command $extra_options >/dev/null
+
     fi
     if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
       extra_options="-v $(pwd)/aws-credentials:$HOME/.aws/credentials \
