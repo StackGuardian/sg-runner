@@ -82,6 +82,10 @@ main.sh deregister \
     --runner-group ${RUNNER_GROUP}
 ```
 
+> In case local data is corrupted or API call fails, you can force clean everything.
+> This is done by providing `-f` or `--force` while executing `deregister`.
+> *Force deregister* will remove all data related to runner script for fresh start.
+
 ### 3.3 Restart
 
 As of now, restart is not nativly supported.
@@ -89,7 +93,17 @@ But, to achieve similar experinece it is enough to [`deregister`](#32-de-registr
 
 > This should fix all troubles if something is not working.
 
-## Other options
+## System diagnostics
+
+We included 2 commands for easier system diagnostics and management.
+These should help you keep your system clean and debug in case of errors.
+
+> INFO: Any of following actions keep state in a file at `/tmp/diagnostic.json`.
+
+With any command you can provide `--debug` flag.
+With this, you will get more output while running commands.
+
+### Health check
 
 Besides `register` and `deregister`, script offers easy health checking:
 ```
@@ -98,5 +112,11 @@ Besides `register` and `deregister`, script offers easy health checking:
 This command will print status of `ecs` and `docker` services.
 Also, including all related Docker containers (`ecs-agent`, `fluentbit-agent`).
 
-Additionally, with any command you can provide `--debug` flag.
-With this, you will get more output while running commands.
+### System prune
+
+Another useful command is `prune` which can be used like:
+```
+./main.sh prune
+```
+
+This command will execute `docker system prune` for everything that is older than **10 days**.
