@@ -317,6 +317,12 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
     port 24224
 [INPUT]
     Name tail
+    Tag registrationinfo
+    path /var/log/registration/*.txt
+    DB /var/log/flb_docker.db
+    Mem_Buf_Limit 50MB
+[INPUT]
+    Name tail
     Tag ecsagent
     path /var/lib/docker/containers/*/*-json.log
     DB /var/log/flb_docker.db
@@ -342,7 +348,16 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
     container_name system
     auto_create_container on
     tls on
-
+[OUTPUT]
+    Name  azure_blob
+    Match  registrationinfo
+    account_name ${STORAGE_ACCOUNT_NAME}
+    shared_key ${SHARED_KEY}
+    blob_type blockblob
+    path registrationinfo/log
+    container_name system
+    auto_create_container on
+    tls on
 [OUTPUT]
     Name  azure_blob
     Match_Regex orgs**
