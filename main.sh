@@ -174,9 +174,25 @@ details_item() { #{{{
 print_details() { #{{{
   echo
   details_frame "Registration Details"
+  details_item "Registration Date" "$(date +'%Y-%m-%d %H:%M:%S (GMT%z)')"
   details_item "Organization" "${ORGANIZATION_NAME}"
   details_item "Runner Group" "${RUNNER_GROUP_ID}"
   details_item "Runner ID" "${RUNNER_ID}"
+  echo
+  details_frame "Host Information"
+  details_item "Hostaname" "$HOSTNAME"
+  details_item "Private IP Address" "$(ip route | grep default | cut -d" " -f9)"
+  details_item "Public IP Address" "$(curl -fSs ifconfig.me)"
+  echo
+  details_frame "System Information"
+  details_item "OS Release" "$(cat /etc/*release | grep -oP '(?<=PRETTY_NAME=").*?(?=")')"
+  details_item "Uptime" "$(uptime | awk '{gsub(",", "", $3); print $1, $2, $3}')"
+  details_item "Load Average" "$(uptime | awk -F 'load average:' '{print $2}')"
+  echo
+  details_frame "Hardware Information"
+  details_item "CPU Cores" "$(echo "$(nproc) Core [Use: $(top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4}' | awk '{printf "%.0f%%", $1}')]")"
+  details_item "Memory" "$(free -h | awk '/^Mem:/ {printf "%s [Use: %.0f%%]\n", $2, $3/$2*100}')"
+  details_item "Disk Size" "$(df -h --total | awk '/^total/ {printf "%s [Use: %s]\n", $2, $(NF-1)}')"
   echo
 }
 #}}}: print_details
@@ -231,7 +247,16 @@ clean_local_setup() { #{{{
   debug "Removing $CONTAINER_ORCHESTRATOR network: ${SG_DOCKER_NETWORK}.."
   $CONTAINER_ORCHESTRATOR network rm "${SG_DOCKER_NETWORK}" >&/dev/nul
   debug "Removing local configuration.."
-  rm -rf /var/log/ecs /etc/ecs /var/lib/ecs ./fluent-bit.conf volumes/ ./aws-credentials ./db-state ./ssm-binaries >&/dev/null
+  rm -rf \
+    /var/log/ecs \
+    /etc/ecs \
+    /var/lib/ecs \
+    ./fluent-bit.conf \
+    volumes/ \
+    ./aws-credentials \
+    ./db-state \
+    /var/log/registration \
+    ./ssm-binaries >&/dev/null
 }
 #}}}: clean_local_setup
 
@@ -253,7 +278,7 @@ clean_local_setup() { #{{{
 #   Writes STDOUT on success.
 #######################################
 configure_local_data() { #{{{
-  mkdir -p /var/log/ecs /etc/ecs /var/lib/ecs/data /etc/fluentbit/
+  mkdir -p /var/log/ecs /etc/ecs /var/lib/ecs/data /etc/fluentbit/ /var/log/registration/
   rm -rf /etc/ecs/ecs.config /var/lib/ecs/ecs.config > /dev/null
 
   info "Configuring local data.."
@@ -293,6 +318,12 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
     port 24224
 [INPUT]
     Name tail
+    Tag registrationinfo
+    path /var/log/registration/*.txt
+    DB /var/log/flb_docker.db
+    Mem_Buf_Limit 50MB
+[INPUT]
+    Name tail
     Tag ecsagent
     path /var/lib/docker/containers/*/*-json.log
     DB /var/log/flb_docker.db
@@ -318,7 +349,16 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
     container_name system
     auto_create_container on
     tls on
-
+[OUTPUT]
+    Name  azure_blob
+    Match  registrationinfo
+    account_name ${STORAGE_ACCOUNT_NAME}
+    shared_key ${SHARED_KEY}
+    blob_type blockblob
+    path registrationinfo/log
+    container_name system
+    auto_create_container on
+    tls on
 [OUTPUT]
     Name  azure_blob
     Match_Regex orgs**
@@ -358,6 +398,13 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     DB /var/log/flb_docker.db
     Mem_Buf_Limit 50MB
 
+[INPUT]
+    Name tail
+    Tag registrationinfo
+    path /var/log/registration/*.txt
+    DB /var/log/flb_docker.db
+    Mem_Buf_Limit 50MB
+
 [OUTPUT]
     Name s3
     Match fluentbit
@@ -383,6 +430,19 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     compression gzip
     bucket              ${S3_BUCKET_NAME}
     s3_key_format /system/ecsagent/ecsagent
+
+[OUTPUT]
+    Name s3
+    Match registrationinfo
+    region              ${S3_AWS_REGION}
+    upload_timeout      5s
+    store_dir_limit_size 2G
+    total_file_size 250M
+    retry_limit 20
+    use_put_object  On
+    compression gzip
+    bucket              ${S3_BUCKET_NAME}
+    s3_key_format /system/registrationinfo/registrationinfo
 
 [OUTPUT]
     Name s3
@@ -794,6 +854,7 @@ configure_fluentbit() { #{{{
       -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
       -v $(pwd)/volumes/db-state/:/var/log/ \
       -v $(pwd)/fluent-bit.conf:/fluent-bit/etc/fluentbit.conf \
+      -v /var/log/registration:/var/log/registration \
       --log-driver=fluentd \
       --log-opt tag=fluentbit
        "
@@ -847,6 +908,7 @@ register_instance() { #{{{
     configure_local_network
     configure_fluentbit
     print_details
+    print_details | sed 's/\x1B\[[0-9;]*[JKmsu]//g' >> "registration_details_$(date +'%Y-%m-%dT%H-%M-%S%z').txt"
     exit 0
   fi
 
@@ -903,6 +965,7 @@ register_instance() { #{{{
   configure_local_network
   setup_cron
   print_details
+  print_details | sed 's/\x1B\[[0-9;]*[JKmsu]//g' >>  /var/log/registration/"registration_details_$(date +'%Y-%m-%dT%H-%M-%S%z').txt"
 }
 #}}}: register_instance
 
