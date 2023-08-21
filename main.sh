@@ -181,7 +181,8 @@ print_details() { #{{{
   echo
   details_frame "Host Information"
   details_item "Hostaname" "$HOSTNAME"
-  details_item "IP Address" "$(ifconfig | grep -E '^(eth|en|ens)[0-9]+:' -A 1 | awk '/inet /{printf "%s, ", $2}' | sed 's/, $/\n/')"
+  details_item "Private IP Address" "$(ip route | grep default | cut -d" " -f9)"
+  details_item "Public IP Address" "$(curl -fSs ifconfig.me)"
   echo
   details_frame "System Information"
   details_item "OS Release" "$(cat /etc/*release | grep -oP '(?<=PRETTY_NAME=").*?(?=")')"
