@@ -9,8 +9,9 @@ set -o pipefail
 ## main
 CONTAINER_ORCHESTRATOR=
 LOG_DEBUG=${LOG_DEBUG:=false}
+CGROUPSV2_PREVIEW=${CGROUPSV2_PREVIEW:=false}
 
-LOG_FILE="/tmp/sg_runner.log"
+readonly LOG_FILE="/tmp/sg_runner.log"
 
 if [[ ! -e "$LOG_FILE" ]]; then
   touch "$LOG_FILE"
@@ -1158,11 +1159,16 @@ main() { #{{{
     err "Private runner only available for" "systemd-based" "systems"
   fi
 
-  if [[ "$1" == "cgroupsv2" && "$2" =~ enable|disable ]]; then
-    parse_arguments "${@:3}"
-    cgroupsv2 "$2"
-  elif [[ -e /sys/fs/cgroup/cgroup.controllers ]] &&
-    [[ "$(grep "^GRUB_CMDLINE_LINUX=\".*systemd.unified_cgroup_hierarchy=0\"" /etc/default/grub)" == "" ]]; then
+  if [[ "$CGROUPSV2_PREVIEW" == true ]]; then
+    if [[ "$1" == "cgroupsv2" && "$2" =~ enable|disable ]]; then
+      parse_arguments "${@:3}"
+      cgroupsv2 "$2"
+    elif [[ -e /sys/fs/cgroup/cgroup.controllers ]] &&
+      [[ "$(grep "^GRUB_CMDLINE_LINUX=\".*systemd.unified_cgroup_hierarchy=0\"" /etc/default/grub)" == "" ]]; then
+      err "Private runner does not support" "cgroupsv2"
+      exit 1
+    fi
+  else
     err "Private runner does not support" "cgroupsv2"
     exit 1
   fi
