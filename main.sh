@@ -10,6 +10,7 @@ set -o pipefail
 CONTAINER_ORCHESTRATOR=
 LOG_DEBUG=${LOG_DEBUG:=false}
 CGROUPSV2_PREVIEW=${CGROUPSV2_PREVIEW:=false}
+SG_BASE_API=${SG_BASE_API:="https://api.app.stackguardian.io/api/v1"}
 
 readonly LOG_FILE="/tmp/sg_runner.log"
 
@@ -20,7 +21,6 @@ fi
 # static
 readonly COMMANDS=( "jq" "crontab" )
 readonly CONTAINER_ORCHESTRATORS=( "docker" "podman" )
-readonly SG_BASE_API=${SG_BASE_API:="https://api.app.stackguardian.io/api/v1"}
 readonly FLUENTBIT_IMAGE="fluent/fluent-bit:2.0.9-debug"
 
 # source .env if exists
@@ -73,10 +73,16 @@ Examples:
   # De-Register new runner
   ./$(basename "$0") deregister --sg-node-token "some-token" --organization "demo-org" --runner-group "private-runner-group"
 
+  # Disable cgroupsv2
+  # ./$(basename "$0") cgropusv2 disable
+
 Available commands:
-  register              Register new Private Runner
-  deregsiter            Deregister existing Private Runner
-  doctor                Show health status of used services/containers
+  register [options]            Register new Private Runner
+  deregsiter [options]          Deregister existing Private Runner
+  status                        Show health status of used services/containers
+  info                          Show information about instance/registration
+  prune                         Prune container system older than 10 days
+  cgroupsv2 [enable|disable]    Manage cgroups versions
 
 Options:
   --sg-node-token '': (required)
@@ -101,7 +107,7 @@ EOF
 #}}}: show_help
 
 log_date() { #{{{
-  printf "${C_BLUE}[%s]" "$(date +'%Y-%m-%dT%H:%M:%S%z')"
+  printf "${C_BLUE}[%s]" "$(date +'%Y-%m-%dT%H:%M:%S')"
 }
 #}}}: log_date
 
@@ -115,11 +121,38 @@ info() { #{{{
 }
 #}}}: info
 
+info_wait() { #{{{
+  printf "%s ${C_GREEN_BOLD}[INFO]${C_RESET} %s${C_BOLD} %s${C_RESET} %s\r" "$(log_date)" "${1}" "${2}" "${@:3}"
+}
+#}}}: info_wait
+
 debug() { #{{{
   [[ "$LOG_DEBUG" =~ true|True ]] && \
     printf "%s ${C_MAGENTA_BOLD}[DEBUG]${C_RESET} %s${C_BOLD} %s${C_RESET} %s\n" "$(log_date)" "${1}" "${2}" "${@:3}"
 }
 #}}}: debug
+
+debug_variable() { #{{{
+  [[ "$LOG_DEBUG" =~ true|True ]] && \
+    [[ -n "${!1}" ]] && \
+    [[ "${!1}" != "null" ]] && \
+    printf "%s ${C_MAGENTA_BOLD}[DEBUG]${C_RESET} %s${C_BOLD} %s${C_RESET}\n" "$(log_date)" "${1}" "${!1}"
+}
+#}}}: debug
+
+debug_secret() { #{{{
+  [[ "$LOG_DEBUG" =~ true|True ]] && \
+    [[ -n "${!1}" ]] && \
+    [[ "${!1}" != "null" ]] && \
+    printf "%s ${C_MAGENTA_BOLD}[DEBUG]${C_RESET} %s${C_BOLD} %s${C_RESET}\n" "$(log_date)" "${1}" "${!1:0:5}*****"
+}
+#}}}: debug
+
+cmd_example() { #{{{
+  echo
+  printf "%s${C_BOLD} %s${C_RESET} %s\n" "${1}" "${2}" "${@:3}"
+}
+#}}}: cmd_example
 
 exit_help() { #{{{
   exit_code=$?
@@ -202,7 +235,7 @@ print_details() { #{{{
 #{{{ Other functions
 
 cleanup() { #{{{
-  echo "Gracefull shutdown.."
+  echo "\nGracefull shutdown.."
   [[ -n ${spinner_pid} ]] && kill "${spinner_pid}" >&/dev/null
   exit 0
 }
@@ -236,7 +269,7 @@ spinner() { #{{{
 #}}}: spinner
 
 clean_local_setup() { #{{{
-  info "Starting cleanup.."
+  info_wait "Starting cleanup.."
 
   debug "Stopping services.."
   systemctl stop ecs 2>/dev/null
@@ -257,8 +290,18 @@ clean_local_setup() { #{{{
     ./db-state \
     /var/log/registration \
     ./ssm-binaries >&/dev/null
+
+  info "Starting cleanup.." "Done"
 }
 #}}}: clean_local_setup
+
+check_variable_value() { #{{{
+  local variable_name=$1
+  [[ -z "${!variable_name}" ]] && \
+    err "Variable can't be empty" "$variable_name" && exit 1
+  return 0
+}
+#}}}
 
 #}}}: Other functions
 
@@ -281,7 +324,7 @@ configure_local_data() { #{{{
   mkdir -p /var/log/ecs /etc/ecs /var/lib/ecs/data /etc/fluentbit/ /var/log/registration/
   rm -rf /etc/ecs/ecs.config /var/lib/ecs/ecs.config > /dev/null
 
-  info "Configuring local data.."
+  info_wait "Configuring local data.."
 
   cat > /etc/ecs/ecs.config << EOF
 ECS_CLUSTER=${ECS_CLUSTER}
@@ -466,6 +509,8 @@ aws_secret_access_key = ${S3_AWS_SECRET_ACCESS_KEY}
 EOF
 
 fi
+
+  info "Configuring local data.." "Done"
 }
 #}}}: configure_local_data
 
@@ -479,7 +524,7 @@ fi
 #   Writes STDOUT on success.
 #######################################
 configure_local_network() { #{{{
-  info "Configuring local network.."
+  info_wait "Configuring local network.."
 
   # Create SG_DOCKER_NETWORK $CONTAINER_ORCHESTRATOR network
   $CONTAINER_ORCHESTRATOR network create --driver bridge "${SG_DOCKER_NETWORK}" >&/dev/null
@@ -490,7 +535,7 @@ configure_local_network() { #{{{
     -d 169.254.169.254,10.0.0.0/24 \
     -j DROP
 
-  info "$CONTAINER_ORCHESTRATOR network ${SG_DOCKER_NETWORK} created."
+  debug "$CONTAINER_ORCHESTRATOR network ${SG_DOCKER_NETWORK} created."
 
   # Set up necessary rules to enable IAM roles for tasks
   sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null
@@ -515,6 +560,7 @@ configure_local_network() { #{{{
     -j REDIRECT \
     --to-ports 51679
 
+  info "Configuring local network.." "Done"
 }
 #}}}: configure_local_network
 
@@ -536,7 +582,7 @@ configure_local_network() { #{{{
 #   if successfull/error.
 #######################################
 check_fluentbit_status() { #{{{
-  info "Starting fluentbit status check.."
+  info_wait "Starting fluentbit status check.."
 
   local container_id
   local log_file
@@ -552,11 +598,13 @@ check_fluentbit_status() { #{{{
   done
   debug "Fluentbit log file:" "$log_file"
 
+  info "Starting fluentbit status check.." "Done"
+
   info "Waiting for fluentbit logs.."
   until (( $(grep -ia -A2 "stream processor started" "$log_file" | wc -l)>=2 )); do
     sleep 1
   done & spinner "$!"
-  printf "    \b\b\b\b"
+  printf "    \b\b\b\b\r\r\r"
 
   if [[ "$STORAGE_BACKEND_TYPE" == "aws_s3" ]]; then
     debug "Checking" "AWS S3" "errors"
@@ -671,9 +719,9 @@ cgroupsv2() { #{{{
     cgroup_toggle=1 || cgroup_toggle=0
 
   if (( cgroup_toggle==0 )); then
-    info "Switching to" "cgroupsv1"
+    info "Switched to" "cgroupsv1"
   else
-    info "Swithcing to" "cgroupsv2"
+    info "Switched to" "cgroupsv2"
   fi
 
   if type grubby >&/dev/null; then
@@ -684,8 +732,9 @@ cgroupsv2() { #{{{
     if [[ -n "$grub_cmdline" ]]; then
       pattern="(systemd.unified_cgroup_hierarchy)=(.*)"
       if [[ $grub_cmdline =~ $pattern ]]; then
+        pattern=${pattern//(/\\(}
         grub_cmdline="$(echo "$grub_cmdline" \
-          | sed "s/(systemd.unified_cgroup_hierarchy)=(.*)/\1=$cgroup_toggle/")"
+          | sed "s/${pattern//)/\\)}/\1=$cgroup_toggle/")"
         debug "GRUB_CMDLINE_LINUX switched" "$grub_cmdline"
       else
         grub_cmdline="$grub_cmdline systemd.unified_cgroup_hierarchy=$cgroup_toggle"
@@ -698,19 +747,28 @@ cgroupsv2() { #{{{
     sed -i "s/^GRUB_CMDLINE_LINUX=.*/GRUB_CMDLINE_LINUX=\"$grub_cmdline\"/" /etc/default/grub
   fi
 
-  info "Reboot required. Continue.."
+  info_wait "Reboot required. Continue.."
   read -r
+  info "Reboot required. Continue.." "Rebooting"
   reboot
-  info "Rebooting.."
   exit 0
 } #}}}
 
 api_call() { #{{{
-  response=$(curl -i -s \
-    -X POST \
-    -H "Authorization: apikey ${SG_NODE_TOKEN}" \
-    -H "Content-Type: application/json" \
-    "${url}")
+  if [[ -n "$1" ]]; then
+    response=$(curl -i -s \
+      -X POST \
+      -H "Authorization: apikey ${SG_NODE_TOKEN}" \
+      -H "Content-Type: application/json" \
+      -d "$1" \
+      "${url}")
+  else
+    response=$(curl -i -s \
+      -X POST \
+      -H "Authorization: apikey ${SG_NODE_TOKEN}" \
+      -H "Content-Type: application/json" \
+      "${url}")
+  fi
 
   if [[ -z "$response" ]]; then
     exit 1
@@ -764,20 +822,24 @@ fetch_organization_info() { #{{{
   local url
   local metadata
 
-  info "Trying to fetch registration data.."
+  info_wait "Trying to fetch registration data.."
   url="${SG_BASE_API}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/register/"
 
   debug "Calling URL:" "${url}"
 
   if api_call; then
-    info "Success. Preparing environment.."
+    info "Trying to fetch registration data.." "Done"
+    info_wait "Preparing environment.."
     metadata="$(echo "${response}" | jq -r '.data.RegistrationMetadata[0]')"
     [[ "$metadata" == "null" || -z "$metadata" ]] && \
+      info "Preparing environment.." "Failed"
       err "API data missing registration metadata." && exit 1
   else
-    err "Could not fetch data from API. >>" "$message $status_code" "<<"
+    info "Trying to fetch registration data.." "Failed"
+    err "Could not fetch data from API." "$status_code" "$message"
     exit 1
   fi
+  info "Preparing environment.." "Done"
 
   ## API response values (Registration Metadata)
   ECS_CLUSTER="${ECS_CLUSTER:=$(echo "${metadata}" | jq -r '.ECSCluster')}"
@@ -785,10 +847,14 @@ fetch_organization_info() { #{{{
   SSM_ACTIVATION_ID="${SSM_ACTIVATION_ID:=$(echo "${metadata}" | jq -r '.SSMActivationId')}"
   SSM_ACTIVATION_CODE="${SSM_ACTIVATION_CODE:=$(echo "${metadata}" | jq -r '.SSMActivationCode')}"
 
-  debug "ECS_CLUSTER:" "${ECS_CLUSTER}"
-  debug "AWS_DEFAULT_REGION:" "${AWS_DEFAULT_REGION}"
-  debug "SSM_ACTIVATION_ID:" "${SSM_ACTIVATION_ID:0:5}*****"
-  debug "SSM_ACTIVATION_CODE:" "${SSM_ACTIVATION_CODE:0:5}*****"
+  for var in ECS_CLUSTER AWS_DEFAULT_REGION SSM_ACTIVATION_ID SSM_ACTIVATION_CODE; do
+    check_variable_value "$var"
+  done
+
+  debug_variable "ECS_CLUSTER"
+  debug_variable "AWS_DEFAULT_REGION"
+  debug_secret "SSM_ACTIVATION_ID"
+  debug_secret "SSM_ACTIVATION_CODE"
 
   ## Everything else
   ORGANIZATION_NAME="${ORGANIZATION_NAME:=$(echo "${response}" | jq -r '.data.OrgName')}"
@@ -804,17 +870,34 @@ fetch_organization_info() { #{{{
   S3_AWS_ACCESS_KEY_ID="${S3_AWS_ACCESS_KEY_ID:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].awsAccessKeyId')}"
   S3_AWS_SECRET_ACCESS_KEY="${S3_AWS_SECRET_ACCESS_KEY:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].awsSecretAccessKey')}"
 
-  debug "ORGANIZATION_NAME:" "${ORGANIZATION_NAME}"
-  debug "ORGANIZATION_ID:" "${ORGANIZATION_ID}"
-  debug "RUNNER_ID:" "${RUNNER_ID}"
-  debug "RUNNER_GROUP_ID:" "${RUNNER_GROUP_ID}"
-  debug "SHARED_KEY:" "${SHARED_KEY}"
-  debug "STORAGE_ACCOUNT_NAME:" "${STORAGE_ACCOUNT_NAME}"
-  debug "STORAGE_BACKEND_TYPE:" "${STORAGE_BACKEND_TYPE}"
-  debug "S3_BUCKET_NAME:" "${S3_BUCKET_NAME}"
-  debug "S3_AWS_REGION:" "${S3_AWS_REGION}"
-  debug "S3_AWS_ACCESS_KEY_ID:" "${S3_AWS_ACCESS_KEY_ID}"
-  debug "S3_AWS_SECRET_ACCESS_KEY:" "${S3_AWS_SECRET_ACCESS_KEY:0:5}*****"
+  if [[ "$STORAGE_BACKEND_TYPE" == "aws_s3" ]]; then
+    for var in S3_BUCKET_NAME S3_AWS_REGION S3_AWS_ACCESS_KEY_ID S3_AWS_SECRET_ACCESS_KEY; do
+      check_variable_value "$var"
+    done
+  elif [[ "$STORAGE_BACKEND_TYPE" == "azure_blob_storage" ]]; then
+    for var in SHARED_KEY STORAGE_ACCOUNT_NAME; do
+      check_variable_value "$var"
+    done
+  else
+    err "Unsupported storage backend type!"
+    exit 1
+  fi
+
+  for var in ORGANIZATION_NAME ORGANIZATION_ID RUNNER_ID RUNNER_GROUP_ID; do
+    check_variable_value "$var"
+  done
+
+  debug_variable "ORGANIZATION_NAME"
+  debug_variable "ORGANIZATION_ID"
+  debug_variable "RUNNER_ID"
+  debug_variable "RUNNER_GROUP_ID"
+  debug_variable "SHARED_KEY"
+  debug_variable "STORAGE_ACCOUNT_NAME"
+  debug_variable "STORAGE_BACKEND_TYPE"
+  debug_variable "S3_BUCKET_NAME"
+  debug_variable "S3_AWS_REGION"
+  debug_variable "S3_AWS_ACCESS_KEY_ID"
+  debug_secret "S3_AWS_SECRET_ACCESS_KEY"
 }
 #}}}: fetch_organization_info
 
@@ -844,7 +927,7 @@ configure_fluentbit() { #{{{
     spinner "$!"
   fi
 
-  info "Starting fluentbit agent.."
+  info_wait "Starting fluentbit agent.."
   docker_run_command="$CONTAINER_ORCHESTRATOR run -d \
       --name fluentbit-agent \
       --restart=always \
@@ -872,15 +955,12 @@ configure_fluentbit() { #{{{
         /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf"
       $docker_run_command $extra_options >> "$LOG_FILE" 2>&1
     fi
-    info "Registered fluentbit agent."
     else
       if [[ -z "${running}" ]]; then
         $CONTAINER_ORCHESTRATOR start fluentbit-agent >&/dev/null
-        info "Started fluentbit agent."
-      else
-        info "Fluentbit agent already running."
     fi
   fi
+  info "Starting fluentbit agent.." "Done"
   check_fluentbit_status
 }
 #}}}: configure_fluentbit
@@ -899,25 +979,30 @@ configure_fluentbit() { #{{{
 #   if successfull/error.
 #######################################
 register_instance() { #{{{
-  local registered
-  registered=$($CONTAINER_ORCHESTRATOR ps -q --filter "name=ecs-agent")
+  local container_id
+  local container_status
 
-  if [[ -n "${registered}" ]]; then
-    debug "Instance ecs-agent status:" "${registered}"
+  container_id=$($CONTAINER_ORCHESTRATOR ps -q -f "name=ecs-agent")
+  container_status=$($CONTAINER_ORCHESTRATOR ps -q -f "name=ecs-agent" --format '{{.Status}}')
+
+  if [[ -n "${container_id}" && ! "$container_status" =~ Exited ]]; then
+    debug "Instance ecs-agent status:" "${container_status}"
+    debug "Instance ecs-agent:" "${container_id}"
     info "Instance agent already registered and running."
-    configure_local_network
     configure_fluentbit
+    configure_local_network
     print_details
-    print_details | sed 's/\x1B\[[0-9;]*[JKmsu]//g' >> "registration_details_$(date +'%Y-%m-%dT%H-%M-%S%z').txt"
+    print_details | sed 's/\x1B\[[0-9;]*[JKmsu]//g' >> /var/log/registration/"registration_details_$(date +'%Y-%m-%dT%H-%M-%S%z').txt"
     exit 0
   fi
 
   fetch_organization_info
   configure_local_data
   configure_fluentbit
+  configure_local_network
 
   if [[ ! -e /tmp/ecs-anywhere-install.sh ]]; then
-    info "Downloading support files.."
+    info_wait "Downloading support files.."
 
     if ! curl -fSsLk \
       --proto "https" \
@@ -925,14 +1010,12 @@ register_instance() { #{{{
       "https://amazon-ecs-agent.s3.amazonaws.com/ecs-anywhere-install-latest.sh" \
       >> "$LOG_FILE" 2>&1; then
       debug "Response:" "$(cat $LOG_FILE)"
+      info "Downloading support files.." "Failed"
       err "Unable to download" "ecs-anywhere-install.sh" "script"
       exit 1
-    else
-      info "Download completed. Continuing.."
     fi
-  else
-    info "Skiping support files download.."
   fi
+  info "Downloading support files.." "Done"
 
   info "Trying to register instance.."
 
@@ -941,28 +1024,48 @@ register_instance() { #{{{
   [[ ! -e "$LOG_FILE" ]] \
     && touch "$LOG_FILE"
 
-  if ! /bin/bash /tmp/ecs-anywhere-install.sh \
+  /bin/bash /tmp/ecs-anywhere-install.sh \
       --region "${AWS_DEFAULT_REGION}" \
       --cluster "${ECS_CLUSTER}" \
       --activation-id "${SSM_ACTIVATION_ID}" \
       --activation-code "${SSM_ACTIVATION_CODE}" \
       --docker-install-source none \
-      >> "$LOG_FILE" 2>&1 & spinner "$!"; then
-    container_status="$($CONTAINER_ORCHESTRATOR ps -a --filter='name=ecs-agent' --format '{{.Status}}')"
+      >> "$LOG_FILE" 2>&1 &
+  local pid="$!"
+  until spinner "$pid"; do
+    container_status="$($CONTAINER_ORCHESTRATOR ps -a -f 'name=ecs-agent' --format '{{.Status}}')"
     container_id="$($CONTAINER_ORCHESTRATOR ps -aq --filter 'name=ecs-agent')"
-    if [[ "$?" != 0 || "$container_status" =~ Exited ]]; then
-      err "Failed to register external instance."
-      grep Error /var/lib/docker/containers/"$container_id"*/*-json.log
+    full_err_msg=$(grep -ioa -m1 -P '(?<=\[error\] logger=structured ).*?(?=status code)' /var/lib/docker/containers/"$container_id"*/*.log)
+    err=$(echo "$full_err_msg" | grep -io -P '(?<=msg=\\\").*?(?=\\\")')
+    msg=$(echo "$full_err_msg" | grep -io -P '(?<=error=\\\").*?(?=\\)')
+    if [[ "$container_status" =~ Exited || -n "$err_msg" ]]; then
+      kill -9 "$pid"
+      err "$msg" "$err"
       exit 1
-    else
-      info "Instance successfully registered to Stackguardian platform."
     fi
-  else
-    err "Failed to register external instance."
-    exit 1
-  fi
+  done
 
-  configure_local_network
+  # if ! /bin/bash /tmp/ecs-anywhere-install.sh \
+  #     --region "${AWS_DEFAULT_REGION}" \
+  #     --cluster "${ECS_CLUSTER}" \
+  #     --activation-id "${SSM_ACTIVATION_ID}" \
+  #     --activation-code "${SSM_ACTIVATION_CODE}" \
+  #     --docker-install-source none \
+  #     >> "$LOG_FILE" 2>&1 & spinner "$!"; then
+  #   container_status="$($CONTAINER_ORCHESTRATOR ps -a --filter='name=ecs-agent' --format '{{.Status}}')"
+  #   container_id="$($CONTAINER_ORCHESTRATOR ps -aq --filter 'name=ecs-agent')"
+  #   full_err_msg=$(grep -ioa -m1 -P '(?<=\[error\] logger=structured ).*?(?=status code)' /var/lib/docker/containers/"$container_id"*/*.log)
+  #   err=$(echo "$full_err_msg" | grep -io -P '(?<=msg=\\\").*?(?=\\\")')
+  #   msg=$(echo "$full_err_msg" | grep -io -P '(?<=error=\\\").*?(?=\\)')
+  #   if [[ "$container_status" =~ Exited || -n "$err_msg" ]]; then
+  #     err "$msg" "$err"
+  #     exit 1
+  #   fi
+  # else
+  #   err "Failed to register external instance."
+  #   exit 1
+  # fi
+
   setup_cron
   print_details
   print_details | sed 's/\x1B\[[0-9;]*[JKmsu]//g' >>  /var/log/registration/"registration_details_$(date +'%Y-%m-%dT%H-%M-%S%z').txt"
@@ -1001,16 +1104,15 @@ deregister_instance() { #{{{
 
   debug "Payload:" "${payload}"
 
-  info "Trying to deregsiter instance.."
-  if api_call & spinner "$!"; then
-    info "Instance deregistered. Removing local data.."
+  info_wait "Trying to deregister instance.."
+  if api_call "$payload"; then
+    info "Trying to deregister instance.." "Done"
     clean_local_setup
   else
-    err "Could not fetch data from API. >>" "$message - $status_code" "<<"
+    info "Trying to deregister instance.." "Failed"
+    err "Could not fetch data from API." "$status_code" "$message"
     force_exec && clean_local_setup
   fi
-
-  info "Instance successfully deregisterd."
 }
 #}}}: deregister_instance
 
@@ -1039,11 +1141,9 @@ doctor() { #{{{
         "$(printf " | * ${C_BOLD}%s${C_RESET} service: ${C_RED}%s${C_RESET}\n" "${service}" "${service_status}")")"
     fi
   done
-doctor_frame "System Service" "${status_list}"
 
-
+  doctor_frame "System Service" "${status_list}"
   echo
-
   service_status="$(systemctl is-active "$CONTAINER_ORCHESTRATOR")"
   if [[ "${service_status}" != "active" ]]; then
     jq ".health.service.$CONTAINER_ORCHESTRATOR = \"$service_status\"" "$SG_DIAGNOSTIC_FILE" > "$SG_DIAGNOSTIC_TMP_FILE"
@@ -1076,16 +1176,14 @@ doctor_frame "System Service" "${status_list}"
     fi
   done
   doctor_frame "Container Status" "${status_list}"
-
   echo
-  info "Services health status generated."
 }
 #}}}: doctor
 
 prune() { #{{{
   local reclaimed
 
-  info "Cleaning up system.."
+  info_wait "Cleaning up system.."
 
   reclaimed=$($CONTAINER_ORCHESTRATOR system prune -f \
     --filter "until=240h" \
@@ -1096,7 +1194,8 @@ prune() { #{{{
   jq ".system.docker.reclaimed = \"$reclaimed\"" "$SG_DIAGNOSTIC_FILE" >> "$SG_DIAGNOSTIC_TMP_FILE"
   mv "$SG_DIAGNOSTIC_TMP_FILE" "$SG_DIAGNOSTIC_FILE"
 
-  info "System cleaned. Reclimed:" "$reclaimed"
+  info "Cleaning up system.." "Done"
+  info "Reclimed:" "$reclaimed"
 }
 #}}}: prune
 
@@ -1125,7 +1224,7 @@ is_root() { #{{{
 #}}}: is_root
 
 init_args_are_valid() { #{{{
-  if [[ ! "$1" =~ ^register$|^deregister$|^doctor$|^prune$|^cgroupsv2$ ]]; then
+  if [[ ! "$1" =~ ^register$|^deregister$|^status$|^info$|^prune$|^cgroupsv2$ ]]; then
     err "Provided option" "${1}" "is invalid"
     exit 1
   elif [[ "$1" == "cgroupsv2" && ! "$2" =~ ^enable$|^disable$ ]]; then
@@ -1209,14 +1308,13 @@ setup_cron() { #{{{
   temp_file=$(mktemp)
   crontab -l > "$temp_file" || echo "" > "$temp_file"
 
-  if ! grep -qi -E "doctor|prune" "$temp_file"; then
+  if ! grep -qi -E "status|prune" "$temp_file"; then
     {
-      echo "* * * * * /bin/bash $PWD/main.sh doctor";
+      echo "* * * * * /bin/bash $PWD/main.sh status";
       echo "0 0 * * * /bin/bash $PWD/main.sh prune"
     } >> "$temp_file"
   fi
   /usr/bin/crontab "$temp_file"
-  doctor
 }
 #}}}:setup_cron
 
@@ -1239,19 +1337,23 @@ main() { #{{{
     elif [[ -e /sys/fs/cgroup/cgroup.controllers ]] &&
       [[ "$(grep "^GRUB_CMDLINE_LINUX=\".*systemd.unified_cgroup_hierarchy=0\"" /etc/default/grub)" == "" ]]; then
       err "Private runner does not support" "cgroupsv2"
+      cmd_example "Exec" "./main.sh cgroupsv2 disable" "to switch to cgroupsv1"
       exit 1
     fi
   else
-    err "Preview off: private runner does not support" "cgroupsv2"
+    err "CgroupsV2 Preview Off: private runner does not support" "cgroupsv2"
+    cmd_example "Exec" "export CGROUPSV2_PREVIEW=true" "to enable cgroupsv2 edit"
     exit 1
   fi
 
+  cmds=()
   for cmd in "${COMMANDS[@]}"; do
     if ! type "$cmd" >&/dev/null; then
-      err "Command" "$cmd" "not installed"
-      exit 1
+      cmds+=( "$cmd" )
     fi
   done
+  (( ${#cmds[@]}>0 )) && \
+    err "Commands" "${cmds[*]}" "not installed" && exit 1
 
   for container_orchestrator in "${CONTAINER_ORCHESTRATORS[@]}"; do
     if check_container_orchestrator "$container_orchestrator"; then
@@ -1268,7 +1370,7 @@ main() { #{{{
   done
 
   if [[ -z $CONTAINER_ORCHESTRATOR ]]; then
-    err "One of following container orchestrators required:" "${CONTAINER_ORCHESTRATORS[@]}"
+    err "One of following container orchestrators required:" "${CONTAINER_ORCHESTRATORS[*]}"
     exit 1
   fi
 
@@ -1289,8 +1391,12 @@ main() { #{{{
       prune
       exit 0
       ;;
-    doctor)
+    status)
       doctor
+      exit 0
+      ;;
+    info)
+      print_details
       exit 0
       ;;
     disable-cgroupsv2)
