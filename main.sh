@@ -589,8 +589,8 @@ check_fluentbit_status() {
   info "Waiting for fluentbit logs.."
   until (( $(grep -ia -A2 "stream processor started" "$log_file" | wc -l)>=2 )); do
     sleep 1
-  done &
-  spinner "$!"
+  done & spinner "$!"
+  printf "    \b\b\b\b"
 
   if [[ "$STORAGE_BACKEND_TYPE" == "aws_s3" ]]; then
     debug "Checking" "AWS S3" "errors"
@@ -754,6 +754,37 @@ check_container_orchestrator() { #{{{
 #}}}
 
 #######################################
+# Run fluentbit $CONTAINER_ORCHESTRATOR container for logging
+# Globals:
+#
+# Arguments:
+#   AWS_ACCESS_KEY_ID
+#   AWS_SECRET_ACCESS_KEY
+# Outputs:
+#   Write to STDOUT/STERR
+#   if successfull/error.
+#######################################
+# This portion checks whether the STORAGE_BACKEND_TYPE is
+# aws_s3 or azure_blob and runs the container accordingly.
+########################################
+setup_cron() { #{{{
+  local temp_file
+
+  temp_file=$(mktemp)
+  crontab -l > "$temp_file" || echo "" > "$temp_file"
+
+  if ! grep -qi -E "doctor|prune" "$temp_file"; then
+    {
+      echo "* * * * * /bin/bash $PWD/main.sh doctor";
+      echo "0 0 * * * /bin/bash $PWD/main.sh prune"
+    } >> "$temp_file"
+  fi
+  /usr/bin/crontab "$temp_file"
+  doctor
+}
+#}}}
+
+#######################################
 # Register instance to AWS ECS.
 # Globals:
 #   AWS_DEFAULT_REGION
@@ -784,7 +815,7 @@ register_instance() { #{{{
   configure_fluentbit
 
   if [[ ! -e /tmp/ecs-anywhere-install.sh ]]; then
-    info "Downloading necessary files.."
+    info "Downloading support files.."
 
     if ! curl -fSsLk \
       --proto "https" \
@@ -798,7 +829,7 @@ register_instance() { #{{{
       info "Download completed. Continuing.."
     fi
   else
-    info "Skiping download. Files already exist."
+    info "Skiping support files download.."
   fi
 
   info "Trying to register instance.."
@@ -814,12 +845,12 @@ register_instance() { #{{{
       --activation-id "${SSM_ACTIVATION_ID}" \
       --activation-code "${SSM_ACTIVATION_CODE}" \
       --docker-install-source none \
-      >> "$LOG_FILE" 2>&1 &
-  spinner "$!"; then
+      >> "$LOG_FILE" 2>&1 & spinner "$!"; then
     container_status="$($CONTAINER_ORCHESTRATOR ps -a --filter='name=ecs-agent' --format '{{.Status}}')"
+    container_id="$($CONTAINER_ORCHESTRATOR ps -aq --filter 'name=ecs-agent')"
     if [[ "$?" != 0 || "$container_status" =~ Exited ]]; then
       err "Failed to register external instance."
-      grep Error /var/lib/docker/containers/*/*-json.log
+      grep Error /var/lib/docker/containers/"$container_id"*/*-json.log
       exit 1
     else
       info "Instance successfully registered to Stackguardian platform."
@@ -868,13 +899,15 @@ deregister_instance() { #{{{
   debug "Payload:" "${payload}"
 
   info "Trying to deregsiter instance.."
-  if api_call; then
+  if api_call & spinner "$!"; then
     info "Instance deregistered. Removing local data.."
     clean_local_setup
   else
     err "Could not fetch data from API. >>" "$message - $status_code" "<<"
     force_exec && clean_local_setup
   fi
+
+  info "Instance successfully deregisterd."
 }
 #}}}
 
@@ -977,37 +1010,6 @@ prune() { #{{{
 #}}}
 
 #######################################
-# Run fluentbit $CONTAINER_ORCHESTRATOR container for logging
-# Globals:
-#
-# Arguments:
-#   AWS_ACCESS_KEY_ID
-#   AWS_SECRET_ACCESS_KEY
-# Outputs:
-#   Write to STDOUT/STERR
-#   if successfull/error.
-#######################################
-# This portion checks whether the STORAGE_BACKEND_TYPE is
-# aws_s3 or azure_blob and runs the container accordingly.
-########################################
-setup_cron() { #{{{
-  local temp_file
-
-  temp_file=$(mktemp)
-  crontab -l > "$temp_file" || echo "" > "$temp_file"
-
-  if ! grep -qi -E "doctor|prune" "$temp_file"; then
-    {
-      echo "* * * * * /bin/bash $PWD/main.sh doctor";
-      echo "0 0 * * * /bin/bash $PWD/main.sh prune"
-    } >> "$temp_file"
-  fi
-  /usr/bin/crontab "$temp_file"
-  doctor
-}
-#}}}
-
-#######################################
 # Check if provided argument is valid.
 # Globals:
 #   None
@@ -1042,8 +1044,11 @@ is_root() { #{{{
 #}}}
 
 init_args_are_valid() { #{{{
-  if [[ ! "$1" =~ register|deregister|doctor|prune ]]; then
+  if [[ ! "$1" =~ ^register$|^deregister$|^doctor$|^prune$|^cgroupsv2$ ]]; then
     err "Provided option" "${1}" "is invalid"
+    exit 1
+  elif [[ "$1" == "cgroupsv2" && ! "$2" =~ ^enable$|^disable$ ]]; then
+    err "Arguments:" "enable, disable" "are required."
     exit 1
   elif [[ "$1" =~ register|deregister && \
     ( ! "$*" =~ --sg-node-token || \
@@ -1103,64 +1108,123 @@ parse_arguments() { #{{{
 }
 #}}}
 
+cgroupsv2() {
+  local cgroup_toggle
+  [[ "$1" == "enable" ]] &&
+    cgroup_toggle=1 || cgroup_toggle=0
+
+  if (( cgroup_toggle==0 )); then
+    info "Switching to" "cgroupsv1"
+  else
+    info "Swithcing to" "cgroupsv2"
+  fi
+
+  if type grubby >&/dev/null; then
+    grubby --update-kernel=ALL --args="systemd.unified_cgroup_hierarchy=$cgroup_toggle"
+  else
+    grub_cmdline="$(grep "GRUB_CMDLINE_LINUX=.*" /etc/default/grub | grep -o '".*"' | tr -d '"')"
+    debug "GRUB_CMDLINE_LINUX" "$grub_cmdline"
+    if [[ -n "$grub_cmdline" ]]; then
+      pattern="(systemd.unified_cgroup_hierarchy)=(.*)"
+      if [[ $grub_cmdline =~ $pattern ]]; then
+        grub_cmdline="$(echo "$grub_cmdline" \
+          | sed "s/(systemd.unified_cgroup_hierarchy)=(.*)/\1=$cgroup_toggle/")"
+        debug "GRUB_CMDLINE_LINUX switched" "$grub_cmdline"
+      else
+        grub_cmdline="$grub_cmdline systemd.unified_cgroup_hierarchy=$cgroup_toggle"
+        debug "GRUB_CMDLINE_LINUX appended" "$grub_cmdline"
+      fi
+    else
+      grub_cmdline="systemd.unified_cgroup_hierarchy=$cgroup_toggle"
+      debug "GRUB_CMDLINE_LINUX new" "$grub_cmdline"
+    fi
+    sed -i "s/^GRUB_CMDLINE_LINUX=.*/GRUB_CMDLINE_LINUX=\"$grub_cmdline\"/" /etc/default/grub
+  fi
+
+  info "Reboot required. Continue.."
+  read -r
+  reboot
+  info "Rebooting.."
+  exit 0
+}
+
 main() { #{{{
 
-for cmd in "${COMMANDS[@]}"; do
-  if ! type "$cmd" >&/dev/null; then
-    err "Command" "$cmd" "not installed"
+  [[ "${*}" =~ --help || $# -lt 1 ]] && show_help && exit 0
+
+  is_root && init_args_are_valid "$@"
+
+  if ! pidof systemd >&/dev/null; then
+    err "Private runner only available for" "systemd-based" "systems"
+  fi
+
+  if [[ "$1" == "cgroupsv2" && "$2" =~ enable|disable ]]; then
+    parse_arguments "${@:3}"
+    cgroupsv2 "$2"
+  elif [[ -e /sys/fs/cgroup/cgroup.controllers ]] &&
+    [[ "$(grep "^GRUB_CMDLINE_LINUX=\".*systemd.unified_cgroup_hierarchy=0\"" /etc/default/grub)" == "" ]]; then
+    err "Private runner does not support" "cgroupsv2"
     exit 1
   fi
-done
 
-for container_orchestrator in docker podman; do
-  check_container_orchestrator "$container_orchestrator"
-  exit_status=$?
-  if (( exit_status==0 )); then
-    info "Default container orchesrator:" "$container_orchestrator"
-    if [[ "$container_orchestrator" == "podman" ]]; then
-      info "Container orchestartor not supported. Aborting.."
-      exit 0
+  for cmd in "${COMMANDS[@]}"; do
+    if ! type "$cmd" >&/dev/null; then
+      err "Command" "$cmd" "not installed"
+      exit 1
     fi
-    CONTAINER_ORCHESTRATOR="$container_orchestrator"
-    break
-  else
-    info "Container orchestrator" "$container_orchestrator" "not found. Trying next.."
+  done
+
+  for container_orchestrator in docker podman; do
+    check_container_orchestrator "$container_orchestrator"
+    exit_status=$?
+    if (( exit_status==0 )); then
+      info "Default container orchesrator:" "$container_orchestrator"
+      if [[ "$container_orchestrator" == "podman" ]]; then
+        info "Container orchestartor not supported. Aborting.."
+        exit 0
+      fi
+      CONTAINER_ORCHESTRATOR="$container_orchestrator"
+      break
+    else
+      info "Container orchestrator" "$container_orchestrator" "not found. Trying next.."
+    fi
+  done
+
+  if [[ -z $CONTAINER_ORCHESTRATOR ]]; then
+    err "One of following container orchestrators required:" "docker podman"
+    exit 1
   fi
-done
 
-if [[ -z $CONTAINER_ORCHESTRATOR ]]; then
-  err "Container orchestartor not satisfied in:" "docker podman"
-  exit 1
-fi
+  case "${1}" in
+    register)
+      shift
+      parse_arguments "$@"
+      check_sg_args
+      register_instance
+      ;;
+    deregister)
+      shift
+      parse_arguments "$@"
+      check_sg_args
+      deregister_instance
+      ;;
+    prune)
+      prune
+      exit 0
+      ;;
+    doctor)
+      doctor
+      exit 0
+      ;;
+    disable-cgroupsv2)
+      cgroupsv2 0
+      ;;
+    enable-cgroupsv2)
+      cgroupsv2 1
+      ;;
+  esac
 
-[[ "${*}" =~ --help || $# -lt 1 ]] && show_help && exit 0
-
-is_root && init_args_are_valid "$@"
-
-case "${1}" in
-  register)
-    shift
-    parse_arguments "$@"
-    check_sg_args
-    register_instance
-    ;;
-  deregister)
-    shift
-    parse_arguments "$@"
-    check_sg_args
-    deregister_instance
-    ;;
-  prune)
-    prune
-    exit 0
-    ;;
-  doctor)
-    doctor
-    exit 0
-    ;;
-esac
-
-# TODO: API call to ping the node
+  # TODO: API call to ping the node
 
 }
 #}}}
