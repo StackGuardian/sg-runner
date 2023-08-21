@@ -19,6 +19,7 @@ fi
 
 # static
 readonly COMMANDS=( "jq" "crontab" )
+readonly CONTAINER_ORCHESTRATORS=( "docker" "podman" )
 readonly SG_BASE_API=${SG_BASE_API:="https://api.app.stackguardian.io/api/v1"}
 readonly FLUENTBIT_IMAGE="fluent/fluent-bit:2.0.9-debug"
 
@@ -97,7 +98,7 @@ Usage:
   ./$(basename "$0") <command> [options]
 EOF
 }
-#}}}
+#}}}: show_help
 
 log_date() { #{{{
   printf "${C_BLUE}[%s]" "$(date +'%Y-%m-%dT%H:%M:%S%z')"
@@ -146,7 +147,7 @@ doctor_frame() { #{{{
   # printf "\n |\n"
   printf "\n"
 }
-#}}}
+#}}}: doctor_frame
 
 #######################################
 # Print details at the end of registration
@@ -163,12 +164,12 @@ details_frame() { #{{{
   printf " + ${C_BOLD}%s${C_RESET} " "${1}"
   printf "\n |\n"
 }
-#}}}
+#}}}: details_frame
 
 details_item() { #{{{
   printf " | * %s: ${C_GREEN_BOLD}%s${C_RESET}\n" "$1" "$2"
 }
-#}}}
+#}}}: details_item
 
 print_details() { #{{{
   echo
@@ -178,7 +179,7 @@ print_details() { #{{{
   details_item "Runner ID" "${RUNNER_ID}"
   echo
 }
-#}}}
+#}}}: print_details
 
 #}}}: Print functions
 
@@ -189,13 +190,13 @@ cleanup() { #{{{
   [[ -n ${spinner_pid} ]] && kill "${spinner_pid}" >&/dev/null
   exit 0
 }
-#}}}
+#}}}: cleanup
 
 force_exec() { #{{{
   [[ "$FORCE_PASS" == true ]] && return 0
   return 1
 }
-#}}}
+#}}}: force_exec
 
 spinner() { #{{{
     local spinner_pid=$1
@@ -216,7 +217,7 @@ spinner() { #{{{
     wait "${spinner_pid}"
     printf "    \b\b\b\b"
 }
-#}}}
+#}}}: spinner
 
 clean_local_setup() { #{{{
   info "Starting cleanup.."
@@ -232,7 +233,7 @@ clean_local_setup() { #{{{
   debug "Removing local configuration.."
   rm -rf /var/log/ecs /etc/ecs /var/lib/ecs ./fluent-bit.conf volumes/ ./aws-credentials ./db-state ./ssm-binaries >&/dev/null
 }
-#}}}
+#}}}: clean_local_setup
 
 #}}}: Other functions
 
@@ -406,7 +407,7 @@ EOF
 
 fi
 }
-#}}}
+#}}}: configure_local_data
 
 #######################################
 # Configure local network.
@@ -455,9 +456,194 @@ configure_local_network() { #{{{
     --to-ports 51679
 
 }
-#}}}
+#}}}: configure_local_network
 
 #}}}: Local data functions
+
+#{{{ Services
+
+#######################################
+# Check fluentbit errors for storage.
+# If errors, print and exit.
+# Globals:
+#   None
+# Arguments:
+#   None
+# Returns:
+#   None
+# Outputs:
+#   Write to STDOUT/STDERR
+#   if successfull/error.
+#######################################
+check_fluentbit_status() { #{{{
+  info "Starting fluentbit status check.."
+
+  local container_id
+  local log_file
+
+  until [[ -n "$container_id" ]]; do
+    container_id="$($CONTAINER_ORCHESTRATOR ps -q --filter "name=fluentbit-agent")"
+  done
+  debug "Fluentbit container id:" "$container_id"
+
+  until [[ -n "$log_file" ]]; do
+    log_file="$(echo /var/lib/docker/containers/"$container_id"*/*.log)"
+    [[ ! -e $log_file ]] && unset log_file
+  done
+  debug "Fluentbit log file:" "$log_file"
+
+  info "Waiting for fluentbit logs.."
+  until (( $(grep -ia -A2 "stream processor started" "$log_file" | wc -l)>=2 )); do
+    sleep 1
+  done & spinner "$!"
+  printf "    \b\b\b\b"
+
+  if [[ "$STORAGE_BACKEND_TYPE" == "aws_s3" ]]; then
+    debug "Checking" "AWS S3" "errors"
+    err_msg="$(grep -aio -E "error='.*'" "$log_file" \
+      | grep -io -m1 -E "message='.*'" \
+      | grep -io -E "'.*'" | tr -d "'\0")"
+  elif [[ "$STORAGE_BACKEND_TYPE" == "azure_blob_storage" ]]; then
+    debug "Checking" "Azure Blob" "errors"
+    err_msg="$(grep -aio -m1 -E "\[error.*" "$log_file" \
+      | cut -d" " -f3- | tr -d '\0')"
+  fi
+
+  if [[ -n "$err_msg" ]]; then
+    err "Fluentbit failed to start:" "$err_msg"
+    clean_local_setup &
+    spinner "$!"
+    info "Cleanup finished."
+    exit 1
+  fi
+
+  info "Fluentbit status:" "healthy"
+}
+#}}}: check_fluentbit_status
+
+#######################################
+# Check if specific service.$1 is runing.
+# If not try reload or restart.
+# Globals:
+#   None
+# Arguments:
+#   systemctl service
+# Returns:
+#   None
+# Outputs:
+#   Write to STDOUT/STDERR
+#   if successfull/error.
+#######################################
+check_systemctl_status() { #{{{
+  if ! systemctl is-active "$1" >&/dev/null; then
+    debug "Reloading/Restarting neccessary services.."
+    if ! systemctl reload-or-restart "$1" 2>/dev/null; then
+      return 2
+    fi
+    return 0
+  else
+    return 0
+  fi
+}
+#}}}: check_systemctl_status
+
+#######################################
+# Check if ecs.service exists
+# and if it is healthy and running.
+# Globals:
+#   None
+# Arguments:
+#   None
+# Returns:
+#   0 if ecs.service does not exists
+# Outputs:
+#   Write to STDOUT/STERR
+#   if successfull/error.
+#######################################
+check_systemctl_ecs_status() { #{{{
+  systemctl status ecs --no-pager >&/dev/null
+  if [[ "$?" =~ 4|0 ]]; then
+    return 0
+  else
+    check_systemctl_status "ecs"
+  fi
+}
+#}}}: check_systemctl_status
+
+#######################################
+# Check if container orchestartor exists
+# and if it is healthy and running.
+# Globals:
+#   None
+# Arguments:
+#   Container Orchestrator Command
+# Returns:
+#   None
+# Outputs:
+#   Write to STDOUT/STERR
+#   if successfull/error.
+#######################################
+check_container_orchestrator() { #{{{
+  if type "$1" >&/dev/null; then
+    check_systemctl_status "$1"
+    return $?
+  else
+    return 1
+  fi
+}
+#}}}: check_container_orchestrator
+
+#######################################
+# Enable/Disable cgroupsv2 (Preview)
+# Globals:
+#   None
+# Arguments:
+#   enable/disable
+# Returns:
+#   None
+# Outputs:
+#   Write to STDOUT/STERR
+#   if successfull/error.
+#######################################
+cgroupsv2() { #{{{
+  local cgroup_toggle
+  [[ "$1" == "enable" ]] &&
+    cgroup_toggle=1 || cgroup_toggle=0
+
+  if (( cgroup_toggle==0 )); then
+    info "Switching to" "cgroupsv1"
+  else
+    info "Swithcing to" "cgroupsv2"
+  fi
+
+  if type grubby >&/dev/null; then
+    grubby --update-kernel=ALL --args="systemd.unified_cgroup_hierarchy=$cgroup_toggle"
+  else
+    grub_cmdline="$(grep "GRUB_CMDLINE_LINUX=.*" /etc/default/grub | grep -o '".*"' | tr -d '"')"
+    debug "GRUB_CMDLINE_LINUX" "$grub_cmdline"
+    if [[ -n "$grub_cmdline" ]]; then
+      pattern="(systemd.unified_cgroup_hierarchy)=(.*)"
+      if [[ $grub_cmdline =~ $pattern ]]; then
+        grub_cmdline="$(echo "$grub_cmdline" \
+          | sed "s/(systemd.unified_cgroup_hierarchy)=(.*)/\1=$cgroup_toggle/")"
+        debug "GRUB_CMDLINE_LINUX switched" "$grub_cmdline"
+      else
+        grub_cmdline="$grub_cmdline systemd.unified_cgroup_hierarchy=$cgroup_toggle"
+        debug "GRUB_CMDLINE_LINUX appended" "$grub_cmdline"
+      fi
+    else
+      grub_cmdline="systemd.unified_cgroup_hierarchy=$cgroup_toggle"
+      debug "GRUB_CMDLINE_LINUX new" "$grub_cmdline"
+    fi
+    sed -i "s/^GRUB_CMDLINE_LINUX=.*/GRUB_CMDLINE_LINUX=\"$grub_cmdline\"/" /etc/default/grub
+  fi
+
+  info "Reboot required. Continue.."
+  read -r
+  reboot
+  info "Rebooting.."
+  exit 0
+} #}}}
 
 api_call() { #{{{
   response=$(curl -i -s \
@@ -498,7 +684,9 @@ api_call() { #{{{
     return 0
   fi
 }
-#}}}
+#}}}: cgroupsv2
+
+#}}}: Services
 
 #######################################
 # Fetch necessary info from API.
@@ -568,52 +756,7 @@ fetch_organization_info() { #{{{
   debug "S3_AWS_ACCESS_KEY_ID:" "${S3_AWS_ACCESS_KEY_ID}"
   debug "S3_AWS_SECRET_ACCESS_KEY:" "${S3_AWS_SECRET_ACCESS_KEY:0:5}*****"
 }
-#}}}
-
-check_fluentbit_status() {
-  info "Starting fluentbit status check.."
-
-  local container_id
-  local log_file
-
-  until [[ -n "$container_id" ]]; do
-    container_id="$($CONTAINER_ORCHESTRATOR ps -q --filter "name=fluentbit-agent")"
-  done
-  debug "Fluentbit container id:" "$container_id"
-
-  until [[ -n "$log_file" ]]; do
-    log_file="$(echo /var/lib/docker/containers/"$container_id"*/*.log)"
-    [[ ! -e $log_file ]] && unset log_file
-  done
-  debug "Fluentbit log file:" "$log_file"
-
-  info "Waiting for fluentbit logs.."
-  until (( $(grep -ia -A2 "stream processor started" "$log_file" | wc -l)>=2 )); do
-    sleep 1
-  done & spinner "$!"
-  printf "    \b\b\b\b"
-
-  if [[ "$STORAGE_BACKEND_TYPE" == "aws_s3" ]]; then
-    debug "Checking" "AWS S3" "errors"
-    err_msg="$(grep -aio -E "error='.*'" "$log_file" \
-      | grep -io -m1 -E "message='.*'" \
-      | grep -io -E "'.*'" | tr -d "'\0")"
-  elif [[ "$STORAGE_BACKEND_TYPE" == "azure_blob_storage" ]]; then
-    debug "Checking" "Azure Blob" "errors"
-    err_msg="$(grep -aio -m1 -E "\[error.*" "$log_file" \
-      | cut -d" " -f3- | tr -d '\0')"
-  fi
-
-  if [[ -n "$err_msg" ]]; then
-    err "Fluentbit failed to start:" "$err_msg"
-    clean_local_setup &
-    spinner "$!"
-    info "Cleanup finished."
-    exit 1
-  fi
-
-  info "Fluentbit status:" "healthy"
-}
+#}}}: fetch_organization_info
 
 #######################################
 # Run fluentbit $CONTAINER_ORCHESTRATOR container for logging
@@ -679,111 +822,7 @@ configure_fluentbit() { #{{{
   fi
   check_fluentbit_status
 }
-#}}}
-
-#######################################
-# Check if specific service.$1 is runing.
-# If not try reload or restart.
-# Globals:
-#   None
-# Arguments:
-#   systemctl service
-# Returns:
-#   None
-# Outputs:
-#   Write to STDOUT/STDERR
-#   if successfull/error.
-#######################################
-check_systemctl_status() { #{{{
-  if ! systemctl is-active "$1" >&/dev/null; then
-    info "Reloading/Restarting neccessary services.."
-    if ! systemctl reload-or-restart "$1" 2>/dev/null; then
-      return 2
-    fi
-    info "Done. Continuing registration.."
-    return 0
-  else
-    return 0
-  fi
-}
-#}}}
-
-#######################################
-# Check if ecs.service exists
-# and if it is healthy and running.
-# Globals:
-#   None
-# Arguments:
-#   None
-# Returns:
-#   0 if ecs.service does not exists
-# Outputs:
-#   Write to STDOUT/STERR
-#   if successfull/error.
-#######################################
-check_systemctl_ecs_status() { #{{{
-  systemctl status ecs --no-pager >&/dev/null
-  if [[ "$?" =~ 4|0 ]]; then
-    return 0
-  else
-    check_systemctl_status "ecs"
-  fi
-}
-#}}}
-
-#######################################
-# Check if docker.service exists
-# and if it is healthy and running.
-# Globals:
-#   None
-# Arguments:
-#   Container Orchestrator Command
-# Returns:
-#   None
-# Outputs:
-#   Write to STDOUT/STERR
-#   if successfull/error.
-#######################################
-check_container_orchestrator() { #{{{
-  if type "$1" >&/dev/null; then
-    check_systemctl_status "$1"
-    return $?
-  else
-    return 1
-  fi
-}
-#}}}
-
-#######################################
-# Run fluentbit $CONTAINER_ORCHESTRATOR container for logging
-# Globals:
-#
-# Arguments:
-#   AWS_ACCESS_KEY_ID
-#   AWS_SECRET_ACCESS_KEY
-# Outputs:
-#   Write to STDOUT/STERR
-#   if successfull/error.
-#######################################
-# This portion checks whether the STORAGE_BACKEND_TYPE is
-# aws_s3 or azure_blob and runs the container accordingly.
-########################################
-setup_cron() { #{{{
-  local temp_file
-
-  temp_file=$(mktemp)
-  crontab -l > "$temp_file" || echo "" > "$temp_file"
-
-  if ! grep -qi -E "doctor|prune" "$temp_file"; then
-    {
-      echo "* * * * * /bin/bash $PWD/main.sh doctor";
-      echo "0 0 * * * /bin/bash $PWD/main.sh prune"
-    } >> "$temp_file"
-  fi
-  /usr/bin/crontab "$temp_file"
-  doctor
-}
-#}}}
+#}}}: configure_fluentbit
 
 #######################################
 # Register instance to AWS ECS.
@@ -865,7 +904,7 @@ register_instance() { #{{{
   setup_cron
   print_details
 }
-#}}}
+#}}}: register_instance
 
 #######################################
 # Make API call for de-registering.
@@ -910,20 +949,8 @@ deregister_instance() { #{{{
 
   info "Instance successfully deregisterd."
 }
-#}}}
+#}}}: deregister_instance
 
-#######################################
-# Check if all services is working
-# Globals:
-#
-# Arguments:
-#
-# Returns:
-#
-# Outputs:
-#  Write to STDOUT list
-#  of services with status
-#######################################
 doctor() { #{{{
   info "Checking services health status.."
   echo
@@ -990,7 +1017,7 @@ doctor_frame "System Service" "${status_list}"
   echo
   info "Services health status generated."
 }
-#}}}
+#}}}: doctor
 
 prune() { #{{{
   local reclaimed
@@ -1008,20 +1035,10 @@ prune() { #{{{
 
   info "System cleaned. Reclimed:" "$reclaimed"
 }
-#}}}
+#}}}: prune
 
-#######################################
-# Check if provided argument is valid.
-# Globals:
-#   None
-# Arguments:
-#   Argument name
-#   Argument value
-# Returns:
-#   0 if argument is valid.
-# Outputs:
-#   If error, write to STDERR and exit.
-#######################################
+#{{{ Argument/init checks
+
 check_arg_value() { #{{{
   ## TODO(adis.halilovic@stackguardian.io): make sure to validate double parameter input
   if [[ "${2:0:2}" == "--" ]]; then
@@ -1033,7 +1050,7 @@ check_arg_value() { #{{{
   fi
   return 0
 }
-#}}}
+#}}}: check_arg_value
 
 is_root() { #{{{
   if (( $(id -u) != 0 )); then
@@ -1042,7 +1059,7 @@ is_root() { #{{{
   fi
   return 0
 }
-#}}}
+#}}}: is_root
 
 init_args_are_valid() { #{{{
   if [[ ! "$1" =~ ^register$|^deregister$|^doctor$|^prune$|^cgroupsv2$ ]]; then
@@ -1060,7 +1077,7 @@ init_args_are_valid() { #{{{
   fi
   return 0
 }
-#}}}
+#}}}: init_args_are_valid
 
 check_sg_args() { #{{{
   if [[ -z "${SG_NODE_TOKEN}" \
@@ -1071,7 +1088,7 @@ check_sg_args() { #{{{
   fi
   return 0
 }
-#}}}
+#}}}: check_sg_args
 
 parse_arguments() { #{{{
   while :; do
@@ -1107,47 +1124,40 @@ parse_arguments() { #{{{
     esac
   done
 }
-#}}}
+#}}}: parse_arguments
 
-cgroupsv2() {
-  local cgroup_toggle
-  [[ "$1" == "enable" ]] &&
-    cgroup_toggle=1 || cgroup_toggle=0
+#######################################
+# Run fluentbit $CONTAINER_ORCHESTRATOR container for logging
+# Globals:
+#
+# Arguments:
+#   AWS_ACCESS_KEY_ID
+#   AWS_SECRET_ACCESS_KEY
+# Outputs:
+#   Write to STDOUT/STERR
+#   if successfull/error.
+#######################################
+# This portion checks whether the STORAGE_BACKEND_TYPE is
+# aws_s3 or azure_blob and runs the container accordingly.
+########################################
+setup_cron() { #{{{
+  local temp_file
 
-  if (( cgroup_toggle==0 )); then
-    info "Switching to" "cgroupsv1"
-  else
-    info "Swithcing to" "cgroupsv2"
+  temp_file=$(mktemp)
+  crontab -l > "$temp_file" || echo "" > "$temp_file"
+
+  if ! grep -qi -E "doctor|prune" "$temp_file"; then
+    {
+      echo "* * * * * /bin/bash $PWD/main.sh doctor";
+      echo "0 0 * * * /bin/bash $PWD/main.sh prune"
+    } >> "$temp_file"
   fi
-
-  if type grubby >&/dev/null; then
-    grubby --update-kernel=ALL --args="systemd.unified_cgroup_hierarchy=$cgroup_toggle"
-  else
-    grub_cmdline="$(grep "GRUB_CMDLINE_LINUX=.*" /etc/default/grub | grep -o '".*"' | tr -d '"')"
-    debug "GRUB_CMDLINE_LINUX" "$grub_cmdline"
-    if [[ -n "$grub_cmdline" ]]; then
-      pattern="(systemd.unified_cgroup_hierarchy)=(.*)"
-      if [[ $grub_cmdline =~ $pattern ]]; then
-        grub_cmdline="$(echo "$grub_cmdline" \
-          | sed "s/(systemd.unified_cgroup_hierarchy)=(.*)/\1=$cgroup_toggle/")"
-        debug "GRUB_CMDLINE_LINUX switched" "$grub_cmdline"
-      else
-        grub_cmdline="$grub_cmdline systemd.unified_cgroup_hierarchy=$cgroup_toggle"
-        debug "GRUB_CMDLINE_LINUX appended" "$grub_cmdline"
-      fi
-    else
-      grub_cmdline="systemd.unified_cgroup_hierarchy=$cgroup_toggle"
-      debug "GRUB_CMDLINE_LINUX new" "$grub_cmdline"
-    fi
-    sed -i "s/^GRUB_CMDLINE_LINUX=.*/GRUB_CMDLINE_LINUX=\"$grub_cmdline\"/" /etc/default/grub
-  fi
-
-  info "Reboot required. Continue.."
-  read -r
-  reboot
-  info "Rebooting.."
-  exit 0
+  /usr/bin/crontab "$temp_file"
+  doctor
 }
+#}}}:setup_cron
+
+#}}}: Argument/init checks
 
 main() { #{{{
 
@@ -1169,7 +1179,7 @@ main() { #{{{
       exit 1
     fi
   else
-    err "Private runner does not support" "cgroupsv2"
+    err "Preview off: private runner does not support" "cgroupsv2"
     exit 1
   fi
 
@@ -1180,10 +1190,8 @@ main() { #{{{
     fi
   done
 
-  for container_orchestrator in docker podman; do
-    check_container_orchestrator "$container_orchestrator"
-    exit_status=$?
-    if (( exit_status==0 )); then
+  for container_orchestrator in "${CONTAINER_ORCHESTRATORS[@]}"; do
+    if check_container_orchestrator "$container_orchestrator"; then
       info "Default container orchesrator:" "$container_orchestrator"
       if [[ "$container_orchestrator" == "podman" ]]; then
         info "Container orchestartor not supported. Aborting.."
@@ -1197,7 +1205,7 @@ main() { #{{{
   done
 
   if [[ -z $CONTAINER_ORCHESTRATOR ]]; then
-    err "One of following container orchestrators required:" "docker podman"
+    err "One of following container orchestrators required:" "${CONTAINER_ORCHESTRATORS[@]}"
     exit 1
   fi
 
@@ -1233,7 +1241,7 @@ main() { #{{{
   # TODO: API call to ping the node
 
 }
-#}}}
+#}}}: main
 
 trap cleanup SIGINT
 trap exit_help EXIT
