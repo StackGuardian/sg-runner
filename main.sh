@@ -403,10 +403,22 @@ cgroupsv2() { #{{{
     cgroup_toggle=1 || cgroup_toggle=0
 
   if (( cgroup_toggle==0 )); then
-    info "Switched to" "cgroupsv1"
+    info "Switching to" "cgroupsv1"
   else
-    info "Switched to" "cgroupsv2"
+    info "Switching to" "cgroupsv2"
   fi
+
+  info "Reboot required!"
+  while :; do
+    read -r -p "$(log_date) Continue.. [Y/n]: " choice
+    if [[ "${choice:="Y"}" =~ y|Y ]]; then
+      break
+    elif [[ "$choice" =~ n|N ]]; then
+      exit 0
+    else
+      info "Unsupported option:" "$choice"
+    fi
+  done
 
   if type grubby >&/dev/null; then
     grubby --update-kernel=ALL --args="systemd.unified_cgroup_hierarchy=$cgroup_toggle"
@@ -431,12 +443,10 @@ cgroupsv2() { #{{{
     sed -i "s/^GRUB_CMDLINE_LINUX=.*/GRUB_CMDLINE_LINUX=\"$grub_cmdline\"/" /etc/default/grub
   fi
 
-  spinner_wait "Reboot required. Continue.."
-  read -r
-  spinner_msg "Reboot required. Continue" 0 "Rebooting.."
   reboot
   exit 0
-} #}}}
+}
+#}}}: cgroupsv2
 
 api_call() { #{{{
   if [[ -n "$1" ]]; then
@@ -486,7 +496,7 @@ api_call() { #{{{
     return 0
   fi
 }
-#}}}: cgroupsv2
+#}}}: api_call
 
 #######################################
 # Run fluentbit $CONTAINER_ORCHESTRATOR container for logging
@@ -1120,27 +1130,6 @@ register_instance() { #{{{
     fi
   done & spinner "$!" "Trying to register instance"
 
-  # if ! /bin/bash /tmp/ecs-anywhere-install.sh \
-  #     --region "${AWS_DEFAULT_REGION}" \
-  #     --cluster "${ECS_CLUSTER}" \
-  #     --activation-id "${SSM_ACTIVATION_ID}" \
-  #     --activation-code "${SSM_ACTIVATION_CODE}" \
-  #     --docker-install-source none \
-  #     >> "$LOG_FILE" 2>&1 & spinner "$!"; then
-  #   container_status="$($CONTAINER_ORCHESTRATOR ps -a --filter='name=ecs-agent' --format '{{.Status}}')"
-  #   container_id="$($CONTAINER_ORCHESTRATOR ps -aq --filter 'name=ecs-agent')"
-  #   full_err_msg=$(grep -ioa -m1 -P '(?<=\[error\] logger=structured ).*?(?=status code)' /var/lib/docker/containers/"$container_id"*/*.log)
-  #   err=$(echo "$full_err_msg" | grep -io -P '(?<=msg=\\\").*?(?=\\\")')
-  #   msg=$(echo "$full_err_msg" | grep -io -P '(?<=error=\\\").*?(?=\\)')
-  #   if [[ "$container_status" =~ Exited || -n "$err_msg" ]]; then
-  #     err "$msg" "$err"
-  #     exit 1
-  #   fi
-  # else
-  #   err "Failed to register external instance."
-  #   exit 1
-  # fi
-
   setup_cron
   print_details
   print_details | sed 's/\x1B\[[0-9;]*[JKmsu]//g' >>  /var/log/registration/"registration_details_$(date +'%Y-%m-%dT%H-%M-%S%z').txt"
@@ -1382,20 +1371,21 @@ main() { #{{{
     err "Private runner only available for" "systemd-based" "systems"
   fi
 
-  if [[ "$CGROUPSV2_PREVIEW" == true ]]; then
+  if [[ -e /sys/fs/cgroup/cgroup.controllers ]]; then
     if [[ "$1" == "cgroupsv2" && "$2" =~ enable|disable ]]; then
-      parse_arguments "${@:3}"
-      cgroupsv2 "$2"
-    elif [[ -e /sys/fs/cgroup/cgroup.controllers ]] &&
-      [[ "$(grep "^GRUB_CMDLINE_LINUX=\".*systemd.unified_cgroup_hierarchy=0\"" /etc/default/grub)" == "" ]]; then
+      if [[ "$CGROUPSV2_PREVIEW" != true ]]; then
+        err "CgroupsV2 Preview Off: private runner does not support" "cgroupsv2"
+        cmd_example "Exec" "export CGROUPSV2_PREVIEW=true" "to enable cgroupsv2 edit"
+        exit 1
+      elif [[ "$CGROUPSV2_PREVIEW" == true ]]; then
+        parse_arguments "${@:3}"
+        cgroupsv2 "$2"
+      fi
+    elif [[ "$(grep "^GRUB_CMDLINE_LINUX=\".*systemd.unified_cgroup_hierarchy=0\"" /etc/default/grub)" == "" ]]; then
       err "Private runner does not support" "cgroupsv2"
       cmd_example "Exec" "./main.sh cgroupsv2 disable" "to switch to cgroupsv1"
       exit 1
     fi
-  else
-    err "CgroupsV2 Preview Off: private runner does not support" "cgroupsv2"
-    cmd_example "Exec" "export CGROUPSV2_PREVIEW=true" "to enable cgroupsv2 edit"
-    exit 1
   fi
 
   cmds=()
