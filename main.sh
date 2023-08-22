@@ -57,7 +57,7 @@ readonly C_BOLD="\033[1m"
 
 #}}}: Environment variables
 
-#{{{ Print functions
+#{{{ Printing
 
 show_help() { #{{{
   cat <<EOF
@@ -107,28 +107,50 @@ EOF
 #}}}: show_help
 
 log_date() { #{{{
-  printf "${C_BLUE}[%s]" "$(date +'%Y-%m-%dT%H:%M:%S')"
+  printf "${C_BLUE}[%s]${C_RESET}" "$(date +'%Y-%m-%dT%H:%M:%S')"
 }
 #}}}: log_date
 
 err() { #{{{
-  printf "%s ${C_RED_BOLD}[ERROR] ${C_RESET}%s${C_BOLD} %s${C_RESET} %s\n" "$(log_date)" "${1}" "${2}" "${@:3}" >&2
+  printf "%s ${C_RED_BOLD}ERROR: ${C_RESET}%s${C_BOLD} %s${C_RESET} %s\n" "$(log_date)" "${1}" "${2}" "${@:3}" >&2
 }
 #}}}: err
 
+log_err() { #{{{
+  local msg
+  local err
+  msg="$(tail -n1 "$LOG_FILE" | cut -d":" -f2-)"
+  err="$(tail -n1 "$LOG_FILE" | cut -d":" -f1)"
+  printf "%s ${C_RED_BOLD}ERROR: ${C_RESET}%s${C_BOLD} %s${C_RESET}\n" "$(log_date)" "$err" "$msg" >&2
+}
+#}}}: log_err
+
 info() { #{{{
-  printf "%s ${C_GREEN_BOLD}[INFO]${C_RESET} %s${C_BOLD} %s${C_RESET} %s\n" "$(log_date)" "${1}" "${2}" "${@:3}"
+  printf "%s %s${C_BOLD} %s${C_RESET} %s\n" "$(log_date)" "${1}" "${2}" "${@:3}"
 }
 #}}}: info
 
-info_wait() { #{{{
-  printf "%s ${C_GREEN_BOLD}[INFO]${C_RESET} %s${C_BOLD} %s${C_RESET} %s\r" "$(log_date)" "${1}" "${2}" "${@:3}"
+spinner_wait() { #{{{
+  printf "%s %s${C_BOLD} %s${C_RESET}\r" "$(log_date)" "${1}" "${2}"
 }
-#}}}: info_wait
+#}}}: spinner_wait
+
+spinner_msg() { #{{{
+  local status="$2"
+  local msg="$3"
+  if [[ -z "$status" ]]; then
+    printf "%s %s.. ${C_BOLD}%s${C_RESET}" "$(log_date)" "${1}" "${msg}"
+  elif (( status==0 )); then
+    printf "%s %s.. ${C_GREEN_BOLD}%s${C_RESET}\n" "$(log_date)" "${1}" "${msg:="Done"}"
+  elif (( status>0 || status<0 )); then
+    printf "%s %s.. ${C_RED_BOLD}%s${C_RESET}\n" "$(log_date)" "${1}" "${msg:="Failed"}"
+  fi
+}
+#}}}: spinner_msg
 
 debug() { #{{{
   [[ "$LOG_DEBUG" =~ true|True ]] && \
-    printf "%s ${C_MAGENTA_BOLD}[DEBUG]${C_RESET} %s${C_BOLD} %s${C_RESET} %s\n" "$(log_date)" "${1}" "${2}" "${@:3}"
+    printf "%s ${C_MAGENTA_BOLD}DEBUG: ${C_RESET} %s${C_BOLD} %s${C_RESET} %s\n" "$(log_date)" "${1}" "${2}" "${@:3}"
 }
 #}}}: debug
 
@@ -136,7 +158,7 @@ debug_variable() { #{{{
   [[ "$LOG_DEBUG" =~ true|True ]] && \
     [[ -n "${!1}" ]] && \
     [[ "${!1}" != "null" ]] && \
-    printf "%s ${C_MAGENTA_BOLD}[DEBUG]${C_RESET} %s${C_BOLD} %s${C_RESET}\n" "$(log_date)" "${1}" "${!1}"
+    printf "%s ${C_MAGENTA_BOLD}DEBUG:${C_RESET} %s${C_BOLD} %s${C_RESET}\n" "$(log_date)" "${1}" "${!1}"
 }
 #}}}: debug
 
@@ -144,7 +166,7 @@ debug_secret() { #{{{
   [[ "$LOG_DEBUG" =~ true|True ]] && \
     [[ -n "${!1}" ]] && \
     [[ "${!1}" != "null" ]] && \
-    printf "%s ${C_MAGENTA_BOLD}[DEBUG]${C_RESET} %s${C_BOLD} %s${C_RESET}\n" "$(log_date)" "${1}" "${!1:0:5}*****"
+    printf "%s ${C_MAGENTA_BOLD}DEBUG:${C_RESET} %s${C_BOLD} %s${C_RESET}\n" "$(log_date)" "${1}" "${!1:0:5}*****"
 }
 #}}}: debug
 
@@ -156,7 +178,7 @@ cmd_example() { #{{{
 
 exit_help() { #{{{
   exit_code=$?
-  (( "$exit_code" != 0 )) && \
+  (( exit_code!=0 )) && \
     printf "\n(Try ${C_BOLD}%s --help${C_RESET} for more information.)\n" "$(basename "${0}")"
 }
 #}}}: exit_help
@@ -230,12 +252,293 @@ print_details() { #{{{
 }
 #}}}: print_details
 
-#}}}: Print functions
+#}}}: Printing
 
-#{{{ Other functions
+#{{{ Services
+
+#######################################
+# Check fluentbit errors for storage.
+# If errors, print and exit.
+# Globals:
+#   None
+# Arguments:
+#   None
+# Returns:
+#   None
+# Outputs:
+#   Write to STDOUT/STDERR
+#   if successfull/error.
+#######################################
+check_fluentbit_status() { #{{{
+  spinner_wait "Starting backend storage check.."
+
+  local container_id
+  local log_file
+
+  until [[ -n "$container_id" ]]; do
+    container_id="$($CONTAINER_ORCHESTRATOR ps -q --filter "name=fluentbit-agent")"
+  done
+  debug "Fluentbit container id:" "$container_id"
+
+  until [[ -n "$log_file" ]]; do
+    log_file="$(echo /var/lib/docker/containers/"$container_id"*/*.log)"
+    [[ ! -e $log_file ]] && unset log_file
+  done
+  debug "Fluentbit log file:" "$log_file"
+
+  spinner_msg "Starting backend storage check" 0
+
+  until (( $(grep -ia -A2 "stream processor started" "$log_file" | wc -l)>=2 )); do
+    sleep 1
+  done & spinner "$!" "Waiting for fluentbit logs"
+
+  if [[ "$STORAGE_BACKEND_TYPE" == "aws_s3" ]]; then
+    debug "Checking" "AWS S3" "errors"
+    err_msg="$(grep -aio -E "error='.*'" "$log_file" \
+      | grep -io -m1 -E "message='.*'" \
+      | grep -io -E "'.*'" | tr -d "'\0")"
+  elif [[ "$STORAGE_BACKEND_TYPE" == "azure_blob_storage" ]]; then
+    debug "Checking" "Azure Blob" "errors"
+    err_msg="$(grep -aio -m1 -E "\[error.*" "$log_file" \
+      | cut -d" " -f3- | tr -d '\0')"
+  fi
+
+  if [[ -n "$err_msg" ]]; then
+    err "Fluentbit failed to start:" "$err_msg"
+    clean_local_setup & spinner "$!" "Starting cleanup"
+    exit 1
+  fi
+
+  info "Storage backend status:" "healthy"
+}
+#}}}: check_fluentbit_status
+
+#######################################
+# Check if specific service.$1 is runing.
+# If not try reload or restart.
+# Globals:
+#   None
+# Arguments:
+#   systemctl service
+# Returns:
+#   None
+# Outputs:
+#   Write to STDOUT/STDERR
+#   if successfull/error.
+#######################################
+check_systemctl_status() { #{{{
+  if ! systemctl is-active "$1" >&/dev/null; then
+    debug "Reloading/Restarting neccessary services.."
+    if ! systemctl reload-or-restart "$1" 2>/dev/null; then
+      return 2
+    fi
+    return 0
+  else
+    return 0
+  fi
+}
+#}}}: check_systemctl_status
+
+#######################################
+# Check if ecs.service exists
+# and if it is healthy and running.
+# Globals:
+#   None
+# Arguments:
+#   None
+# Returns:
+#   0 if ecs.service does not exists
+# Outputs:
+#   Write to STDOUT/STERR
+#   if successfull/error.
+#######################################
+check_systemctl_ecs_status() { #{{{
+  systemctl status ecs --no-pager >&/dev/null
+  if [[ "$?" =~ 4|0 ]]; then
+    return 0
+  else
+    check_systemctl_status "ecs"
+  fi
+}
+#}}}: check_systemctl_status
+
+#######################################
+# Check if container orchestartor exists
+# and if it is healthy and running.
+# Globals:
+#   None
+# Arguments:
+#   Container Orchestrator Command
+# Returns:
+#   None
+# Outputs:
+#   Write to STDOUT/STERR
+#   if successfull/error.
+#######################################
+check_container_orchestrator() { #{{{
+  if type "$1" >&/dev/null; then
+    check_systemctl_status "$1"
+    return $?
+  else
+    return 1
+  fi
+}
+#}}}: check_container_orchestrator
+
+#######################################
+# Enable/Disable cgroupsv2 (Preview)
+# Globals:
+#   None
+# Arguments:
+#   enable/disable
+# Returns:
+#   None
+# Outputs:
+#   Write to STDOUT/STERR
+#   if successfull/error.
+#######################################
+cgroupsv2() { #{{{
+  local cgroup_toggle
+  [[ "$1" == "enable" ]] &&
+    cgroup_toggle=1 || cgroup_toggle=0
+
+  if (( cgroup_toggle==0 )); then
+    info "Switched to" "cgroupsv1"
+  else
+    info "Switched to" "cgroupsv2"
+  fi
+
+  if type grubby >&/dev/null; then
+    grubby --update-kernel=ALL --args="systemd.unified_cgroup_hierarchy=$cgroup_toggle"
+  else
+    grub_cmdline="$(grep "GRUB_CMDLINE_LINUX=.*" /etc/default/grub | grep -o '".*"' | tr -d '"')"
+    debug "GRUB_CMDLINE_LINUX" "$grub_cmdline"
+    if [[ -n "$grub_cmdline" ]]; then
+      pattern="(systemd.unified_cgroup_hierarchy)=(.*)"
+      if [[ $grub_cmdline =~ $pattern ]]; then
+        pattern=${pattern//(/\\(}
+        grub_cmdline="$(echo "$grub_cmdline" \
+          | sed "s/${pattern//)/\\)}/\1=$cgroup_toggle/")"
+        debug "GRUB_CMDLINE_LINUX switched" "$grub_cmdline"
+      else
+        grub_cmdline="$grub_cmdline systemd.unified_cgroup_hierarchy=$cgroup_toggle"
+        debug "GRUB_CMDLINE_LINUX appended" "$grub_cmdline"
+      fi
+    else
+      grub_cmdline="systemd.unified_cgroup_hierarchy=$cgroup_toggle"
+      debug "GRUB_CMDLINE_LINUX new" "$grub_cmdline"
+    fi
+    sed -i "s/^GRUB_CMDLINE_LINUX=.*/GRUB_CMDLINE_LINUX=\"$grub_cmdline\"/" /etc/default/grub
+  fi
+
+  spinner_wait "Reboot required. Continue.."
+  read -r
+  spinner_msg "Reboot required. Continue" 0 "Rebooting.."
+  reboot
+  exit 0
+} #}}}
+
+api_call() { #{{{
+  if [[ -n "$1" ]]; then
+    response=$(curl -i -s \
+      -X POST \
+      -H "Authorization: apikey ${SG_NODE_TOKEN}" \
+      -H "Content-Type: application/json" \
+      -d "$1" \
+      "${url}")
+  else
+    response=$(curl -i -s \
+      -X POST \
+      -H "Authorization: apikey ${SG_NODE_TOKEN}" \
+      -H "Content-Type: application/json" \
+      "${url}")
+  fi
+
+  if [[ -z "$response" ]]; then
+    exit 1
+  else
+    full_response="$response"
+  fi
+
+  debug "Response:" \
+    && echo "${response}"
+
+  # get first status code from response
+  status_code="$(echo "$response" \
+    | awk '/^HTTP/ {print $2}')"
+
+  # actual response data
+  response="$(echo "$response" \
+    | awk '/^Response/ {print $2}')"
+  [[ -z "$response" ]] && \
+  response="$(echo "$full_response" | sed -n '/^{.*/,$p' | tr '\n' ' ')"
+
+  # msg from data
+  message="$(echo "$response" \
+    | jq -r '.msg // .message //  "Unknown error"')"
+
+  if [[ -z "$status_code" ]]; then
+    err "Unknown status code."
+    exit 1
+  elif [ "$status_code" != "200" ] && [ "$status_code" != "201" ] && [ "$status_code" != "100" ]; then
+    return 1
+  else
+    return 0
+  fi
+}
+#}}}: cgroupsv2
+
+#######################################
+# Run fluentbit $CONTAINER_ORCHESTRATOR container for logging
+# Globals:
+#
+# Arguments:
+#   AWS_ACCESS_KEY_ID
+#   AWS_SECRET_ACCESS_KEY
+# Outputs:
+#   Write to STDOUT/STERR
+#   if successfull/error.
+#######################################
+# This portion checks whether the STORAGE_BACKEND_TYPE is
+# aws_s3 or azure_blob and runs the container accordingly.
+########################################
+setup_cron() { #{{{
+  local temp_file
+
+  temp_file=$(mktemp)
+  crontab -l > "$temp_file" 2>/dev/null || echo "" > "$temp_file"
+
+  if grep -qi -E "status|prune" "$temp_file"; then
+    clean_cron
+    crontab -l > "$temp_file" 2>/dev/null || echo "" > "$temp_file"
+  fi
+  { echo "* * * * * /bin/bash $PWD/main.sh status";
+    echo "0 0 * * * /bin/bash $PWD/main.sh prune"
+  } >> "$temp_file"
+  /usr/bin/crontab "$temp_file"
+}
+#}}}: setup_cron
+
+clean_cron() { #{{{
+  local temp_file
+
+  temp_file=$(mktemp)
+  crontab -l > "$temp_file" 2>/dev/null
+
+  if [[ -s "$temp_file" ]]; then
+    sed -i "\|* * * * * /bin/bash $PWD/main.sh status|d" "$temp_file"
+    sed -i "\|0 0 \* \* \* /bin/bash $PWD/main.sh prune|d" "$temp_file"
+    /usr/bin/crontab "$temp_file"
+  fi
+}
+#}}}: clean_cron
+
+#}}}: Services
+
+#{{{ Other
 
 cleanup() { #{{{
-  echo "\nGracefull shutdown.."
+  printf "\nGraceful shutdown..\n"
   [[ -n ${spinner_pid} ]] && kill "${spinner_pid}" >&/dev/null
   exit 0
 }
@@ -249,28 +552,34 @@ force_exec() { #{{{
 
 spinner() { #{{{
     local spinner_pid=$1
+    local msg="$2"
+    local status="$3"
     local log_file="$LOG_FILE"
     local delay=0.15
     local spinstr='|/-\'
+    spinner_msg "$msg"
     if [[ "${LOG_DEBUG}" == "false" ]]; then
       while ps a | awk '{print $1}' | grep "${spinner_pid}" >&/dev/null; do
           local temp=${spinstr#?}
-          printf " [%c] " "$spinstr"
+          printf "${C_BOLD}[%c]${C_RESET}" "$spinstr"
           local spinstr=$temp${spinstr%"$temp"}
           sleep $delay
-          printf "\b\b\b\b\b\b"
+          printf "\b\b\b"
       done
-    else
-      tail -n0 -f "${log_file}" --pid "${spinner_pid}"
+    # else
+    #   tail -n0 -f "${log_file}" --pid "${spinner_pid}"
     fi
     wait "${spinner_pid}"
-    printf "    \b\b\b\b"
+    local exit_code=$?
+    printf "      \b\b\b\b\b\r"
+    debug "$msg:" "$exit_code"
+    spinner_msg "$msg" "$exit_code"
+    (( exit_code!=0 )) && log_err && exit $exit_code
+    return $exit_code
 }
 #}}}: spinner
 
 clean_local_setup() { #{{{
-  info_wait "Starting cleanup.."
-
   debug "Stopping services.."
   systemctl stop ecs 2>/dev/null
   debug "Stopping $CONTAINER_ORCHESTRATOR containers.."
@@ -290,8 +599,9 @@ clean_local_setup() { #{{{
     ./db-state \
     /var/log/registration \
     ./ssm-binaries >&/dev/null
+  clean_cron
 
-  info "Starting cleanup.." "Done"
+  return 0
 }
 #}}}: clean_local_setup
 
@@ -303,9 +613,9 @@ check_variable_value() { #{{{
 }
 #}}}
 
-#}}}: Other functions
+#}}}: Other
 
-#{{{ Local data functions
+#{{{ Local configuration
 
 #######################################
 # Configure local directories and files.
@@ -324,7 +634,7 @@ configure_local_data() { #{{{
   mkdir -p /var/log/ecs /etc/ecs /var/lib/ecs/data /etc/fluentbit/ /var/log/registration/
   rm -rf /etc/ecs/ecs.config /var/lib/ecs/ecs.config > /dev/null
 
-  info_wait "Configuring local data.."
+  spinner_wait "Configuring local data.."
 
   cat > /etc/ecs/ecs.config << EOF
 ECS_CLUSTER=${ECS_CLUSTER}
@@ -510,7 +820,7 @@ EOF
 
 fi
 
-  info "Configuring local data.." "Done"
+  spinner_msg "Configuring local data" 0
 }
 #}}}: configure_local_data
 
@@ -524,7 +834,7 @@ fi
 #   Writes STDOUT on success.
 #######################################
 configure_local_network() { #{{{
-  info_wait "Configuring local network.."
+  spinner_wait "Configuring local network.."
 
   # Create SG_DOCKER_NETWORK $CONTAINER_ORCHESTRATOR network
   $CONTAINER_ORCHESTRATOR network create --driver bridge "${SG_DOCKER_NETWORK}" >&/dev/null
@@ -560,251 +870,11 @@ configure_local_network() { #{{{
     -j REDIRECT \
     --to-ports 51679
 
-  info "Configuring local network.." "Done"
+  spinner_msg "Configuring local network" 0
 }
 #}}}: configure_local_network
 
 #}}}: Local data functions
-
-#{{{ Services
-
-#######################################
-# Check fluentbit errors for storage.
-# If errors, print and exit.
-# Globals:
-#   None
-# Arguments:
-#   None
-# Returns:
-#   None
-# Outputs:
-#   Write to STDOUT/STDERR
-#   if successfull/error.
-#######################################
-check_fluentbit_status() { #{{{
-  info_wait "Starting fluentbit status check.."
-
-  local container_id
-  local log_file
-
-  until [[ -n "$container_id" ]]; do
-    container_id="$($CONTAINER_ORCHESTRATOR ps -q --filter "name=fluentbit-agent")"
-  done
-  debug "Fluentbit container id:" "$container_id"
-
-  until [[ -n "$log_file" ]]; do
-    log_file="$(echo /var/lib/docker/containers/"$container_id"*/*.log)"
-    [[ ! -e $log_file ]] && unset log_file
-  done
-  debug "Fluentbit log file:" "$log_file"
-
-  info "Starting fluentbit status check.." "Done"
-
-  info "Waiting for fluentbit logs.."
-  until (( $(grep -ia -A2 "stream processor started" "$log_file" | wc -l)>=2 )); do
-    sleep 1
-  done & spinner "$!"
-  printf "    \b\b\b\b\r\r\r"
-
-  if [[ "$STORAGE_BACKEND_TYPE" == "aws_s3" ]]; then
-    debug "Checking" "AWS S3" "errors"
-    err_msg="$(grep -aio -E "error='.*'" "$log_file" \
-      | grep -io -m1 -E "message='.*'" \
-      | grep -io -E "'.*'" | tr -d "'\0")"
-  elif [[ "$STORAGE_BACKEND_TYPE" == "azure_blob_storage" ]]; then
-    debug "Checking" "Azure Blob" "errors"
-    err_msg="$(grep -aio -m1 -E "\[error.*" "$log_file" \
-      | cut -d" " -f3- | tr -d '\0')"
-  fi
-
-  if [[ -n "$err_msg" ]]; then
-    err "Fluentbit failed to start:" "$err_msg"
-    clean_local_setup &
-    spinner "$!"
-    info "Cleanup finished."
-    exit 1
-  fi
-
-  info "Fluentbit status:" "healthy"
-}
-#}}}: check_fluentbit_status
-
-#######################################
-# Check if specific service.$1 is runing.
-# If not try reload or restart.
-# Globals:
-#   None
-# Arguments:
-#   systemctl service
-# Returns:
-#   None
-# Outputs:
-#   Write to STDOUT/STDERR
-#   if successfull/error.
-#######################################
-check_systemctl_status() { #{{{
-  if ! systemctl is-active "$1" >&/dev/null; then
-    debug "Reloading/Restarting neccessary services.."
-    if ! systemctl reload-or-restart "$1" 2>/dev/null; then
-      return 2
-    fi
-    return 0
-  else
-    return 0
-  fi
-}
-#}}}: check_systemctl_status
-
-#######################################
-# Check if ecs.service exists
-# and if it is healthy and running.
-# Globals:
-#   None
-# Arguments:
-#   None
-# Returns:
-#   0 if ecs.service does not exists
-# Outputs:
-#   Write to STDOUT/STERR
-#   if successfull/error.
-#######################################
-check_systemctl_ecs_status() { #{{{
-  systemctl status ecs --no-pager >&/dev/null
-  if [[ "$?" =~ 4|0 ]]; then
-    return 0
-  else
-    check_systemctl_status "ecs"
-  fi
-}
-#}}}: check_systemctl_status
-
-#######################################
-# Check if container orchestartor exists
-# and if it is healthy and running.
-# Globals:
-#   None
-# Arguments:
-#   Container Orchestrator Command
-# Returns:
-#   None
-# Outputs:
-#   Write to STDOUT/STERR
-#   if successfull/error.
-#######################################
-check_container_orchestrator() { #{{{
-  if type "$1" >&/dev/null; then
-    check_systemctl_status "$1"
-    return $?
-  else
-    return 1
-  fi
-}
-#}}}: check_container_orchestrator
-
-#######################################
-# Enable/Disable cgroupsv2 (Preview)
-# Globals:
-#   None
-# Arguments:
-#   enable/disable
-# Returns:
-#   None
-# Outputs:
-#   Write to STDOUT/STERR
-#   if successfull/error.
-#######################################
-cgroupsv2() { #{{{
-  local cgroup_toggle
-  [[ "$1" == "enable" ]] &&
-    cgroup_toggle=1 || cgroup_toggle=0
-
-  if (( cgroup_toggle==0 )); then
-    info "Switched to" "cgroupsv1"
-  else
-    info "Switched to" "cgroupsv2"
-  fi
-
-  if type grubby >&/dev/null; then
-    grubby --update-kernel=ALL --args="systemd.unified_cgroup_hierarchy=$cgroup_toggle"
-  else
-    grub_cmdline="$(grep "GRUB_CMDLINE_LINUX=.*" /etc/default/grub | grep -o '".*"' | tr -d '"')"
-    debug "GRUB_CMDLINE_LINUX" "$grub_cmdline"
-    if [[ -n "$grub_cmdline" ]]; then
-      pattern="(systemd.unified_cgroup_hierarchy)=(.*)"
-      if [[ $grub_cmdline =~ $pattern ]]; then
-        pattern=${pattern//(/\\(}
-        grub_cmdline="$(echo "$grub_cmdline" \
-          | sed "s/${pattern//)/\\)}/\1=$cgroup_toggle/")"
-        debug "GRUB_CMDLINE_LINUX switched" "$grub_cmdline"
-      else
-        grub_cmdline="$grub_cmdline systemd.unified_cgroup_hierarchy=$cgroup_toggle"
-        debug "GRUB_CMDLINE_LINUX appended" "$grub_cmdline"
-      fi
-    else
-      grub_cmdline="systemd.unified_cgroup_hierarchy=$cgroup_toggle"
-      debug "GRUB_CMDLINE_LINUX new" "$grub_cmdline"
-    fi
-    sed -i "s/^GRUB_CMDLINE_LINUX=.*/GRUB_CMDLINE_LINUX=\"$grub_cmdline\"/" /etc/default/grub
-  fi
-
-  info_wait "Reboot required. Continue.."
-  read -r
-  info "Reboot required. Continue.." "Rebooting"
-  reboot
-  exit 0
-} #}}}
-
-api_call() { #{{{
-  if [[ -n "$1" ]]; then
-    response=$(curl -i -s \
-      -X POST \
-      -H "Authorization: apikey ${SG_NODE_TOKEN}" \
-      -H "Content-Type: application/json" \
-      -d "$1" \
-      "${url}")
-  else
-    response=$(curl -i -s \
-      -X POST \
-      -H "Authorization: apikey ${SG_NODE_TOKEN}" \
-      -H "Content-Type: application/json" \
-      "${url}")
-  fi
-
-  if [[ -z "$response" ]]; then
-    exit 1
-  else
-    full_response="$response"
-  fi
-
-  debug "Response:" \
-    && echo "${response}"
-
-  # get first status code from response
-  status_code="$(echo "$response" \
-    | awk '/^HTTP/ {print $2}')"
-
-  # actual response data
-  response="$(echo "$response" \
-    | awk '/^Response/ {print $2}')"
-  [[ -z "$response" ]] && \
-  response="$(echo "$full_response" | sed -n '/^{.*/,$p' | tr '\n' ' ')"
-
-  # msg from data
-  message="$(echo "$response" \
-    | jq -r '.msg // .message //  "Unknown error"')"
-
-  if [[ -z "$status_code" ]]; then
-    err "Unknown status code."
-    exit 1
-  elif [ "$status_code" != "200" ] && [ "$status_code" != "201" ] && [ "$status_code" != "100" ]; then
-    return 1
-  else
-    return 0
-  fi
-}
-#}}}: cgroupsv2
-
-#}}}: Services
 
 #######################################
 # Fetch necessary info from API.
@@ -822,24 +892,26 @@ fetch_organization_info() { #{{{
   local url
   local metadata
 
-  info_wait "Trying to fetch registration data.."
+  spinner_wait "Trying to fetch registration data.."
   url="${SG_BASE_API}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/register/"
 
   debug "Calling URL:" "${url}"
 
   if api_call; then
-    info "Trying to fetch registration data.." "Done"
-    info_wait "Preparing environment.."
+    spinner_msg "Trying to fetch registration data" 0
+    spinner_wait "Preparing environment.."
     metadata="$(echo "${response}" | jq -r '.data.RegistrationMetadata[0]')"
-    [[ "$metadata" == "null" || -z "$metadata" ]] && \
-      info "Preparing environment.." "Failed"
-      err "API data missing registration metadata." && exit 1
+    if [[ "$metadata" == "null" || -z "$metadata" ]]; then
+      spinner_msg "Preparing environment.." 1
+      err "API data missing registration metadata."
+      exit 1
+    fi
   else
-    info "Trying to fetch registration data.." "Failed"
+    spinner_msg "Trying to fetch registration data" 1
     err "Could not fetch data from API." "$status_code" "$message"
     exit 1
   fi
-  info "Preparing environment.." "Done"
+  spinner_msg "Preparing environment" 0
 
   ## API response values (Registration Metadata)
   ECS_CLUSTER="${ECS_CLUSTER:=$(echo "${metadata}" | jq -r '.ECSCluster')}"
@@ -922,12 +994,12 @@ configure_fluentbit() { #{{{
 
   image="$($CONTAINER_ORCHESTRATOR images -q -f reference="$FLUENTBIT_IMAGE")"
   if [[ -z "$image" ]]; then
-    info "Pulling fluentbit image:" "$FLUENTBIT_IMAGE"
+    info "Fluentbit image:" "$FLUENTBIT_IMAGE"
     $CONTAINER_ORCHESTRATOR pull "$FLUENTBIT_IMAGE" >> "$LOG_FILE" 2>&1 &
-    spinner "$!"
+    spinner "$!" "Pulling image"
   fi
 
-  info_wait "Starting fluentbit agent.."
+  spinner_wait "Starting fluentbit agent.."
   docker_run_command="$CONTAINER_ORCHESTRATOR run -d \
       --name fluentbit-agent \
       --restart=always \
@@ -960,7 +1032,7 @@ configure_fluentbit() { #{{{
         $CONTAINER_ORCHESTRATOR start fluentbit-agent >&/dev/null
     fi
   fi
-  info "Starting fluentbit agent.." "Done"
+  spinner_msg "Starting fluentbit agent" 0
   check_fluentbit_status
 }
 #}}}: configure_fluentbit
@@ -980,14 +1052,13 @@ configure_fluentbit() { #{{{
 #######################################
 register_instance() { #{{{
   local container_id
-  local container_status
+  local container_health
 
   container_id=$($CONTAINER_ORCHESTRATOR ps -q -f "name=ecs-agent")
-  container_status=$($CONTAINER_ORCHESTRATOR ps -q -f "name=ecs-agent" --format '{{.Status}}')
+  container_health=$($CONTAINER_ORCHESTRATOR inspect ecs-agent --type container --format '{{.State.Health.Status}}' 2>/dev/null)
 
-  if [[ -n "${container_id}" && ! "$container_status" =~ Exited ]]; then
-    debug "Instance ecs-agent status:" "${container_status}"
-    debug "Instance ecs-agent:" "${container_id}"
+  if [[ -n "${container_id}" && "$container_health" == "healthy" ]]; then
+    debug "Instance ecs-agent health:" "${container_health}"
     info "Instance agent already registered and running."
     configure_fluentbit
     configure_local_network
@@ -1002,7 +1073,7 @@ register_instance() { #{{{
   configure_local_network
 
   if [[ ! -e /tmp/ecs-anywhere-install.sh ]]; then
-    info_wait "Downloading support files.."
+    spinner_wait "Downloading support files.."
 
     if ! curl -fSsLk \
       --proto "https" \
@@ -1010,14 +1081,12 @@ register_instance() { #{{{
       "https://amazon-ecs-agent.s3.amazonaws.com/ecs-anywhere-install-latest.sh" \
       >> "$LOG_FILE" 2>&1; then
       debug "Response:" "$(cat $LOG_FILE)"
-      info "Downloading support files.." "Failed"
+      spinner_msg "Downloading support files" 1
       err "Unable to download" "ecs-anywhere-install.sh" "script"
       exit 1
     fi
   fi
-  info "Downloading support files.." "Done"
-
-  info "Trying to register instance.."
+  spinner_msg "Downloading support files" 0
 
   check_systemctl_ecs_status
 
@@ -1031,19 +1100,25 @@ register_instance() { #{{{
       --activation-code "${SSM_ACTIVATION_CODE}" \
       --docker-install-source none \
       >> "$LOG_FILE" 2>&1 &
-  local pid="$!"
-  until spinner "$pid"; do
-    container_status="$($CONTAINER_ORCHESTRATOR ps -a -f 'name=ecs-agent' --format '{{.Status}}')"
-    container_id="$($CONTAINER_ORCHESTRATOR ps -aq --filter 'name=ecs-agent')"
-    full_err_msg=$(grep -ioa -m1 -P '(?<=\[error\] logger=structured ).*?(?=status code)' /var/lib/docker/containers/"$container_id"*/*.log)
+
+  local ecs_anywhere_pid="$!"
+  until [[ "$($CONTAINER_ORCHESTRATOR inspect ecs-agent --type container --format '{{.State.Health.Status}}' 2>/dev/null)" == "healthy" ]]; do
+    log_path="$($CONTAINER_ORCHESTRATOR inspect ecs-agent --type container --format '{{.LogPath}}' 2>/dev/null)"
+    if [[ ! -e $log_path ]]; then
+      continue
+    fi
+    full_err_msg=$(grep -ioa -m1 -P '(?<=\[error\] logger=structured ).*?(?=status code)' "$log_path")
+    debug "Full Error:" "$full_err_msg"
     err=$(echo "$full_err_msg" | grep -io -P '(?<=msg=\\\").*?(?=\\\")')
     msg=$(echo "$full_err_msg" | grep -io -P '(?<=error=\\\").*?(?=\\)')
-    if [[ "$container_status" =~ Exited || -n "$err_msg" ]]; then
-      kill -9 "$pid"
-      err "$msg" "$err"
+    if [[ -n "$full_err_msg" ]]; then
+      # err "$err" "$msg"
+      kill "$ecs_anywhere_pid" >&/dev/null
+      sleep 2
+      echo "${err}:${msg}" >> "$LOG_FILE"
       exit 1
     fi
-  done
+  done & spinner "$!" "Trying to register instance"
 
   # if ! /bin/bash /tmp/ecs-anywhere-install.sh \
   #     --region "${AWS_DEFAULT_REGION}" \
@@ -1091,9 +1166,14 @@ deregister_instance() { #{{{
       | cut -d "=" -f2 \
       | jq -r '.sg_runner_id')"
   else
-    err "Local data could not be found:" "/etc/ecs/ecs.config"
-    force_exec && clean_local_setup
-    exit 1
+    if force_exec; then
+      clean_local_setup & spinner "$!" "Starting cleanup"
+      exit 0
+    else
+      err "Instance probably deregistered"
+      cmd_example "Try rerunning with" "-f/--force" "to force local cleanup"
+      exit 1
+    fi
   fi
 
   url="${SG_BASE_API}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/deregister/"
@@ -1104,20 +1184,22 @@ deregister_instance() { #{{{
 
   debug "Payload:" "${payload}"
 
-  info_wait "Trying to deregister instance.."
+  spinner_wait "Trying to deregister instance.."
   if api_call "$payload"; then
-    info "Trying to deregister instance.." "Done"
-    clean_local_setup
+    spinner_msg "Trying to deregister instance" 0
+    clean_local_setup & spinner "$!" "Starting cleanup"
   else
-    info "Trying to deregister instance.." "Failed"
+    spinner_msg "Trying to deregister instance" 1
     err "Could not fetch data from API." "$status_code" "$message"
-    force_exec && clean_local_setup
+    if force_exec; then
+      clean_local_setup & spinner "$!" "Starting cleanup"
+    fi
+    exit 1
   fi
 }
 #}}}: deregister_instance
 
 doctor() { #{{{
-  info "Checking services health status.."
   echo
 
   jq ".system.last_check = \"$(date)\"" "$SG_DIAGNOSTIC_FILE" >> "$SG_DIAGNOSTIC_TMP_FILE"
@@ -1183,7 +1265,7 @@ doctor() { #{{{
 prune() { #{{{
   local reclaimed
 
-  info_wait "Cleaning up system.."
+  spinner_wait "Cleaning up system.."
 
   reclaimed=$($CONTAINER_ORCHESTRATOR system prune -f \
     --filter "until=240h" \
@@ -1194,7 +1276,7 @@ prune() { #{{{
   jq ".system.docker.reclaimed = \"$reclaimed\"" "$SG_DIAGNOSTIC_FILE" >> "$SG_DIAGNOSTIC_TMP_FILE"
   mv "$SG_DIAGNOSTIC_TMP_FILE" "$SG_DIAGNOSTIC_FILE"
 
-  info "Cleaning up system.." "Done"
+  spinner_msg "Cleaning up system" 0
   info "Reclimed:" "$reclaimed"
 }
 #}}}: prune
@@ -1287,36 +1369,6 @@ parse_arguments() { #{{{
   done
 }
 #}}}: parse_arguments
-
-#######################################
-# Run fluentbit $CONTAINER_ORCHESTRATOR container for logging
-# Globals:
-#
-# Arguments:
-#   AWS_ACCESS_KEY_ID
-#   AWS_SECRET_ACCESS_KEY
-# Outputs:
-#   Write to STDOUT/STERR
-#   if successfull/error.
-#######################################
-# This portion checks whether the STORAGE_BACKEND_TYPE is
-# aws_s3 or azure_blob and runs the container accordingly.
-########################################
-setup_cron() { #{{{
-  local temp_file
-
-  temp_file=$(mktemp)
-  crontab -l > "$temp_file" || echo "" > "$temp_file"
-
-  if ! grep -qi -E "status|prune" "$temp_file"; then
-    {
-      echo "* * * * * /bin/bash $PWD/main.sh status";
-      echo "0 0 * * * /bin/bash $PWD/main.sh prune"
-    } >> "$temp_file"
-  fi
-  /usr/bin/crontab "$temp_file"
-}
-#}}}:setup_cron
 
 #}}}: Argument/init checks
 
