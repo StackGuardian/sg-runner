@@ -5,11 +5,12 @@
 * [1.0 Introduction](#10-introduction)
 * [2.0 How it works](#20-how-it-works)
 * [3.0 Setup](#30-setup)
-  * [3.1 Registration](#31-registration)
-    * [3.1.1 Get credentials from StackGuardian](#311-get-credentials-from-stackguardian)
-    * [3.1.2 Run the script for registration](#312-run-the-script-for-registration)
-  * [3.2 De-registration](#32-de-registration)
-  * [3.3 Restart](#33-restart)
+  * [3.1 Environment](#31-environment)
+  * [3.2 Registration](#32-registration)
+    * [3.2.1 Get credentials from StackGuardian](#331-get-credentials-from-stackguardian)
+    * [3.2.2 Run the script for registration](#332-run-the-script-for-registration)
+  * [3.3 De-registration](#34-de-registration)
+  * [3.4 Restart](#34-restart)
 * [Other options](#other-options)
 
 ## 1.0 Introduction
@@ -42,25 +43,31 @@ provided credentials from *StackGuardian* platform.
 > ./main.sh --help
 > ```
 
-Each option has three **required** arguments:
+### 3.1 Environment
+
+There are couple of environment variables that can be overriden for the purposes of testing:
 ```
---sg-node-token
---organization
---runner-group
+SG_BASE_API
+LOG_DEBUG
+CGROUPSV2_PREVIEW
 ```
 
-We will explain each option in detail below.
+* `SG_BASE_API`: Change base of API. Default: `https://api.app.stackguardian.io/api/v1`
+* `LOG_DEBUG`: If set to `true`, print additional `DEBUG` logs
+* `CGROUPSV2_PREVIEW`: If set to `true`, enables management of `cgroupsv2`
 
-### 3.1 Registration
+Environment variables can be exported using `export` or saved to `.env` which is loaded automatically.
+
+### 3.2 Registration
 
 > Registration is more complex part, but it is packed to be as simple as possible
 on the surface.
 
 Registration can be done in a few steps described below:
 
-#### 3.1.1  Get credentials from StackGuardian
+#### 3.2.1  Get credentials from StackGuardian
 
-#### 3.1.2  Run the script for registration
+#### 3.2.2  Run the script for registration
 
 After getting credentials, run script like below while providing
 `SG_NODE_TOKEN`, `ORGANIZATION` and `RUNNER_GROUP`:
@@ -71,7 +78,7 @@ main.sh register \
     --runner-group ${RUNNER_GROUP}
 ```
 
-### 3.2 De-registration
+### 3.3 De-registration
 
 De-registration is run almost the same way as registration:
 
@@ -86,7 +93,7 @@ main.sh deregister \
 > This is done by providing `-f` or `--force` while executing `deregister`.
 > *Force deregister* will remove all data related to runner script for fresh start.
 
-### 3.3 Restart
+### 3.4 Restart
 
 As of now, restart is not nativly supported.
 But, to achieve similar experinece it is enough to [`deregister`](#32-de-registration) and then [`register`](#31-registration) again.
@@ -103,11 +110,13 @@ These should help you keep your system clean and debug in case of errors.
 With any command you can provide `--debug` flag.
 With this, you will get more output while running commands.
 
+> INFO: All logs are being kept at `/tmp/sg_runner.log`.
+
 ### Health check
 
 Besides `register` and `deregister`, script offers easy health checking:
 ```
-./main.sh doctor
+./main.sh status
 ```
 This command will print status of `ecs` and `docker` services.
 Also, including all related Docker containers (`ecs-agent`, `fluentbit-agent`).
@@ -120,3 +129,25 @@ Another useful command is `prune` which can be used like:
 ```
 
 This command will execute `docker system prune` for everything that is older than **10 days**.
+
+## Managing `cgroupsv2`
+
+Private runner does not support `cgroupsv2`. Since `cgroupsv2` tend to have problems with `docker`.
+There is integrated option to toggle between `v2` and `v1` of `cgroups`.
+
+To disable `cgroupsv2` and revert to `cgroupsv1` there is 2 step process as of now:
+```
+export CGROUPSV2_PREVIEW=true
+```
+> Check [Environment](#31-environment) for details
+
+and then
+```
+./main.sh cgropusv2 disable
+```
+> Reboot is required after such action.
+
+To revert you can just run:
+```
+./main.sh cgroupsv2 enable
+```
