@@ -20,8 +20,9 @@ fi
 
 # static
 readonly COMMANDS=( "jq" "crontab" )
-readonly CONTAINER_ORCHESTRATORS=( "docker" "podman" )
-readonly FLUENTBIT_IMAGE="fluent/fluent-bit:2.0.9-debug"
+# readonly CONTAINER_ORCHESTRATORS=( "docker" "podman" )
+readonly CONTAINER_ORCHESTRATORS=( "docker" )
+readonly FLUENTBIT_IMAGE="fluent/fluent-bit:2.0.9"
 
 # source .env if exists
 # overrides [main] environment variables
@@ -608,7 +609,8 @@ clean_local_setup() { #{{{
     ./aws-credentials \
     ./db-state \
     /var/log/registration \
-    ./ssm-binaries >&/dev/null
+    ./ssm-binaries \
+    /var/lib/amazon/ssm >&/dev/null
   clean_cron
 
   return 0
