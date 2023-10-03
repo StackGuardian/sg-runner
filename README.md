@@ -33,6 +33,12 @@ Only, *task definition* will live on *AWS ECS*.
 
 ## 3.0 Setup
 
+> **IMPROTANT:**
+> To ensure a smooth lifecycle for your instance, it is important to avoid having any IAM Roles attached to it.
+> Having IAM Roles attached can potentially cause connection issues and disrupt the instance's functioning.
+> Therefore, it is recommended to remove or detach any IAM Roles from the instance to prevent any complications during its lifecycle.
+> This precaution will help maintain the stability and uninterrupted operation of the instance.
+
 Setup is very simple. We tried to make it as automated as possible.
 All you have to do is run `main.sh` with wanted  option that you want to execute:
 [Registration](#registration) or [De-registration](#de-registration), and
