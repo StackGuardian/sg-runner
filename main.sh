@@ -1369,8 +1369,9 @@ main() { #{{{
 
   is_root && init_args_are_valid "$@"
 
-  if ! pidof systemd >&/dev/null; then
+  if [[ ! -d /run/systemd/system ]]; then
     err "Private runner only available for" "systemd-based" "systems"
+    exit 1
   fi
 
   if [[ -e /sys/fs/cgroup/cgroup.controllers ]]; then
