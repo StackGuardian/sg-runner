@@ -14,10 +14,6 @@ SG_BASE_API=${SG_BASE_API:="https://api.app.stackguardian.io/api/v1"}
 
 readonly LOG_FILE="/tmp/sg_runner.log"
 
-if [[ ! -e "$LOG_FILE" ]]; then
-  touch "$LOG_FILE"
-fi
-
 # static
 readonly COMMANDS=( "jq" "crontab" )
 # readonly CONTAINER_ORCHESTRATORS=( "docker" "podman" )
@@ -1369,8 +1365,12 @@ main() { #{{{
 
   is_root && init_args_are_valid "$@"
 
+  if [[ ! -e "$LOG_FILE" ]]; then
+    touch "$LOG_FILE"
+  fi
+
   if [[ ! -d /run/systemd/system ]]; then
-    err "Private runner only available for" "systemd-based" "systems"
+    err "Private runner is only available for" "systemd-based" "systems"
     exit 1
   fi
 
