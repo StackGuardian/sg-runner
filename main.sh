@@ -138,9 +138,9 @@ spinner_msg() { #{{{
   if [[ -z "$status" ]]; then
     printf "%s %s.. ${C_BOLD}%s${C_RESET}" "$(log_date)" "${1}" "${msg}"
   elif (( status==0 )); then
-    printf "%s %s.. ${C_GREEN_BOLD}%s${C_RESET}\n" "$(log_date)" "${1}" "${msg:="Done"}"
+    printf "%s %s.. "Done""
   elif (( status>0 || status<0 )); then
-    printf "%s %s.. ${C_RED_BOLD}%s${C_RESET}\n" "$(log_date)" "${1}" "${msg:="Failed"}"
+    printf "%s %s.. "Failed""
   fi
 }
 #}}}: spinner_msg
@@ -408,7 +408,7 @@ cgroupsv2() { #{{{
   info "Reboot required!"
   while :; do
     read -r -p "$(log_date) Continue.. [Y/n]: " choice
-    if [[ "${choice:="Y"}" =~ y|Y ]]; then
+    if [[ ""Y"" =~ y|Y ]]; then
       break
     elif [[ "$choice" =~ n|N ]]; then
       exit 0
@@ -640,7 +640,7 @@ check_variable_value() { #{{{
 #######################################
 configure_local_data() { #{{{
   mkdir -p /var/log/ecs /etc/ecs /var/lib/ecs/data /etc/fluentbit/ /var/log/registration/
-  rm -rf /etc/ecs/ecs.config /var/lib/ecs/ecs.config > /dev/null
+  rm -rf /etc/ecs/ecs.config > /dev/null
 
   spinner_wait "Configuring local data.."
 
@@ -652,10 +652,6 @@ ECS_LOGLEVEL=/log/ecs-agent.log
 ECS_DATADIR=/data/
 ECS_ENABLE_TASK_IAM_ROLE=true
 ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true
-EOF
-
-  cat > /var/lib/ecs/ecs.config << EOF
-AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
 ECS_EXTERNAL=true
 EOF
 
@@ -922,10 +918,10 @@ fetch_organization_info() { #{{{
   spinner_msg "Preparing environment" 0
 
   ## API response values (Registration Metadata)
-  ECS_CLUSTER="${ECS_CLUSTER:=$(echo "${metadata}" | jq -r '.ECSCluster')}"
-  AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:=$(echo "${metadata}" | jq -r '.AWSDefaultRegion')}"
-  SSM_ACTIVATION_ID="${SSM_ACTIVATION_ID:=$(echo "${metadata}" | jq -r '.SSMActivationId')}"
-  SSM_ACTIVATION_CODE="${SSM_ACTIVATION_CODE:=$(echo "${metadata}" | jq -r '.SSMActivationCode')}"
+  ECS_CLUSTER="$(echo "${metadata}" | jq -r '.ECSCluster')"
+  AWS_DEFAULT_REGION="$(echo "${metadata}" | jq -r '.AWSDefaultRegion')"
+  SSM_ACTIVATION_ID="$(echo "${metadata}" | jq -r '.SSMActivationId')"
+  SSM_ACTIVATION_CODE="$(echo "${metadata}" | jq -r '.SSMActivationCode')"
 
   for var in ECS_CLUSTER AWS_DEFAULT_REGION SSM_ACTIVATION_ID SSM_ACTIVATION_CODE; do
     check_variable_value "$var"
@@ -937,18 +933,18 @@ fetch_organization_info() { #{{{
   debug_secret "SSM_ACTIVATION_CODE"
 
   ## Everything else
-  ORGANIZATION_NAME="${ORGANIZATION_NAME:=$(echo "${response}" | jq -r '.data.OrgName')}"
-  ORGANIZATION_ID="${ORGANIZATION_ID:=$(echo "${response}" | jq -r '.data.OrgId')}"
-  RUNNER_ID="${RUNNER_ID:=$(echo "${response}" | jq -r '.data.RunnerId')}"
-  RUNNER_GROUP_ID="${RUNNER_GROUP_ID:=$(echo "${response}" | jq -r '.data.RunnerGroupId')}"
-  TAGS="${TAGS:=$(echo "${response}" | jq -r '.data.Tags')}"
-  STORAGE_ACCOUNT_NAME="${STORAGE_ACCOUNT_NAME:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.azureBlobStorageAccountName')}"
-  SHARED_KEY="${SHARED_KEY=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.azureBlobStorageAccessKey')}"
-  STORAGE_BACKEND_TYPE="${STORAGE_BACKEND_TYPE:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.type')}"
-  S3_BUCKET_NAME="${S3_BUCKET_NAME:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.s3BucketName')}"
-  S3_AWS_REGION="${S3_AWS_REGION:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.awsRegion')}"
-  S3_AWS_ACCESS_KEY_ID="${S3_AWS_ACCESS_KEY_ID:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].awsAccessKeyId')}"
-  S3_AWS_SECRET_ACCESS_KEY="${S3_AWS_SECRET_ACCESS_KEY:=$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].awsSecretAccessKey')}"
+  ORGANIZATION_NAME="$(echo "${response}" | jq -r '.data.OrgName')"
+  ORGANIZATION_ID="$(echo "${response}" | jq -r '.data.OrgId')"
+  RUNNER_ID="$(echo "${response}" | jq -r '.data.RunnerId')"
+  RUNNER_GROUP_ID="$(echo "${response}" | jq -r '.data.RunnerGroupId')"
+  # TAGS="$(echo "${response}" | jq -r '.data.Tags')"
+  STORAGE_ACCOUNT_NAME="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.azureBlobStorageAccountName')"
+  SHARED_KEY="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.azureBlobStorageAccessKey')"
+  STORAGE_BACKEND_TYPE="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.type')"
+  S3_BUCKET_NAME="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.s3BucketName')"
+  S3_AWS_REGION="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.awsRegion')"
+  S3_AWS_ACCESS_KEY_ID="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].awsAccessKeyId')"
+  S3_AWS_SECRET_ACCESS_KEY="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].awsSecretAccessKey')"
 
   if [[ "$STORAGE_BACKEND_TYPE" == "aws_s3" ]]; then
     for var in S3_BUCKET_NAME S3_AWS_REGION S3_AWS_ACCESS_KEY_ID S3_AWS_SECRET_ACCESS_KEY; do
