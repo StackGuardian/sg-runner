@@ -937,6 +937,7 @@ fetch_organization_info() { #{{{
   ORGANIZATION_ID="$(echo "${response}" | jq -r '.data.OrgId')"
   RUNNER_ID="$(echo "${response}" | jq -r '.data.RunnerId')"
   RUNNER_GROUP_ID="$(echo "${response}" | jq -r '.data.RunnerGroupId')"
+  RUNNER_GROUP_ID="${RUNNER_GROUP_ID##*/}"
   # TAGS="$(echo "${response}" | jq -r '.data.Tags')"
   STORAGE_ACCOUNT_NAME="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.azureBlobStorageAccountName')"
   SHARED_KEY="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.azureBlobStorageAccessKey')"
@@ -1112,10 +1113,10 @@ register_instance() { #{{{
       continue
     fi
     full_err_msg=$(grep -ioa -m1 -P '(?<=\[error\] logger=structured ).*?(?=status code)' "$log_path")
-    debug "Full Error:" "$full_err_msg"
-    err=$(echo "$full_err_msg" | grep -io -P '(?<=msg=\\\").*?(?=\\\")')
-    msg=$(echo "$full_err_msg" | grep -io -P '(?<=error=\\\").*?(?=\\)')
     if [[ -n "$full_err_msg" ]]; then
+      debug "Full Error:" "$full_err_msg"
+      err=$(echo "$full_err_msg" | grep -io -P '(?<=msg=\\\").*?(?=\\\")')
+      msg=$(echo "$full_err_msg" | grep -io -P '(?<=error=\\\").*?(?=\\)')
       # err "$err" "$msg"
       kill "$ecs_anywhere_pid" >&/dev/null
       sleep 2
