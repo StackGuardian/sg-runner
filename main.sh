@@ -138,9 +138,9 @@ spinner_msg() { #{{{
   if [[ -z "$status" ]]; then
     printf "%s %s.. ${C_BOLD}%s${C_RESET}" "$(log_date)" "${1}" "${msg}"
   elif (( status==0 )); then
-    printf "%s %s.. "Done""
+    printf "%s %s.. ${C_GREEN_BOLD}%s${C_RESET}\n" "$(log_date)" "${1}" "${msg:="Done"}"
   elif (( status>0 || status<0 )); then
-    printf "%s %s.. "Failed""
+    printf "%s %s.. ${C_RED_BOLD}%s${C_RESET}\n" "$(log_date)" "${1}" "${msg:="Failed"}"
   fi
 }
 #}}}: spinner_msg
@@ -408,7 +408,7 @@ cgroupsv2() { #{{{
   info "Reboot required!"
   while :; do
     read -r -p "$(log_date) Continue.. [Y/n]: " choice
-    if [[ ""Y"" =~ y|Y ]]; then
+    if [[ "${choice:="Y"}" =~ y|Y ]]; then
       break
     elif [[ "$choice" =~ n|N ]]; then
       exit 0
