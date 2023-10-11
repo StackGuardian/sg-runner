@@ -137,6 +137,7 @@ spinner_msg() { #{{{
   local msg="$3"
   if [[ -z "$status" ]]; then
     printf "%s %s.. ${C_BOLD}%s${C_RESET}" "$(log_date)" "${1}" "${msg}"
+    if [[ "$LOG_DEBUG" =~ true|True ]]; then printf "\n"; fi
   elif (( status==0 )); then
     printf "%s %s.. ${C_GREEN_BOLD}%s${C_RESET}\n" "$(log_date)" "${1}" "${msg:="Done"}"
   elif (( status>0 || status<0 )); then
@@ -147,7 +148,7 @@ spinner_msg() { #{{{
 
 debug() { #{{{
   [[ "$LOG_DEBUG" =~ true|True ]] && \
-    printf "%s ${C_MAGENTA_BOLD}DEBUG: ${C_RESET} %s${C_BOLD} %s${C_RESET} %s\n" "$(log_date)" "${1}" "${2}" "${@:3}"
+    printf "%s ${C_MAGENTA_BOLD}DEBUG:${C_RESET} %s${C_BOLD} %s${C_RESET} %s\n" "$(log_date)" "${1}" "${2}" "${@:3}"
 }
 #}}}: debug
 
@@ -468,7 +469,9 @@ api_call() { #{{{
   fi
 
   debug "Response:" \
-    && echo "${response}"
+    && echo "-----" \
+    && echo "${response}" \
+    && echo "-----"
 
   # get first status code from response
   status_code="$(echo "$response" \
@@ -512,7 +515,7 @@ api_call() { #{{{
 setup_cron() { #{{{
   local temp_file
 
-  temp_file=$(mktemp)
+  temp_file=$(mktemp -t crontab_XXX.bup)
   crontab -l > "$temp_file" 2>/dev/null || echo "" > "$temp_file"
 
   if grep -qi -E "status|prune" "$temp_file"; then
@@ -529,7 +532,7 @@ setup_cron() { #{{{
 clean_cron() { #{{{
   local temp_file
 
-  temp_file=$(mktemp)
+  temp_file=$(mktemp -t crontab_XXX.bup)
   crontab -l > "$temp_file" 2>/dev/null
 
   if [[ -s "$temp_file" ]]; then
@@ -565,7 +568,7 @@ spinner() { #{{{
     local delay=0.15
     local spinstr='|/-\'
     spinner_msg "$msg"
-    if [[ "${LOG_DEBUG}" == "false" ]]; then
+    if [[ "${LOG_DEBUG}" =~ false|False ]]; then
       while ps a | awk '{print $1}' | grep "${spinner_pid}" >&/dev/null; do
           local temp=${spinstr#?}
           printf "${C_BOLD}[%c]${C_RESET}" "$spinstr"
@@ -573,14 +576,16 @@ spinner() { #{{{
           sleep $delay
           printf "\b\b\b"
       done
-    # else
-    #   tail -n0 -f "${log_file}" --pid "${spinner_pid}"
+    else
+      tail -n0 -f "${log_file}" --pid "${spinner_pid}"
     fi
     wait "${spinner_pid}"
     local exit_code=$?
     printf "      \b\b\b\b\b\r"
-    debug "$msg:" "$exit_code"
-    spinner_msg "$msg" "$exit_code"
+    debug "$msg (exit code):" "$exit_code"
+    if [[ ! "${LOG_DEBUG}" =~ true|True ]]; then
+      spinner_msg "$msg" "$exit_code"
+    fi
     (( exit_code!=0 )) && log_err && exit $exit_code
     return $exit_code
 }
@@ -1169,6 +1174,7 @@ deregister_instance() { #{{{
   debug "Payload:" "${payload}"
 
   spinner_wait "Trying to deregister instance.."
+  if [[ "$LOG_DEBUG" =~ true|True ]]; then printf "\n"; fi
   if api_call "$payload"; then
     spinner_msg "Trying to deregister instance" 0
     clean_local_setup & spinner "$!" "Starting cleanup"
