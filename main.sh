@@ -629,7 +629,7 @@ check_variable_value() { #{{{
 # Configure local directories and files.
 # Globals:
 #   ECS_CLUSTER
-#   AWS_DEFAULT_REGION
+#   LOCAL_AWS_DEFAULT_REGION
 #   ORGANIZATION_ID
 #   RUNNER_ID
 #   RUNNER_GROUP_ID
@@ -646,7 +646,7 @@ configure_local_data() { #{{{
 
   cat > /etc/ecs/ecs.config << EOF
 ECS_CLUSTER=${ECS_CLUSTER}
-AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+AWS_DEFAULT_REGION=${LOCAL_AWS_DEFAULT_REGION}
 ECS_INSTANCE_ATTRIBUTES={"sg_organization": "${ORGANIZATION_NAME}","sg_runner_id": "${RUNNER_ID}", "sg_runner_group_id": "${RUNNER_GROUP_ID}"}
 ECS_LOGLEVEL=/log/ecs-agent.log
 ECS_DATADIR=/data/
@@ -919,16 +919,16 @@ fetch_organization_info() { #{{{
 
   ## API response values (Registration Metadata)
   ECS_CLUSTER="$(echo "${metadata}" | jq -r '.ECSCluster')"
-  AWS_DEFAULT_REGION="$(echo "${metadata}" | jq -r '.AWSDefaultRegion')"
+  LOCAL_AWS_DEFAULT_REGION="$(echo "${metadata}" | jq -r '.AWSDefaultRegion')"
   SSM_ACTIVATION_ID="$(echo "${metadata}" | jq -r '.SSMActivationId')"
   SSM_ACTIVATION_CODE="$(echo "${metadata}" | jq -r '.SSMActivationCode')"
 
-  for var in ECS_CLUSTER AWS_DEFAULT_REGION SSM_ACTIVATION_ID SSM_ACTIVATION_CODE; do
+  for var in ECS_CLUSTER LOCAL_AWS_DEFAULT_REGION SSM_ACTIVATION_ID SSM_ACTIVATION_CODE; do
     check_variable_value "$var"
   done
 
   debug_variable "ECS_CLUSTER"
-  debug_variable "AWS_DEFAULT_REGION"
+  debug_variable "LOCAL_AWS_DEFAULT_REGION"
   debug_secret "SSM_ACTIVATION_ID"
   debug_secret "SSM_ACTIVATION_CODE"
 
@@ -1044,7 +1044,7 @@ configure_fluentbit() { #{{{
 #######################################
 # Register instance to AWS ECS.
 # Globals:
-#   AWS_DEFAULT_REGION
+#   LOCAL_AWS_DEFAULT_REGION
 #   ECS_CLUSTER
 #   SSM_ACTIVATION_ID
 #   SSM_ACTIVATION_CODE
@@ -1098,7 +1098,7 @@ register_instance() { #{{{
     && touch "$LOG_FILE"
 
   /bin/bash /tmp/ecs-anywhere-install.sh \
-      --region "${AWS_DEFAULT_REGION}" \
+      --region "${LOCAL_AWS_DEFAULT_REGION}" \
       --cluster "${ECS_CLUSTER}" \
       --activation-id "${SSM_ACTIVATION_ID}" \
       --activation-code "${SSM_ACTIVATION_CODE}" \
