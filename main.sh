@@ -610,8 +610,7 @@ clean_local_setup() { #{{{
     ./aws-credentials \
     ./db-state \
     /var/log/registration \
-    ./ssm-binaries \
-    /var/lib/amazon/ssm >&/dev/null
+    ./ssm-binaries >&/dev/null
   clean_cron
 
   return 0
@@ -649,11 +648,31 @@ configure_local_data() { #{{{
 
   spinner_wait "Configuring local data.."
 
+# ECS_LOG_DRIVER
+# ECS_LOG_OPTS
+
+# ECS_DISABLE_IMAGE_CLEANUP	true	Whether to disable automated image cleanup for the ECS Agent.	false	false
+# ECS_IMAGE_CLEANUP_INTERVAL	30m	The time interval between automated image cleanup cycles. If set to less than 10 minutes, the value is ignored.	30m	30m
+# ECS_IMAGE_MINIMUM_CLEANUP_AGE	30m	The minimum time interval between when an image is pulled and when it can be considered for automated image cleanup.	1h	1h
+# NON_ECS_IMAGE_MINIMUM_CLEANUP_AGE
+# ECS_NUM_IMAGES_DELETE_PER_CYCLE
+# ECS_IMAGE_PULL_BEHAVIOR
+# AWS_ACCESS_KEY_ID
+# AWS_SECRET_ACCESS_KEY
+# AWS_SESSION_TOKEN
+# ECS_ALTERNATE_CREDENTIAL_PROFILE
+
+# ECS_ENGINE_AUTH_TYPE	"docker" | "dockercfg"	The type of auth data that is stored in the ECS_ENGINE_AUTH_DATA key.		
+# ECS_ENGINE_AUTH_DATA
+
   cat > /etc/ecs/ecs.config << EOF
 ECS_CLUSTER=${ECS_CLUSTER}
 AWS_DEFAULT_REGION=${LOCAL_AWS_DEFAULT_REGION}
 ECS_INSTANCE_ATTRIBUTES={"sg_organization": "${ORGANIZATION_NAME}","sg_runner_id": "${RUNNER_ID}", "sg_runner_group_id": "${RUNNER_GROUP_ID}"}
-ECS_LOGLEVEL=/log/ecs-agent.log
+ECS_LOGLEVEL=info
+ECS_DISABLE_PRIVILEGED=false
+ECS_ENABLE_UNTRACKED_IMAGE_CLEANUP=true
+ECS_LOGFILE=/log/ecs-agent.log
 ECS_DATADIR=/data/
 ECS_ENABLE_TASK_IAM_ROLE=true
 ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true
@@ -684,12 +703,12 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
     path /var/log/registration/*.txt
     DB /var/log/flb_docker.db
     Mem_Buf_Limit 50MB
-[INPUT]
-    Name tail
-    Tag ecsagent
-    path /var/lib/docker/containers/*/*-json.log
-    DB /var/log/flb_docker.db
-    Mem_Buf_Limit 50MB
+# [INPUT]
+#     Name tail
+#     Tag ecsagent
+#     path /var/lib/docker/containers/*/*-json.log
+#     DB /var/log/flb_docker.db
+#     Mem_Buf_Limit 50MB
 [OUTPUT]
     Name  azure_blob
     Match  fluentbit
@@ -701,16 +720,16 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
     auto_create_container on
     tls on
 
-[OUTPUT]
-    Name  azure_blob
-    Match  ecsagent
-    account_name ${STORAGE_ACCOUNT_NAME}
-    shared_key ${SHARED_KEY}
-    blob_type blockblob
-    path ecsagent/log
-    container_name system
-    auto_create_container on
-    tls on
+# [OUTPUT]
+#     Name  azure_blob
+#     Match  ecsagent
+#     account_name ${STORAGE_ACCOUNT_NAME}
+#     shared_key ${SHARED_KEY}
+#     blob_type blockblob
+#     path ecsagent/log
+#     container_name system
+#     auto_create_container on
+#     tls on
 [OUTPUT]
     Name  azure_blob
     Match  registrationinfo
@@ -1082,6 +1101,16 @@ register_instance() { #{{{
   configure_fluentbit
   configure_local_network
 
+  curl -vLk http://169.254.169.254/latest/meta-data/iam/security-credentials/
+  if curl -fSsLk \
+      --proto "https" \
+      "http://169.254.169.254/latest/meta-data/iam/security-credentials/" \
+      >> "$LOG_FILE" 2>&1; then
+      debug "Response:" "$(cat $LOG_FILE)"
+      err "Private Runners cannot have an IAM role assigned to the instance."
+      exit 1
+    fi
+
   if [[ ! -e /tmp/ecs-anywhere-install.sh ]]; then
     spinner_wait "Downloading support files.."
 
@@ -1102,6 +1131,10 @@ register_instance() { #{{{
 
   [[ ! -e "$LOG_FILE" ]] \
     && touch "$LOG_FILE"
+
+  systemctl stop "$SSM_SERVICE_NAME" >> "$LOG_FILE" 2>&1 &
+  systemctl start "$SSM_SERVICE_NAME" >> "$LOG_FILE" 2>&1 &
+  systemctl status "$SSM_SERVICE_NAME" >> "$LOG_FILE" 2>&1 &
 
   /bin/bash /tmp/ecs-anywhere-install.sh \
       --region "${LOCAL_AWS_DEFAULT_REGION}" \
@@ -1154,6 +1187,9 @@ deregister_instance() { #{{{
     RUNNER_ID="$(grep ECS_INSTANCE_ATTRIBUTES /etc/ecs/ecs.config \
       | cut -d "=" -f2 \
       | jq -r '.sg_runner_id')"
+    RUNNER_GROUP_ID_ECS_CONFIG="$(grep ECS_INSTANCE_ATTRIBUTES /etc/ecs/ecs.config \
+      | cut -d "=" -f2 \
+      | jq -r '.sg_runner_group_id')"
   else
     if force_exec; then
       clean_local_setup & spinner "$!" "Starting cleanup"
@@ -1163,6 +1199,11 @@ deregister_instance() { #{{{
       cmd_example "Try rerunning with" "-f/--force" "to force local cleanup"
       exit 1
     fi
+  fi
+
+  if [[ "$RUNNER_GROUP_ID_ECS_CONFIG" =~ "$RUNNER_GROUP_ID"]]; then 
+    err "Different configured and provided --runner-group. Configured: /"$RUNNER_GROUP_ID_ECS_CONFIG/", Provided: /"$RUNNER_GROUP_ID/""
+    exit 1
   fi
 
   url="${SG_BASE_API}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/deregister/"
@@ -1257,14 +1298,19 @@ prune() { #{{{
 
   spinner_wait "Cleaning up system.."
 
-  reclaimed=$($CONTAINER_ORCHESTRATOR system prune -f \
-    --filter "until=240h" \
+  reclaimed=$($CONTAINER_ORCHESTRATOR system prune -f --volumes \
+    --filter "until=24h" \
     | cut -d: -f2 | tr -d ' ')
 
   jq ".system.docker.last_prune = \"$(date)\"" "$SG_DIAGNOSTIC_FILE" >> "$SG_DIAGNOSTIC_TMP_FILE"
   mv "$SG_DIAGNOSTIC_TMP_FILE" "$SG_DIAGNOSTIC_FILE"
   jq ".system.docker.reclaimed = \"$reclaimed\"" "$SG_DIAGNOSTIC_FILE" >> "$SG_DIAGNOSTIC_TMP_FILE"
   mv "$SG_DIAGNOSTIC_TMP_FILE" "$SG_DIAGNOSTIC_FILE"
+
+  # # Remove all unused images not just dangling, older than 10 days, check if the image created date is used.
+  # reclaimed=$($CONTAINER_ORCHESTRATOR system prune -a \
+  # --filter "until=240h" \
+  # | cut -d: -f2 | tr -d ' ')
 
   spinner_msg "Cleaning up system" 0
   info "Reclimed:" "$reclaimed"
