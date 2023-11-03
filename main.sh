@@ -1132,6 +1132,14 @@ register_instance() { #{{{
   [[ ! -e "$LOG_FILE" ]] \
     && touch "$LOG_FILE"
 
+  SSM_SERVICE_NAME="amazon-ssm-agent"
+  SSM_BIN_NAME="amazon-ssm-agent"
+  if systemctl is-enabled snap.amazon-ssm-agent.amazon-ssm-agent.service &>/dev/null; then
+      echo "Detected SSM agent installed via snap."
+      SSM_SERVICE_NAME="snap.amazon-ssm-agent.amazon-ssm-agent.service"
+      SSM_BIN_NAME="/snap/amazon-ssm-agent/current/amazon-ssm-agent"
+  fi
+
   systemctl stop "$SSM_SERVICE_NAME" >> "$LOG_FILE" 2>&1 &
   systemctl start "$SSM_SERVICE_NAME" >> "$LOG_FILE" 2>&1 &
   systemctl status "$SSM_SERVICE_NAME" >> "$LOG_FILE" 2>&1 &
