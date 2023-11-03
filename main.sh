@@ -1209,7 +1209,7 @@ deregister_instance() { #{{{
     fi
   fi
 
-  if [[ "$RUNNER_GROUP_ID_ECS_CONFIG" =~ "$RUNNER_GROUP_ID"]]; then 
+  if [[ "$RUNNER_GROUP_ID_ECS_CONFIG" =~ "$RUNNER_GROUP_ID" ]]; then 
     err "Different configured and provided --runner-group. Configured: /"$RUNNER_GROUP_ID_ECS_CONFIG/", Provided: /"$RUNNER_GROUP_ID/""
     exit 1
   fi
