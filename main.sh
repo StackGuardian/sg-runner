@@ -486,6 +486,10 @@ api_call() { #{{{
   # msg from data
   message="$(echo "$response" \
     | jq -r '.msg // .message //  "Unknown error"')"
+  
+  # data from data
+  data="$(echo "$response" \
+    | jq -r '.data //  "Unknown error"')"
 
   if [[ -z "$status_code" ]]; then
     err "Unknown status code."
@@ -1029,6 +1033,7 @@ configure_fluentbit() { #{{{
   fi
 
   spinner_wait "Starting fluentbit agent.."
+  # TODO: mem and cpu reservation, follow ecs-agent setup
   docker_run_command="$CONTAINER_ORCHESTRATOR run -d \
       --name fluentbit-agent \
       --restart=always \
@@ -1080,6 +1085,10 @@ configure_fluentbit() { #{{{
 #   if successfull/error.
 #######################################
 register_instance() { #{{{
+
+  # [[ ! -e "$LOG_FILE" ]] \
+  #   && touch "$LOG_FILE"
+
   local container_id
   local container_health
 
@@ -1101,16 +1110,6 @@ register_instance() { #{{{
   configure_fluentbit
   configure_local_network
 
-  curl -vLk http://169.254.169.254/latest/meta-data/iam/security-credentials/
-  if curl -fSsLk \
-      --proto "https" \
-      "http://169.254.169.254/latest/meta-data/iam/security-credentials/" \
-      >> "$LOG_FILE" 2>&1; then
-      debug "Response:" "$(cat $LOG_FILE)"
-      err "Private Runners cannot have an IAM role assigned to the instance."
-      exit 1
-    fi
-
   if [[ ! -e /tmp/ecs-anywhere-install.sh ]]; then
     spinner_wait "Downloading support files.."
 
@@ -1129,9 +1128,6 @@ register_instance() { #{{{
 
   check_systemctl_ecs_status
 
-  [[ ! -e "$LOG_FILE" ]] \
-    && touch "$LOG_FILE"
-
   SSM_SERVICE_NAME="amazon-ssm-agent"
   SSM_BIN_NAME="amazon-ssm-agent"
   if systemctl is-enabled snap.amazon-ssm-agent.amazon-ssm-agent.service &>/dev/null; then
@@ -1141,8 +1137,6 @@ register_instance() { #{{{
   fi
 
   systemctl stop "$SSM_SERVICE_NAME" >> "$LOG_FILE" 2>&1 &
-  systemctl start "$SSM_SERVICE_NAME" >> "$LOG_FILE" 2>&1 &
-  systemctl status "$SSM_SERVICE_NAME" >> "$LOG_FILE" 2>&1 &
 
   /bin/bash /tmp/ecs-anywhere-install.sh \
       --region "${LOCAL_AWS_DEFAULT_REGION}" \
@@ -1192,26 +1186,22 @@ deregister_instance() { #{{{
   local url
 
   if [[ -e /etc/ecs/ecs.config ]]; then
-    RUNNER_ID="$(grep ECS_INSTANCE_ATTRIBUTES /etc/ecs/ecs.config \
-      | cut -d "=" -f2 \
-      | jq -r '.sg_runner_id')"
     RUNNER_GROUP_ID_ECS_CONFIG="$(grep ECS_INSTANCE_ATTRIBUTES /etc/ecs/ecs.config \
       | cut -d "=" -f2 \
       | jq -r '.sg_runner_group_id')"
+    if [[ "$RUNNER_GROUP_ID_ECS_CONFIG" != "$RUNNER_GROUP_ID" ]]; then 
+      err "Different configured and provided --runner-group. Configured: /"$RUNNER_GROUP_ID_ECS_CONFIG/", Provided: /"$RUNNER_GROUP_ID/""
+      exit 1
+    fi
+    RUNNER_ID="$(grep ECS_INSTANCE_ATTRIBUTES /etc/ecs/ecs.config \
+      | cut -d "=" -f2 \
+      | jq -r '.sg_runner_id')"
   else
-    if force_exec; then
-      clean_local_setup & spinner "$!" "Starting cleanup"
-      exit 0
-    else
+    if ! force_exec; then
       err "Instance probably deregistered"
       cmd_example "Try rerunning with" "-f/--force" "to force local cleanup"
       exit 1
     fi
-  fi
-
-  if [[ "$RUNNER_GROUP_ID_ECS_CONFIG" =~ "$RUNNER_GROUP_ID" ]]; then 
-    err "Different configured and provided --runner-group. Configured: /"$RUNNER_GROUP_ID_ECS_CONFIG/", Provided: /"$RUNNER_GROUP_ID/""
-    exit 1
   fi
 
   url="${SG_BASE_API}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/deregister/"
@@ -1226,6 +1216,14 @@ deregister_instance() { #{{{
   if [[ "$LOG_DEBUG" =~ true|True ]]; then printf "\n"; fi
   if api_call "$payload"; then
     spinner_msg "Trying to deregister instance" 0
+    # if deregister_ssm_instance_response is [], remove /var/lib/amazon/ssm dir as the MI does not exist anymore, the below logic fails if the ssm deregister api does not return a response but the instance is still alive
+    # echo $data
+    # deregister_ssm_instance_response="$(echo "$data" \
+    #   | jq -r '.deregister_ssm_instance_response')"
+    # echo "dd: " ${#deregister_ssm_instance_response[@]}
+    # if [[ ${#deregister_ssm_instance_response[@]} -eq 0 ]]; then
+    #   rm -rf /var/lib/amazon/ssm
+    # fi
     clean_local_setup & spinner "$!" "Starting cleanup"
   else
     spinner_msg "Trying to deregister instance" 1
@@ -1328,7 +1326,7 @@ prune() { #{{{
 #{{{ Argument/init checks
 
 check_arg_value() { #{{{
-  ## TODO(adis.halilovic@stackguardian.io): make sure to validate double parameter input
+  ## TODO: make sure to validate double parameter input
   if [[ "${2:0:2}" == "--" ]]; then
     err "Argument" "${1}" "has invalid value: $2"
     exit 1
@@ -1473,6 +1471,15 @@ main() { #{{{
 
   if [[ -z $CONTAINER_ORCHESTRATOR ]]; then
     err "One of following container orchestrators required:" "${CONTAINER_ORCHESTRATORS[*]}"
+    exit 1
+  fi
+
+  if curl -fSsLk \
+    --proto "https" \
+    "http://169.254.169.254/latest/meta-data/iam/security-credentials/" \
+    >> "$LOG_FILE" 2>&1; then
+    debug "Response:" "$(cat $LOG_FILE)"
+    err "Private Runners cannot have an IAM role assigned to the instance."
     exit 1
   fi
 
