@@ -1192,7 +1192,7 @@ deregister_instance() { #{{{
       | cut -d "=" -f2 \
       | jq -r '.sg_runner_group_id')"
     if [[ "$RUNNER_GROUP_ID_ECS_CONFIG" != "$RUNNER_GROUP_ID" ]]; then 
-      err 'Different configured and provided --runner-group. Configured: "$RUNNER_GROUP_ID_ECS_CONFIG", Provided: "$RUNNER_GROUP_ID"'
+      err "Different configured and provided --runner-group. Configured: $RUNNER_GROUP_ID_ECS_CONFIG, Provided: $RUNNER_GROUP_ID"
       exit 1
     fi
     RUNNER_ID="$(grep ECS_INSTANCE_ATTRIBUTES /etc/ecs/ecs.config \
