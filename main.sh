@@ -1137,8 +1137,8 @@ register_instance() { #{{{
   fi
 
   # Restart SSM agent to ensure the creds are refreshed before the installation starts
-  systemctl restart "$SSM_SERVICE_NAME" >> "$LOG_FILE" 2>&1 &
-  systemctl status "$SSM_SERVICE_NAME" >> "$LOG_FILE" 2>&1 &
+  systemctl restart "$SSM_SERVICE_NAME" >> "$LOG_FILE" 2>&1
+  systemctl status "$SSM_SERVICE_NAME" >> "$LOG_FILE" 2>&1
 
   /bin/bash /tmp/ecs-anywhere-install.sh \
       --region "${LOCAL_AWS_DEFAULT_REGION}" \
