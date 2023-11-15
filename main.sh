@@ -1311,7 +1311,7 @@ prune() { #{{{
 
   spinner_wait "Cleaning up system.."
 
-  reclaimed=$($CONTAINER_ORCHESTRATOR system prune -f --volumes \
+  reclaimed=$($CONTAINER_ORCHESTRATOR system prune -f \
     --filter "until=24h" \
     | cut -d: -f2 | tr -d ' ')
 
@@ -1320,7 +1320,7 @@ prune() { #{{{
   jq ".system.docker.reclaimed = \"$reclaimed\"" "$SG_DIAGNOSTIC_FILE" >> "$SG_DIAGNOSTIC_TMP_FILE"
   mv "$SG_DIAGNOSTIC_TMP_FILE" "$SG_DIAGNOSTIC_FILE"
 
-  # # Remove all unused images not just dangling, older than 10 days, check if the image created date is used.
+  # # Already taken care by ECS agent: Remove all unused images not just dangling, older than 10 days, check if the image created date is used.
   # reclaimed=$($CONTAINER_ORCHESTRATOR system prune -a \
   # --filter "until=240h" \
   # | cut -d: -f2 | tr -d ' ')
