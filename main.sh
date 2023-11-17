@@ -688,7 +688,8 @@ ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true
 ECS_EXTERNAL=true
 EOF
 
-#Fluentbit configuration for aws_s3 output
+# Fluentbit configuration for aws_s3 output
+# TODO: Reduce frequency of outputting logs to S3 and blob storage
 if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
   cat > ./fluent-bit.conf << EOF
 [SERVICE]
@@ -799,7 +800,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     Name s3
     Match fluentbit
     region              ${S3_AWS_REGION}
-    upload_timeout      5s
+    upload_timeout      5m
     store_dir_limit_size 2G
     total_file_size 250M
     retry_limit 20
@@ -812,7 +813,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     Name s3
     Match ecsagent
     region              ${S3_AWS_REGION}
-    upload_timeout      5s
+    upload_timeout      5m
     store_dir_limit_size 2G
     total_file_size 250M
     retry_limit 20
@@ -825,7 +826,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     Name s3
     Match registrationinfo
     region              ${S3_AWS_REGION}
-    upload_timeout      5s
+    upload_timeout      2m
     store_dir_limit_size 2G
     total_file_size 250M
     retry_limit 20
@@ -838,7 +839,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     Name s3
     Match_Regex orgs**
     region              ${S3_AWS_REGION}
-    upload_timeout      5s
+    upload_timeout      3s
     use_put_object  On
     store_dir_limit_size 2G
     total_file_size 250M
@@ -1038,7 +1039,9 @@ configure_fluentbit() { #{{{
   fi
 
   spinner_wait "Starting fluentbit agent.."
-  # TODO: mem and cpu reservation, follow ecs-agent setup
+  # TODO: mem and cpu reservation, follow ecs-agent setup, ecs-agent has no mem/cpu reservation set
+  # TODO: is container healthcheck requried, if configured inside as well?
+  # TODO: Re-evaluate if --network should be host
   docker_run_command="$CONTAINER_ORCHESTRATOR run -d \
       --name fluentbit-agent \
       --restart=always \
@@ -1310,7 +1313,7 @@ prune() { #{{{
   local reclaimed
 
   spinner_wait "Cleaning up system.."
-
+  # TODO: command works but cron does not
   reclaimed=$($CONTAINER_ORCHESTRATOR system prune -f \
     --filter "until=24h" \
     | cut -d: -f2 | tr -d ' ')
