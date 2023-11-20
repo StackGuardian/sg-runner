@@ -689,7 +689,7 @@ ECS_EXTERNAL=true
 EOF
 
 # Fluentbit configuration for aws_s3 output
-# TODO: Reduce frequency of outputting logs to S3 and blob storage
+# TODO: Refactor redundant config
 if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
   cat > ./fluent-bit.conf << EOF
 [SERVICE]
@@ -703,22 +703,26 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
     Health_Check On
     HC_Errors_Count 5
     HC_Period 5
+
 [INPUT]
     Name forward
     Listen 0.0.0.0
     port 24224
+
 [INPUT]
     Name tail
     Tag registrationinfo
     path /var/log/registration/*.txt
     DB /var/log/flb_docker.db
     Mem_Buf_Limit 50MB
-# [INPUT]
-#     Name tail
-#     Tag ecsagent
-#     path /var/lib/docker/containers/*/*-json.log
-#     DB /var/log/flb_docker.db
-#     Mem_Buf_Limit 50MB
+
+[INPUT]
+    Name tail
+    Tag ecsagent
+    path /var/lib/docker/containers/*/*-json.log
+    DB /var/log/flb_docker.db
+    Mem_Buf_Limit 50MB
+
 [OUTPUT]
     Name  azure_blob
     Match  fluentbit
@@ -730,16 +734,17 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
     auto_create_container on
     tls on
 
-# [OUTPUT]
-#     Name  azure_blob
-#     Match  ecsagent
-#     account_name ${STORAGE_ACCOUNT_NAME}
-#     shared_key ${SHARED_KEY}
-#     blob_type blockblob
-#     path ecsagent/log
-#     container_name system
-#     auto_create_container on
-#     tls on
+[OUTPUT]
+    Name  azure_blob
+    Match  ecsagent
+    account_name ${STORAGE_ACCOUNT_NAME}
+    shared_key ${SHARED_KEY}
+    blob_type blockblob
+    path ecsagent/log
+    container_name system
+    auto_create_container on
+    tls on
+
 [OUTPUT]
     Name  azure_blob
     Match  registrationinfo
@@ -750,6 +755,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
     container_name system
     auto_create_container on
     tls on
+
 [OUTPUT]
     Name  azure_blob
     Match_Regex orgs**
@@ -1039,9 +1045,7 @@ configure_fluentbit() { #{{{
   fi
 
   spinner_wait "Starting fluentbit agent.."
-  # TODO: mem and cpu reservation, follow ecs-agent setup, ecs-agent has no mem/cpu reservation set
-  # TODO: is container healthcheck requried, if configured inside as well?
-  # TODO: Re-evaluate if --network should be host
+  # TODO: --network host, use-case
   docker_run_command="$CONTAINER_ORCHESTRATOR run -d \
       --name fluentbit-agent \
       --restart=always \
@@ -1139,14 +1143,18 @@ register_instance() { #{{{
   SSM_SERVICE_NAME="amazon-ssm-agent"
   SSM_BIN_NAME="amazon-ssm-agent"
   if systemctl is-enabled snap.amazon-ssm-agent.amazon-ssm-agent.service &>/dev/null; then
-      echo "Detected SSM agent installed via snap."
+      echo "Detected SSM agent installed via snap" >> "$LOG_FILE" 2>&1
       SSM_SERVICE_NAME="snap.amazon-ssm-agent.amazon-ssm-agent.service"
       SSM_BIN_NAME="/snap/amazon-ssm-agent/current/amazon-ssm-agent"
   fi
 
   # Restart SSM agent to ensure the creds are refreshed before the installation starts
+  echo "Restarting SSM agent.." >> "$LOG_FILE" 2>&1
   systemctl restart "$SSM_SERVICE_NAME" >> "$LOG_FILE" 2>&1
   systemctl status "$SSM_SERVICE_NAME" >> "$LOG_FILE" 2>&1
+
+  # TODO: Add the seelog.xml file. Change the value of minlevel to info.
+  # <seelog type="adaptive" mininterval="2000000" maxinterval="100000000" critmsgcount="500" minlevel="info">
 
   /bin/bash /tmp/ecs-anywhere-install.sh \
       --region "${LOCAL_AWS_DEFAULT_REGION}" \
@@ -1313,7 +1321,6 @@ prune() { #{{{
   local reclaimed
 
   spinner_wait "Cleaning up system.."
-  # TODO: command works but cron does not
   reclaimed=$($CONTAINER_ORCHESTRATOR system prune -f \
     --filter "until=24h" \
     | cut -d: -f2 | tr -d ' ')
