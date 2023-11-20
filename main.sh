@@ -806,7 +806,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     Name s3
     Match fluentbit
     region              ${S3_AWS_REGION}
-    upload_timeout      5m
+    upload_timeout      15s
     store_dir_limit_size 2G
     total_file_size 250M
     retry_limit 20
