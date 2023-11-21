@@ -18,7 +18,7 @@ readonly LOG_FILE="/tmp/sg_runner.log"
 readonly COMMANDS=( "jq" "crontab" )
 # readonly CONTAINER_ORCHESTRATORS=( "docker" "podman" )
 readonly CONTAINER_ORCHESTRATORS=( "docker" )
-readonly FLUENTBIT_IMAGE="fluent/fluent-bit:2.0.9"
+readonly FLUENTBIT_IMAGE="fluent/fluent-bit:2.2.0"
 
 # source .env if exists
 # overrides [main] environment variables
@@ -849,6 +849,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     use_put_object  On
     store_dir_limit_size 2G
     total_file_size 250M
+    auto_retry_requests true
     retry_limit 20
     compression gzip
     bucket              ${S3_BUCKET_NAME}
