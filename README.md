@@ -176,6 +176,5 @@ To revert you can just run:
 - If the registration was successful but you can't see Ping Status and IP Address for the Runner on StackGuardian Platform inside the Runner Group's -> Runner Instances tab please re-register runner using the following command:
     ```bash
     ./main.sh deregister --sg-node-token "TOKEN" --organization "ORG" --runner-group "RUNNER_GROUP" && \
-    rm -rf /var/lib/amazon/ssm/ ~/.aws/credentials && \
     ./main.sh register --sg-node-token "TOKEN" --organization "ORG" --runner-group "RUNNER_GROUP"
     ```
