@@ -614,8 +614,13 @@ clean_local_setup() { #{{{
     ./aws-credentials \
     ./db-state \
     /var/log/registration \
-    ./ssm-binaries >&/dev/null
+    ./ssm-binaries \
+    /var/lib/amazon/ssm \
+    /root/.aws/credentials >&/dev/null
   clean_cron
+
+  # Wait for AWS SSM Managed Instance to deregister on AWS side
+  sleep 10s
 
   return 0
 }
