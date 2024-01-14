@@ -1327,7 +1327,7 @@ prune() { #{{{
   local reclaimed
 
   spinner_wait "Cleaning up system.."
-  reclaimed=$($CONTAINER_ORCHESTRATOR system prune -f \
+  reclaimed=$($CONTAINER_ORCHESTRATOR system prune --volumes -f \
     --filter "until=24h" \
     | cut -d: -f2 | tr -d ' ')
 
