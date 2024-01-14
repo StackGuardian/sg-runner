@@ -527,7 +527,7 @@ setup_cron() { #{{{
     crontab -l > "$temp_file" 2>/dev/null || echo "" > "$temp_file"
   fi
   { echo "* * * * * /bin/bash $PWD/main.sh status";
-    echo "0 0 * * * /bin/bash $PWD/main.sh prune"
+    echo "0 */4 * * * /bin/bash $PWD/main.sh prune"
   } >> "$temp_file"
   /usr/bin/crontab "$temp_file"
 }
@@ -541,7 +541,7 @@ clean_cron() { #{{{
 
   if [[ -s "$temp_file" ]]; then
     sed -i "\|* * * * * /bin/bash $PWD/main.sh status|d" "$temp_file"
-    sed -i "\|0 0 \* \* \* /bin/bash $PWD/main.sh prune|d" "$temp_file"
+    sed -i "\|0 \*\/4 \* \* \* /bin/bash $PWD/main.sh prune|d" "$temp_file"
     /usr/bin/crontab "$temp_file"
   fi
 }
@@ -1328,7 +1328,7 @@ prune() { #{{{
 
   spinner_wait "Cleaning up system.."
   reclaimed=$($CONTAINER_ORCHESTRATOR system prune --volumes -f \
-    --filter "until=24h" \
+    --filter "until=4h" \
     | cut -d: -f2 | tr -d ' ')
 
   jq ".system.docker.last_prune = \"$(date)\"" "$SG_DIAGNOSTIC_FILE" >> "$SG_DIAGNOSTIC_TMP_FILE"
