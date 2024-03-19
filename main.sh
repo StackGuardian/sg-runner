@@ -695,9 +695,6 @@ ECS_DATADIR=/data/
 ECS_ENABLE_TASK_IAM_ROLE=true
 ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true
 ECS_EXTERNAL=true
-# ECS_ENABLE_CONTAINER_METADATA=false
-# HTTP_PROXY=localhost:3128
-# NO_PROXY=0.0.0.0/0,/var/run/docker.sock
 EOF
 
 # Fluentbit configuration for aws_s3 output
