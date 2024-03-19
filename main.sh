@@ -496,6 +496,7 @@ api_call() { #{{{
     exit 1
   elif [ "$status_code" != "200" ] && [ "$status_code" != "201" ] && [ "$status_code" != "100" ]; then
     return 1
+  # TODO: Handle by retrying for 5 mins: ERROR: Could not fetch data from API. 504 Network error communicating with endpoint 
   else
     return 0
   fi
@@ -553,6 +554,7 @@ clean_cron() { #{{{
 
 cleanup() { #{{{
   printf "\nGraceful shutdown..\n"
+  set +x
   [[ -n ${spinner_pid} ]] && kill "${spinner_pid}" >&/dev/null
   exit 0
 }
@@ -675,6 +677,16 @@ configure_local_data() { #{{{
 # ECS_ENGINE_AUTH_TYPE	"docker" | "dockercfg"	The type of auth data that is stored in the ECS_ENGINE_AUTH_DATA key.		
 # ECS_ENGINE_AUTH_DATA
 
+# https://github.com/aws/amazon-ecs-agent/blob/master/ecs-agent/credentials/instancecreds/instancecreds_linux.go#L28C1-L34C78
+# https://github.com/aws/amazon-ecs-agent/issues/3241
+# // GetCredentials returns the instance credentials chain. This is the default chain
+# // credentials plus the "rotating shared credentials provider", so credentials will
+# // be checked in this order:
+# //  1. Env vars (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY).
+# //  2. Shared credentials file (https://docs.aws.amazon.com/ses/latest/DeveloperGuide/create-shared-credentials-file.html) (file at ~/.aws/credentials containing access key id and secret access key).
+# //  3. EC2 role credentials. This is an IAM role that the user specifies when they launch their EC2 container instance (ie ecsInstanceRole (https://docs.aws.amazon.com/AmazonECS/latest/developerguide/instance_IAM_role.html)).
+# //  4. Rotating shared credentials file located at /rotatingcreds/credentials
+
   cat > /etc/ecs/ecs.config << EOF
 ECS_CLUSTER=${ECS_CLUSTER}
 AWS_DEFAULT_REGION=${LOCAL_AWS_DEFAULT_REGION}
@@ -686,11 +698,20 @@ ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION=24h
 ECS_IMAGE_CLEANUP_INTERVAL=24h
 ECS_IMAGE_MINIMUM_CLEANUP_AGE=1h
 NON_ECS_IMAGE_MINIMUM_CLEANUP_AGE=1h
+ECS_ALTERNATE_CREDENTIAL_PROFILE=sg-runner
+AWS_EC2_METADATA_DISABLED=true
+# AWS_PROFILE=sg-runner
+# AWS_ACCESS_KEY_ID=ASXXXXXXXXXXXXXXXXXXX
+# AWS_SECRET_ACCESS_KEY=UVOtaxXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+# AWS_SESSION_TOKEN=IQoJb3JpZ2luX2VjEJv//////////wEaCXVzLWVhc3QtMSJIMEYCIQDZ
 ECS_LOGFILE=/log/ecs-agent.log
 ECS_DATADIR=/data/
 ECS_ENABLE_TASK_IAM_ROLE=true
 ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true
 ECS_EXTERNAL=true
+# ECS_ENABLE_CONTAINER_METADATA=false
+# HTTP_PROXY=localhost:3128
+# NO_PROXY=0.0.0.0/0,/var/run/docker.sock
 EOF
 
 # Fluentbit configuration for aws_s3 output
@@ -1159,8 +1180,10 @@ register_instance() { #{{{
   systemctl restart "$SSM_SERVICE_NAME" >> "$LOG_FILE" 2>&1
   systemctl status "$SSM_SERVICE_NAME" >> "$LOG_FILE" 2>&1
 
-  # TODO: Add the seelog.xml file. Change the value of minlevel to info.
+  ## TODO: Add the seelog.xml file. Change the value of minlevel to info.
   # <seelog type="adaptive" mininterval="2000000" maxinterval="100000000" critmsgcount="500" minlevel="info">
+  # level=info time=2024-02-15T11:52:25Z msg="Unable to get Docker client for version 1.44: Error response from daemon: client version 1.44 is too new. Maximum supported API version is 1.43" module=sdkclientfactory.go
+  # Use --no-start with /tmp/ecs-anywhere-install.sh
 
   /bin/bash /tmp/ecs-anywhere-install.sh \
       --region "${LOCAL_AWS_DEFAULT_REGION}" \
@@ -1176,6 +1199,7 @@ register_instance() { #{{{
     if [[ ! -e $log_path ]]; then
       continue
     fi
+    sleep 5
     full_err_msg=$(grep -ioa -m1 -P '(?<=\[error\] logger=structured ).*?(?=status code)' "$log_path")
     if [[ -n "$full_err_msg" ]]; then
       debug "Full Error:" "$full_err_msg"
@@ -1187,7 +1211,7 @@ register_instance() { #{{{
       echo "${err}:${msg}" >> "$LOG_FILE"
       exit 1
     fi
-  done & spinner "$!" "Trying to register instance"
+  done & spinner "$!" "Verifying successful launch of the services to register this runner"
 
   setup_cron
   print_details
@@ -1252,8 +1276,11 @@ deregister_instance() { #{{{
   else
     spinner_msg "Trying to deregister instance" 1
     err "Could not fetch data from API." "$status_code" "$message"
+    # info "Deregister with -f/--force to force local cleanup. Needed if you are going to register this machine again."
     if force_exec; then
       clean_local_setup & spinner "$!" "Starting cleanup"
+    else
+      info "Deregister with -f/--force to force local cleanup. Needed if you are registering this machine again."
     fi
     exit 1
   fi
@@ -1507,14 +1534,32 @@ main() { #{{{
     err "One of following container orchestrators required:" "${CONTAINER_ORCHESTRATORS[*]}"
     exit 1
   fi
+  
+  # info "Checking if an IAM role is attached..."
+  # # TODO: test with imds v1 only
+  # imdsv2_token=$(curl -fSsLkX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 20")
+  # attached_iam_role=$(curl -fSsLk --proto "https" -H "X-aws-ec2-metadata-token: $imdsv2_token" "http://169.254.169.254/latest/meta-data/iam/security-credentials/")
+  # if [ -n $attached_iam_role ]; then
+  #   debug "Response:" "$attached_iam_role"
+  #   # err "Private Runners cannot have IAM role atatched to it."
+  #   # exit 1
+  #   info "Found an IAM role attached to the instance: $attached_iam_role"
+  # fi
 
-  if curl -fSsLk \
-    --proto "https" \
-    "http://169.254.169.254/latest/meta-data/iam/security-credentials/" \
-    >> "$LOG_FILE" 2>&1; then
-    debug "Response:" "$(cat $LOG_FILE)"
-    err "Private Runners cannot have an IAM role assigned to the instance."
-    exit 1
+  info "Checking if an IAM role is attached..."
+  # Attempt to get token for IMDSv2, will fail silently for IMDSv1
+  imdsv2_token=$(curl -fSsLkX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 120" || echo "")
+
+  # Use the token if available; otherwise, proceed without it for IMDSv1 compatibility
+  if [ -n "$imdsv2_token" ]; then
+    attached_iam_role=$(curl -fSsLk --proto "https" -H "X-aws-ec2-metadata-token: $imdsv2_token" "http://169.254.169.254/latest/meta-data/iam/security-credentials/")
+  else
+    attached_iam_role=$(curl -fSsLk "http://169.254.169.254/latest/meta-data/iam/security-credentials/")
+  fi
+
+  if [ -n "$attached_iam_role" ]; then
+    debug "Response:" "$attached_iam_role"
+    info "Found an IAM role attached to the instance: $attached_iam_role"
   fi
 
   case "${1}" in
