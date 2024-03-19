@@ -554,7 +554,6 @@ clean_cron() { #{{{
 
 cleanup() { #{{{
   printf "\nGraceful shutdown..\n"
-  set +x
   [[ -n ${spinner_pid} ]] && kill "${spinner_pid}" >&/dev/null
   exit 0
 }
@@ -677,15 +676,6 @@ configure_local_data() { #{{{
 # ECS_ENGINE_AUTH_TYPE	"docker" | "dockercfg"	The type of auth data that is stored in the ECS_ENGINE_AUTH_DATA key.		
 # ECS_ENGINE_AUTH_DATA
 
-# https://github.com/aws/amazon-ecs-agent/blob/master/ecs-agent/credentials/instancecreds/instancecreds_linux.go#L28C1-L34C78
-# https://github.com/aws/amazon-ecs-agent/issues/3241
-# // GetCredentials returns the instance credentials chain. This is the default chain
-# // credentials plus the "rotating shared credentials provider", so credentials will
-# // be checked in this order:
-# //  1. Env vars (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY).
-# //  2. Shared credentials file (https://docs.aws.amazon.com/ses/latest/DeveloperGuide/create-shared-credentials-file.html) (file at ~/.aws/credentials containing access key id and secret access key).
-# //  3. EC2 role credentials. This is an IAM role that the user specifies when they launch their EC2 container instance (ie ecsInstanceRole (https://docs.aws.amazon.com/AmazonECS/latest/developerguide/instance_IAM_role.html)).
-# //  4. Rotating shared credentials file located at /rotatingcreds/credentials
 
   cat > /etc/ecs/ecs.config << EOF
 ECS_CLUSTER=${ECS_CLUSTER}
@@ -700,10 +690,6 @@ ECS_IMAGE_MINIMUM_CLEANUP_AGE=1h
 NON_ECS_IMAGE_MINIMUM_CLEANUP_AGE=1h
 ECS_ALTERNATE_CREDENTIAL_PROFILE=sg-runner
 AWS_EC2_METADATA_DISABLED=true
-# AWS_PROFILE=sg-runner
-# AWS_ACCESS_KEY_ID=ASXXXXXXXXXXXXXXXXXXX
-# AWS_SECRET_ACCESS_KEY=UVOtaxXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-# AWS_SESSION_TOKEN=IQoJb3JpZ2luX2VjEJv//////////wEaCXVzLWVhc3QtMSJIMEYCIQDZ
 ECS_LOGFILE=/log/ecs-agent.log
 ECS_DATADIR=/data/
 ECS_ENABLE_TASK_IAM_ROLE=true
@@ -1534,17 +1520,6 @@ main() { #{{{
     err "One of following container orchestrators required:" "${CONTAINER_ORCHESTRATORS[*]}"
     exit 1
   fi
-  
-  # info "Checking if an IAM role is attached..."
-  # # TODO: test with imds v1 only
-  # imdsv2_token=$(curl -fSsLkX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 20")
-  # attached_iam_role=$(curl -fSsLk --proto "https" -H "X-aws-ec2-metadata-token: $imdsv2_token" "http://169.254.169.254/latest/meta-data/iam/security-credentials/")
-  # if [ -n $attached_iam_role ]; then
-  #   debug "Response:" "$attached_iam_role"
-  #   # err "Private Runners cannot have IAM role atatched to it."
-  #   # exit 1
-  #   info "Found an IAM role attached to the instance: $attached_iam_role"
-  # fi
 
   info "Checking if an IAM role is attached..."
   # Attempt to get token for IMDSv2, will fail silently for IMDSv1
