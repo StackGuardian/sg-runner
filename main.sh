@@ -1518,15 +1518,14 @@ main() { #{{{
     exit 1
   fi
 
-  info "Checking if an IAM role is attached..."
   # Attempt to get token for IMDSv2, will fail silently for IMDSv1
   imdsv2_token=$(curl -fSsLkX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 120" || echo "")
 
   # Use the token if available; otherwise, proceed without it for IMDSv1 compatibility
   if [ -n "$imdsv2_token" ]; then
-    attached_iam_role=$(curl -fSsLk --proto "https" -H "X-aws-ec2-metadata-token: $imdsv2_token" "http://169.254.169.254/latest/meta-data/iam/security-credentials/")
+    attached_iam_role=$(curl -fSsLk --proto "https" -H "X-aws-ec2-metadata-token: $imdsv2_token" "http://169.254.169.254/latest/meta-data/iam/security-credentials/" || echo "")
   else
-    attached_iam_role=$(curl -fSsLk "http://169.254.169.254/latest/meta-data/iam/security-credentials/")
+    attached_iam_role=$(curl -fSsLk "http://169.254.169.254/latest/meta-data/iam/security-credentials/"  || echo "")
   fi
 
   if [ -n "$attached_iam_role" ]; then
