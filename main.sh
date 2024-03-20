@@ -675,7 +675,8 @@ configure_local_data() { #{{{
 
 # ECS_ENGINE_AUTH_TYPE	"docker" | "dockercfg"	The type of auth data that is stored in the ECS_ENGINE_AUTH_DATA key.		
 # ECS_ENGINE_AUTH_DATA
-
+# TODO: increase the RPS for IMDS service depending on the tasks an instance can run at a time
+# ECS_TASK_METADATA_RPS_LIMIT=100,150
 
   cat > /etc/ecs/ecs.config << EOF
 ECS_CLUSTER=${ECS_CLUSTER}
