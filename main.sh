@@ -688,7 +688,7 @@ ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION=24h
 ECS_IMAGE_CLEANUP_INTERVAL=24h
 ECS_IMAGE_MINIMUM_CLEANUP_AGE=1h
 NON_ECS_IMAGE_MINIMUM_CLEANUP_AGE=1h
-ECS_ALTERNATE_CREDENTIAL_PROFILE=sg-runner
+# ECS_ALTERNATE_CREDENTIAL_PROFILE=sg-runner
 AWS_EC2_METADATA_DISABLED=true
 ECS_LOGFILE=/log/ecs-agent.log
 ECS_DATADIR=/data/
@@ -1194,7 +1194,7 @@ register_instance() { #{{{
       echo "${err}:${msg}" >> "$LOG_FILE"
       exit 1
     fi
-  done & spinner "$!" "Verifying successful launch of the services to register this runner"
+  done & spinner "$!" "Verifying successful launch of services to register this runner"
 
   setup_cron
   print_details
