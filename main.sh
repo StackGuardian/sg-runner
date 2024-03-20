@@ -59,9 +59,9 @@ readonly C_BOLD="\033[1m"
 show_help() { #{{{
   cat <<EOF
 
-main.sh is script for registration of Private Runner Nodes on Stackguardian.
+sg-runner is a script for registration of Private Runner Nodes on Stackguardian.
 
-  More information available at: https://docs.qa.stackguardian.io/docs/
+  More information available at: https://docs.stackguardian.io/docs/organisation_settings/private-runner-groups/
 
 Examples:
   # Register new runner
@@ -1194,7 +1194,7 @@ register_instance() { #{{{
       echo "${err}:${msg}" >> "$LOG_FILE"
       exit 1
     fi
-  done & spinner "$!" "Verifying successful launch of services to register this runner"
+  done & spinner "$!" "Verifying registration of this runner"
 
   setup_cron
   print_details
