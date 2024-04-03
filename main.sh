@@ -1478,23 +1478,6 @@ main() { #{{{
     exit 1
   fi
 
-  # if [[ -e /sys/fs/cgroup/cgroup.controllers ]]; then
-  #   if [[ "$1" == "cgroupsv2" && "$2" =~ enable|disable ]]; then
-  #     if [[ "$CGROUPSV2_PREVIEW" != true ]]; then
-  #       err "CgroupsV2 Preview Off: private runner does not support" "cgroupsv2"
-  #       cmd_example "Exec" "export CGROUPSV2_PREVIEW=true" "to enable cgroupsv2 edit"
-  #       exit 1
-  #     elif [[ "$CGROUPSV2_PREVIEW" == true ]]; then
-  #       parse_arguments "${@:3}"
-  #       cgroupsv2 "$2"
-  #     fi
-  #   elif [[ "$(grep "^GRUB_CMDLINE_LINUX=\".*systemd.unified_cgroup_hierarchy=0\"" /etc/default/grub)" == "" ]]; then
-  #     err "Private runner does not support" "cgroupsv2"
-  #     cmd_example "Exec" "./main.sh cgroupsv2 disable" "to switch to cgroupsv1"
-  #     exit 1
-  #   fi
-  # fi
-
   cmds=()
   for cmd in "${COMMANDS[@]}"; do
     if ! type "$cmd" >&/dev/null; then
