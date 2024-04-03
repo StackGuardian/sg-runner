@@ -226,6 +226,7 @@ details_item() { #{{{
 
 print_details() { #{{{
   echo
+  # TODO: Fix Organization and Runner ID dont printing correctly when registration is run on an already registered runner
   details_frame "Registration Details"
   details_item "Registration Date" "$(date +'%Y-%m-%d %H:%M:%S (GMT%z)')"
   details_item "Organization" "${ORGANIZATION_NAME}"
@@ -675,8 +676,6 @@ configure_local_data() { #{{{
 
 # ECS_ENGINE_AUTH_TYPE	"docker" | "dockercfg"	The type of auth data that is stored in the ECS_ENGINE_AUTH_DATA key.		
 # ECS_ENGINE_AUTH_DATA
-# TODO: increase the RPS for IMDS service depending on the tasks an instance can run at a time
-# ECS_TASK_METADATA_RPS_LIMIT=100,150
 
   cat > /etc/ecs/ecs.config << EOF
 ECS_CLUSTER=${ECS_CLUSTER}
@@ -1188,6 +1187,7 @@ register_instance() { #{{{
       continue
     fi
     sleep 5
+    # TODO: Resolve grep: /var/lib/docker/containers/cffefe/cffefe-json.log: No such file or directory
     full_err_msg=$(grep -ioa -m1 -P '(?<=\[error\] logger=structured ).*?(?=status code)' "$log_path")
     if [[ -n "$full_err_msg" ]]; then
       debug "Full Error:" "$full_err_msg"
