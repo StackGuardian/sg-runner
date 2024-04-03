@@ -867,12 +867,15 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     s3_key_format /\$TAG/logs/log
 EOF
 
-  cat > ./aws-credentials << EOF
+# wrap the cat command in a conditional to avoid writing the file if the storage backend is if S3_AWS_ACCESS_KEY_ID and S3_AWS_SECRET_ACCESS_KEY are empty
+  if [[ -n "${S3_AWS_ACCESS_KEY_ID}" && -n "${S3_AWS_SECRET_ACCESS_KEY}" ]]; then
+    cat > ./aws-credentials << EOF
 [default]
 region = ${S3_AWS_REGION}
 aws_access_key_id = ${S3_AWS_ACCESS_KEY_ID}
 aws_secret_access_key = ${S3_AWS_SECRET_ACCESS_KEY}
 EOF
+  fi
 
 fi
 
@@ -1000,9 +1003,12 @@ fetch_organization_info() { #{{{
   S3_AWS_SECRET_ACCESS_KEY="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].awsSecretAccessKey')"
 
   if [[ "$STORAGE_BACKEND_TYPE" == "aws_s3" ]]; then
-    for var in S3_BUCKET_NAME S3_AWS_REGION S3_AWS_ACCESS_KEY_ID S3_AWS_SECRET_ACCESS_KEY; do
+    for var in S3_BUCKET_NAME S3_AWS_REGION; do
       check_variable_value "$var"
     done
+    if [[ -z "${S3_AWS_ACCESS_KEY_ID}" || -z "${S3_AWS_SECRET_ACCESS_KEY}" ]]; then
+      err "No AWS access keys provided for S3 Storage Backend in the runner confguration, using the instance profile, if atatched to this intance."
+    fi
   elif [[ "$STORAGE_BACKEND_TYPE" == "azure_blob_storage" ]]; then
     for var in SHARED_KEY STORAGE_ACCOUNT_NAME; do
       check_variable_value "$var"
@@ -1075,13 +1081,14 @@ configure_fluentbit() { #{{{
   exists=$($CONTAINER_ORCHESTRATOR ps -aq --filter "name=fluentbit-agent")
 
   if [[ -z "${exists}" ]]; then
-    if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
-      extra_options="$FLUENTBIT_IMAGE \
-        /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf"
-      $docker_run_command $extra_options >> "$LOG_FILE" 2>&1
-    elif [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
+    if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" && -e "$(pwd)/aws-credentials" ]]; then
       extra_options="-v $(pwd)/aws-credentials:$HOME/.aws/credentials \
         $FLUENTBIT_IMAGE \
+        /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf"
+      $docker_run_command $extra_options >> "$LOG_FILE" 2>&1
+    fi
+    elif [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" || "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
+      extra_options="$FLUENTBIT_IMAGE \
         /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf"
       $docker_run_command $extra_options >> "$LOG_FILE" 2>&1
     fi
