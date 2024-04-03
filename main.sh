@@ -1002,9 +1002,6 @@ fetch_organization_info() { #{{{
   S3_AWS_ACCESS_KEY_ID="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].awsAccessKeyId')"
   S3_AWS_SECRET_ACCESS_KEY="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].awsSecretAccessKey')"
 
-  S3_AWS_ACCESS_KEY_ID=""
-  S3_AWS_SECRET_ACCESS_KEY=""
-
   if [[ "$STORAGE_BACKEND_TYPE" == "aws_s3" ]]; then
     for var in S3_BUCKET_NAME S3_AWS_REGION; do
       check_variable_value "$var"
