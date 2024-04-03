@@ -1086,7 +1086,6 @@ configure_fluentbit() { #{{{
         $FLUENTBIT_IMAGE \
         /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf"
       $docker_run_command $extra_options >> "$LOG_FILE" 2>&1
-    fi
     elif [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" || "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
       extra_options="$FLUENTBIT_IMAGE \
         /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf"
