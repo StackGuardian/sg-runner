@@ -1010,7 +1010,7 @@ fetch_organization_info() { #{{{
       check_variable_value "$var"
     done
     if [[ -z "${S3_AWS_ACCESS_KEY_ID}" || -z "${S3_AWS_SECRET_ACCESS_KEY}" ]]; then
-      err "No AWS access keys provided for S3 Storage Backend in the runner confguration, using the instance profile, if atatched to this intance."
+      info "No AWS access keys provided for S3 Storage Backend in the runner confguration, using the instance profile, if atatched to this intance."
     fi
   elif [[ "$STORAGE_BACKEND_TYPE" == "azure_blob_storage" ]]; then
     for var in SHARED_KEY STORAGE_ACCOUNT_NAME; do
