@@ -1133,19 +1133,16 @@ register_instance() { #{{{
   configure_fluentbit
   configure_local_network
 
-  if [[ ! -e /tmp/ecs-anywhere-install.sh ]]; then
-    spinner_wait "Downloading support files.."
-
-    if ! curl -fSsLk \
-      --proto "https" \
-      -o "/tmp/ecs-anywhere-install.sh" \
-      "https://amazon-ecs-agent.s3.amazonaws.com/ecs-anywhere-install-latest.sh" \
-      >> "$LOG_FILE" 2>&1; then
-      debug "Response:" "$(cat $LOG_FILE)"
-      spinner_msg "Downloading support files" 1
-      err "Unable to download" "ecs-anywhere-install.sh" "script"
-      exit 1
-    fi
+  spinner_wait "Downloading support files.."
+  if ! curl -fSsLk \
+    --proto "https" \
+    -o "/tmp/ecs-anywhere-install.sh" \
+    "https://amazon-ecs-agent.s3.amazonaws.com/ecs-anywhere-install-latest.sh" \
+    >> "$LOG_FILE" 2>&1; then
+    debug "Response:" "$(cat $LOG_FILE)"
+    spinner_msg "Downloading support files" 1
+    err "Unable to download" "ecs-anywhere-install.sh" "script"
+    exit 1
   fi
   spinner_msg "Downloading support files" 0
 
