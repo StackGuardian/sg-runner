@@ -816,6 +816,8 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     Name s3
     Match fluentbit
     region              ${S3_AWS_REGION}
+    role_arn            ${S3_AWS_ROLE_ARN}
+    external_id         ${S3_AWS_EXTERNAL_ID}
     upload_timeout      15s
     store_dir_limit_size 2G
     total_file_size 250M
@@ -829,6 +831,8 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     Name s3
     Match ecsagent
     region              ${S3_AWS_REGION}
+    role_arn            ${S3_AWS_ROLE_ARN}
+    external_id         ${S3_AWS_EXTERNAL_ID}
     upload_timeout      5m
     store_dir_limit_size 2G
     total_file_size 250M
@@ -842,6 +846,8 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     Name s3
     Match registrationinfo
     region              ${S3_AWS_REGION}
+    role_arn            ${S3_AWS_ROLE_ARN}
+    external_id         ${S3_AWS_EXTERNAL_ID}
     upload_timeout      2m
     store_dir_limit_size 2G
     total_file_size 250M
@@ -855,6 +861,8 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     Name s3
     Match_Regex orgs**
     region              ${S3_AWS_REGION}
+    role_arn            ${S3_AWS_ROLE_ARN}
+    external_id         ${S3_AWS_EXTERNAL_ID}
     upload_timeout      3s
     use_put_object  On
     store_dir_limit_size 2G
@@ -866,15 +874,15 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     s3_key_format /\$TAG/logs/log
 EOF
 
-# wrap the cat command in a conditional to avoid writing the file if the storage backend is if S3_AWS_ACCESS_KEY_ID and S3_AWS_SECRET_ACCESS_KEY are empty
-  if [[ -n "${S3_AWS_ACCESS_KEY_ID}" && -n "${S3_AWS_SECRET_ACCESS_KEY}" ]]; then
-    cat > ./aws-credentials << EOF
-[default]
-region = ${S3_AWS_REGION}
-aws_access_key_id = ${S3_AWS_ACCESS_KEY_ID}
-aws_secret_access_key = ${S3_AWS_SECRET_ACCESS_KEY}
-EOF
-  fi
+# # wrap the cat command in a conditional to avoid writing the file if the storage backend is if S3_AWS_ACCESS_KEY_ID and S3_AWS_SECRET_ACCESS_KEY are empty
+#   if [[ -n "${S3_AWS_ACCESS_KEY_ID}" && -n "${S3_AWS_SECRET_ACCESS_KEY}" ]]; then
+#     cat > ./aws-credentials << EOF
+# [default]
+# region = ${S3_AWS_REGION}
+# aws_access_key_id = ${S3_AWS_ACCESS_KEY_ID}
+# aws_secret_access_key = ${S3_AWS_SECRET_ACCESS_KEY}
+# EOF
+#   fi
 
 fi
 
@@ -1000,6 +1008,8 @@ fetch_organization_info() { #{{{
   S3_AWS_REGION="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.awsRegion')"
   S3_AWS_ACCESS_KEY_ID="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].awsAccessKeyId')"
   S3_AWS_SECRET_ACCESS_KEY="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].awsSecretAccessKey')"
+  S3_AWS_ROLE_ARN="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].roleArn')" || "None"
+  S3_AWS_EXTERNAL_ID="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].externalId')" || "None"
 
   if [[ "$STORAGE_BACKEND_TYPE" == "aws_s3" ]]; then
     for var in S3_BUCKET_NAME S3_AWS_REGION; do
@@ -1080,8 +1090,10 @@ configure_fluentbit() { #{{{
   exists=$($CONTAINER_ORCHESTRATOR ps -aq --filter "name=fluentbit-agent")
 
   if [[ -z "${exists}" ]]; then
-    if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" && -e "$(pwd)/aws-credentials" ]]; then
-      extra_options="-v $(pwd)/aws-credentials:$HOME/.aws/credentials \
+    if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" && -n "${S3_AWS_ACCESS_KEY_ID}" && -n "${S3_AWS_SECRET_ACCESS_KEY}" && -n "${S3_AWS_REGION}" ]]; then
+      extra_options="-e AWS_ACCESS_KEY_ID=${S3_AWS_ACCESS_KEY_ID} \
+        -e AWS_SECRET_ACCESS_KEY=${S3_AWS_SECRET_ACCESS_KEY} \
+        -e AWS_REGION=${S3_AWS_REGION} \
         $FLUENTBIT_IMAGE \
         /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf"
       $docker_run_command $extra_options >> "$LOG_FILE" 2>&1
@@ -1476,6 +1488,23 @@ main() { #{{{
   if [[ ! -d /run/systemd/system ]]; then
     err "Private runner is only available for" "systemd-based" "systems"
     exit 1
+  fi
+
+  if [[ -e /sys/fs/cgroup/cgroup.controllers ]]; then
+    if [[ "$1" == "cgroupsv2" && "$2" =~ enable|disable ]]; then
+      if [[ "$CGROUPSV2_PREVIEW" != true ]]; then
+        err "CgroupsV2 Preview Off: private runner does not support" "cgroupsv2"
+        cmd_example "Exec" "export CGROUPSV2_PREVIEW=true" "to enable cgroupsv2 edit"
+        exit 1
+      elif [[ "$CGROUPSV2_PREVIEW" == true ]]; then
+        parse_arguments "${@:3}"
+        cgroupsv2 "$2"
+      fi
+    elif [[ "$(grep "^GRUB_CMDLINE_LINUX=\".*systemd.unified_cgroup_hierarchy=0\"" /etc/default/grub)" == "" ]]; then
+      err "Private runner does not support" "cgroupsv2"
+      cmd_example "Exec" "./main.sh cgroupsv2 disable" "to switch to cgroupsv1"
+      exit 1
+    fi
   fi
 
   cmds=()
