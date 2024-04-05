@@ -902,8 +902,6 @@ fi
 # EOF
 #   fi
 
-fi
-
   spinner_msg "Configuring local data" 0
 }
 #}}}: configure_local_data
