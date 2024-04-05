@@ -762,12 +762,12 @@ append_s3_output_block() {
     compression gzip
     bucket ${S3_BUCKET_NAME}
     s3_key_format ${s3_key_format}
-${extra_config}
+    ${extra_config}
 EOF
 
   if [[ -n "${S3_AWS_ROLE_ARN}" && -n "${S3_AWS_EXTERNAL_ID}" ]]; then
-    echo "    role_arn            ${S3_AWS_ROLE_ARN}" >> ./fluent-bit.conf
-    echo "    external_id         ${S3_AWS_EXTERNAL_ID}" >> ./fluent-bit.conf
+    echo -n "    role_arn            ${S3_AWS_ROLE_ARN}" >> ./fluent-bit.conf
+    echo -n "    external_id         ${S3_AWS_EXTERNAL_ID}" >> ./fluent-bit.conf
   fi
 }
 
