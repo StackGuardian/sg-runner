@@ -762,12 +762,12 @@ append_s3_output_block() {
     compression gzip
     bucket ${S3_BUCKET_NAME}
     s3_key_format ${s3_key_format}
-    ${extra_config}
+${extra_config}
 EOF
 
   if [[ -n "${S3_AWS_ROLE_ARN}" && -n "${S3_AWS_EXTERNAL_ID}" ]]; then
-    echo -n "    role_arn            ${S3_AWS_ROLE_ARN}" >> ./fluent-bit.conf
-    echo -n "    external_id         ${S3_AWS_EXTERNAL_ID}" >> ./fluent-bit.conf
+    echo "    role_arn            ${S3_AWS_ROLE_ARN}" >> ./fluent-bit.conf
+    echo "    external_id         ${S3_AWS_EXTERNAL_ID}" >> ./fluent-bit.conf
   fi
 }
 
@@ -799,7 +799,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
   append_s3_output_block "fluentbit" "15s" "/system/fluentbit/fluentbit" ""
   append_s3_output_block "ecsagent" "5m" "/system/ecsagent/ecsagent" ""
   append_s3_output_block "registrationinfo" "2m" "/system/registrationinfo/registrationinfo" ""
-  append_s3_output_block "orgs**" "3s" "/\$TAG/logs/log" "    auto_retry_requests true"
+  append_s3_output_block "orgs**" "3s" "/\$TAG/logs/log" "auto_retry_requests true"
 
 elif [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
   append_common_service_and_input_blocks
