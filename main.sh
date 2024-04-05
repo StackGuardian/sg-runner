@@ -270,7 +270,7 @@ print_details() { #{{{
 #######################################
 check_fluentbit_status() { #{{{
   spinner_wait "Starting backend storage check.."
-
+  # TODO: Verify funationality, did not raise error when role_arn was not correctly set and fluentbit was not able to write to S3
   local container_id
   local log_file
 
@@ -816,8 +816,10 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     Name s3
     Match fluentbit
     region              ${S3_AWS_REGION}
+    {{#if (and S3_AWS_ROLE_ARN S3_AWS_EXTERNAL_ID)}}
     role_arn            ${S3_AWS_ROLE_ARN}
     external_id         ${S3_AWS_EXTERNAL_ID}
+    {{/if}}
     upload_timeout      15s
     store_dir_limit_size 2G
     total_file_size 250M
@@ -831,8 +833,10 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     Name s3
     Match ecsagent
     region              ${S3_AWS_REGION}
+    {{#if (and S3_AWS_ROLE_ARN S3_AWS_EXTERNAL_ID)}}
     role_arn            ${S3_AWS_ROLE_ARN}
     external_id         ${S3_AWS_EXTERNAL_ID}
+    {{/if}}
     upload_timeout      5m
     store_dir_limit_size 2G
     total_file_size 250M
@@ -846,8 +850,10 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     Name s3
     Match registrationinfo
     region              ${S3_AWS_REGION}
+    {{#if (and S3_AWS_ROLE_ARN S3_AWS_EXTERNAL_ID)}}
     role_arn            ${S3_AWS_ROLE_ARN}
     external_id         ${S3_AWS_EXTERNAL_ID}
+    {{/if}}
     upload_timeout      2m
     store_dir_limit_size 2G
     total_file_size 250M
@@ -861,8 +867,10 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     Name s3
     Match_Regex orgs**
     region              ${S3_AWS_REGION}
+    {{#if (and S3_AWS_ROLE_ARN S3_AWS_EXTERNAL_ID)}}
     role_arn            ${S3_AWS_ROLE_ARN}
     external_id         ${S3_AWS_EXTERNAL_ID}
+    {{/if}}
     upload_timeout      3s
     use_put_object  On
     store_dir_limit_size 2G
@@ -1008,8 +1016,8 @@ fetch_organization_info() { #{{{
   S3_AWS_REGION="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.awsRegion')"
   S3_AWS_ACCESS_KEY_ID="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].awsAccessKeyId')"
   S3_AWS_SECRET_ACCESS_KEY="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].awsSecretAccessKey')"
-  S3_AWS_ROLE_ARN="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].roleArn')" || None
-  S3_AWS_EXTERNAL_ID="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].externalId')" || None
+  S3_AWS_ROLE_ARN="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].roleArn')"
+  S3_AWS_EXTERNAL_ID="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].externalId')"
 
   if [[ "$STORAGE_BACKEND_TYPE" == "aws_s3" ]]; then
     for var in S3_BUCKET_NAME S3_AWS_REGION; do
