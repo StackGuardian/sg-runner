@@ -762,7 +762,7 @@ append_s3_output_block() {
     compression gzip
     bucket ${S3_BUCKET_NAME}
     s3_key_format ${s3_key_format}
-${extra_config}
+    ${extra_config}
 EOF
 
   if [[ -n "${S3_AWS_ROLE_ARN}" && -n "${S3_AWS_EXTERNAL_ID}" ]]; then
