@@ -799,7 +799,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
   append_s3_output_block "fluentbit" "15s" "/system/fluentbit/fluentbit" ""
   append_s3_output_block "ecsagent" "5m" "/system/ecsagent/ecsagent" ""
   append_s3_output_block "registrationinfo" "2m" "/system/registrationinfo/registrationinfo" ""
-  append_s3_output_block "orgs**" "3s" "/\$TAG/logs/log" "auto_retry_requests true"
+  append_s3_output_block "orgs**" "3s" "/\$TAG/logs/log" "    auto_retry_requests true"
 
 elif [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
   append_common_service_and_input_blocks
