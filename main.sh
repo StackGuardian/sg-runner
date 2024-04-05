@@ -698,96 +698,15 @@ ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true
 ECS_EXTERNAL=true
 EOF
 
-# Fluentbit configuration for aws_s3 output
-# TODO: Refactor redundant config
-if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
-  cat > ./fluent-bit.conf << EOF
-[SERVICE]
-    Flush         1
-    Log_Level     info
-    Buffer_Chunk_size 1M
-    Buffer_Max_Size 6M
-    HTTP_Server On
-    HTTP_Listen 0.0.0.0
-    HTTP_PORT 2020
-    Health_Check On
-    HC_Errors_Count 5
-    HC_Period 5
-
-[INPUT]
-    Name forward
-    Listen 0.0.0.0
-    port 24224
-
-[INPUT]
-    Name tail
-    Tag registrationinfo
-    path /var/log/registration/*.txt
-    DB /var/log/flb_docker.db
-    Mem_Buf_Limit 50MB
-
-[INPUT]
-    Name tail
-    Tag ecsagent
-    path /var/lib/docker/containers/*/*-json.log
-    DB /var/log/flb_docker.db
-    Mem_Buf_Limit 50MB
-
-[OUTPUT]
-    Name  azure_blob
-    Match  fluentbit
-    account_name ${STORAGE_ACCOUNT_NAME}
-    shared_key ${SHARED_KEY}
-    blob_type blockblob
-    path fluentbit/log
-    container_name system
-    auto_create_container on
-    tls on
-
-[OUTPUT]
-    Name  azure_blob
-    Match  ecsagent
-    account_name ${STORAGE_ACCOUNT_NAME}
-    shared_key ${SHARED_KEY}
-    blob_type blockblob
-    path ecsagent/log
-    container_name system
-    auto_create_container on
-    tls on
-
-[OUTPUT]
-    Name  azure_blob
-    Match  registrationinfo
-    account_name ${STORAGE_ACCOUNT_NAME}
-    shared_key ${SHARED_KEY}
-    blob_type blockblob
-    path registrationinfo/log
-    container_name system
-    auto_create_container on
-    tls on
-
-[OUTPUT]
-    Name  azure_blob
-    Match_Regex orgs**
-    account_name ${STORAGE_ACCOUNT_NAME}
-    shared_key ${SHARED_KEY}
-    container_name runner
-    auto_create_container on
-    tls on
-EOF
-fi
-
-# Define a function to append role_arn and external_id if they are set
-append_role_and_external_id() {
-  if [[ -n "${S3_AWS_ROLE_ARN}" && -n "${S3_AWS_EXTERNAL_ID}" ]]; then
-    echo "    role_arn            ${S3_AWS_ROLE_ARN}" >> ./fluent-bit.conf
-    echo "    external_id         ${S3_AWS_EXTERNAL_ID}" >> ./fluent-bit.conf
+info "S3_AWS_ROLE_ARN" "${S3_AWS_ROLE_ARN}"
+info "S3_AWS_EXTERNAL_ID" "${S3_AWS_EXTERNAL_ID}"
+if [[ -n "${S3_AWS_ROLE_ARN}" && -n "${S3_AWS_EXTERNAL_ID}" ]]; then
+    echo "    role_arn            ${S3_AWS_ROLE_ARN}"
+    echo "    external_id         ${S3_AWS_EXTERNAL_ID}"
   fi
-}
 
-# Check if the storage backend type is aws_s3
-if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
-  # Start the fluent-bit configuration file
+# Define a function to append common SERVICE and INPUT blocks
+append_common_service_and_input_blocks() {
   cat > ./fluent-bit.conf << EOF
 [SERVICE]
     Flush         1
@@ -821,75 +740,76 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     DB /var/log/flb_docker.db
     Mem_Buf_Limit 50MB
 EOF
+}
+
+# Function to append S3 OUTPUT block with conditional role_arn and external_id
+append_s3_output_block() {
+  local match=$1
+  local upload_timeout=$2
+  local s3_key_format=$3
+  local extra_config=$4 # Additional config if needed
 
   cat >> ./fluent-bit.conf << EOF
 [OUTPUT]
     Name s3
-    Match fluentbit
-    region              ${S3_AWS_REGION}
-    upload_timeout      15s
+    Match ${match}
+    region ${S3_AWS_REGION}
+    upload_timeout ${upload_timeout}
     store_dir_limit_size 2G
     total_file_size 250M
     retry_limit 20
-    use_put_object  On
+    use_put_object On
     compression gzip
-    bucket              ${S3_BUCKET_NAME}
-    s3_key_format /system/fluentbit/fluentbit
+    bucket ${S3_BUCKET_NAME}
+    s3_key_format ${s3_key_format}
+${extra_config}
 EOF
-  # Append conditional config for the first [OUTPUT]
-  append_role_and_external_id
 
-   cat >> ./fluent-bit.conf << EOF
-[OUTPUT]
-    Name s3
-    Match ecsagent
-    region              ${S3_AWS_REGION}
-    upload_timeout      5m
-    store_dir_limit_size 2G
-    total_file_size 250M
-    retry_limit 20
-    use_put_object  On
-    compression gzip
-    bucket              ${S3_BUCKET_NAME}
-    s3_key_format /system/ecsagent/ecsagent
-EOF
-  # Append conditional config for the first [OUTPUT]
-  append_role_and_external_id
+  if [[ -n "${S3_AWS_ROLE_ARN}" && -n "${S3_AWS_EXTERNAL_ID}" ]]; then
+    echo "    role_arn            ${S3_AWS_ROLE_ARN}" >> ./fluent-bit.conf
+    echo "    external_id         ${S3_AWS_EXTERNAL_ID}" >> ./fluent-bit.conf
+  fi
+}
 
-   cat >> ./fluent-bit.conf << EOF
-[OUTPUT]
-    Name s3
-    Match registrationinfo
-    region              ${S3_AWS_REGION}
-    upload_timeout      2m
-    store_dir_limit_size 2G
-    total_file_size 250M
-    retry_limit 20
-    use_put_object  On
-    compression gzip
-    bucket              ${S3_BUCKET_NAME}
-    s3_key_format /system/registrationinfo/registrationinfo
-EOF
-  # Append conditional config for the first [OUTPUT]
-  append_role_and_external_id
+# Function to append Azure Blob OUTPUT block
+append_azure_blob_output_block() {
+  local match=$1
+  local path=$2
+  local container_name=${3:-system} # Default to 'system' if not provided
+  local extra_config=$4
 
-   cat >> ./fluent-bit.conf << EOF
+  cat >> ./fluent-bit.conf << EOF
 [OUTPUT]
-    Name s3
-    Match_Regex orgs**
-    region              ${S3_AWS_REGION}
-    upload_timeout      3s
-    use_put_object  On
-    store_dir_limit_size 2G
-    total_file_size 250M
-    auto_retry_requests true
-    retry_limit 20
-    compression gzip
-    bucket              ${S3_BUCKET_NAME}
-    s3_key_format /\$TAG/logs/log
+    Name azure_blob
+    Match ${match}
+    account_name ${STORAGE_ACCOUNT_NAME}
+    shared_key ${SHARED_KEY}
+    blob_type blockblob
+    path ${path}
+    container_name ${container_name}
+    auto_create_container on
+    tls on
+${extra_config}
 EOF
-  # Append conditional config for the first [OUTPUT]
-  append_role_and_external_id
+}
+
+# Main script starts here
+if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
+  append_common_service_and_input_blocks
+  append_s3_output_block "fluentbit" "15s" "/system/fluentbit/fluentbit" ""
+  append_s3_output_block "ecsagent" "5m" "/system/ecsagent/ecsagent" ""
+  append_s3_output_block "registrationinfo" "2m" "/system/registrationinfo/registrationinfo" ""
+  append_s3_output_block "orgs**" "3s" "/\$TAG/logs/log" "auto_retry_requests true"
+
+elif [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
+  append_common_service_and_input_blocks
+  # Adjust HC_Retry_Failure_Count only for Azure configuration
+  echo "HC_Retry_Failure_Count 5" >> ./fluent-bit.conf
+  
+  append_azure_blob_output_block "fluentbit" "fluentbit/log"
+  append_azure_blob_output_block "ecsagent" "ecsagent/log"
+  append_azure_blob_output_block "registrationinfo" "registrationinfo/log"
+  append_azure_blob_output_block "orgs**" "/\$TAG/logs/log" "runner" ""
 fi
 
 # # wrap the cat command in a conditional to avoid writing the file if the storage backend is if S3_AWS_ACCESS_KEY_ID and S3_AWS_SECRET_ACCESS_KEY are empty
