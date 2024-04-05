@@ -1008,8 +1008,8 @@ fetch_organization_info() { #{{{
   S3_AWS_REGION="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.awsRegion')"
   S3_AWS_ACCESS_KEY_ID="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].awsAccessKeyId')"
   S3_AWS_SECRET_ACCESS_KEY="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].awsSecretAccessKey')"
-  S3_AWS_ROLE_ARN="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].roleArn')" || "None"
-  S3_AWS_EXTERNAL_ID="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].externalId')" || "None"
+  S3_AWS_ROLE_ARN="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].roleArn')" || None
+  S3_AWS_EXTERNAL_ID="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.config[0].externalId')" || None
 
   if [[ "$STORAGE_BACKEND_TYPE" == "aws_s3" ]]; then
     for var in S3_BUCKET_NAME S3_AWS_REGION; do
