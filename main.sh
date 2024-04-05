@@ -777,8 +777,17 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
 EOF
 fi
 
-#Fluentbit configuration for aws_s3 output
+# Define a function to append role_arn and external_id if they are set
+append_role_and_external_id() {
+  if [[ -n "${S3_AWS_ROLE_ARN}" && -n "${S3_AWS_EXTERNAL_ID}" ]]; then
+    echo "    role_arn            ${S3_AWS_ROLE_ARN}" >> ./fluent-bit.conf
+    echo "    external_id         ${S3_AWS_EXTERNAL_ID}" >> ./fluent-bit.conf
+  fi
+}
+
+# Check if the storage backend type is aws_s3
 if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
+  # Start the fluent-bit configuration file
   cat > ./fluent-bit.conf << EOF
 [SERVICE]
     Flush         1
@@ -811,15 +820,13 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     path /var/log/registration/*.txt
     DB /var/log/flb_docker.db
     Mem_Buf_Limit 50MB
+EOF
 
+  cat >> ./fluent-bit.conf << EOF
 [OUTPUT]
     Name s3
     Match fluentbit
     region              ${S3_AWS_REGION}
-    {{#if (and S3_AWS_ROLE_ARN S3_AWS_EXTERNAL_ID)}}
-    role_arn            ${S3_AWS_ROLE_ARN}
-    external_id         ${S3_AWS_EXTERNAL_ID}
-    {{/if}}
     upload_timeout      15s
     store_dir_limit_size 2G
     total_file_size 250M
@@ -828,15 +835,15 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     compression gzip
     bucket              ${S3_BUCKET_NAME}
     s3_key_format /system/fluentbit/fluentbit
+EOF
+  # Append conditional config for the first [OUTPUT]
+  append_role_and_external_id
 
+   cat >> ./fluent-bit.conf << EOF
 [OUTPUT]
     Name s3
     Match ecsagent
     region              ${S3_AWS_REGION}
-    {{#if (and S3_AWS_ROLE_ARN S3_AWS_EXTERNAL_ID)}}
-    role_arn            ${S3_AWS_ROLE_ARN}
-    external_id         ${S3_AWS_EXTERNAL_ID}
-    {{/if}}
     upload_timeout      5m
     store_dir_limit_size 2G
     total_file_size 250M
@@ -845,15 +852,15 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     compression gzip
     bucket              ${S3_BUCKET_NAME}
     s3_key_format /system/ecsagent/ecsagent
+EOF
+  # Append conditional config for the first [OUTPUT]
+  append_role_and_external_id
 
+   cat >> ./fluent-bit.conf << EOF
 [OUTPUT]
     Name s3
     Match registrationinfo
     region              ${S3_AWS_REGION}
-    {{#if (and S3_AWS_ROLE_ARN S3_AWS_EXTERNAL_ID)}}
-    role_arn            ${S3_AWS_ROLE_ARN}
-    external_id         ${S3_AWS_EXTERNAL_ID}
-    {{/if}}
     upload_timeout      2m
     store_dir_limit_size 2G
     total_file_size 250M
@@ -862,15 +869,15 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     compression gzip
     bucket              ${S3_BUCKET_NAME}
     s3_key_format /system/registrationinfo/registrationinfo
+EOF
+  # Append conditional config for the first [OUTPUT]
+  append_role_and_external_id
 
+   cat >> ./fluent-bit.conf << EOF
 [OUTPUT]
     Name s3
     Match_Regex orgs**
     region              ${S3_AWS_REGION}
-    {{#if (and S3_AWS_ROLE_ARN S3_AWS_EXTERNAL_ID)}}
-    role_arn            ${S3_AWS_ROLE_ARN}
-    external_id         ${S3_AWS_EXTERNAL_ID}
-    {{/if}}
     upload_timeout      3s
     use_put_object  On
     store_dir_limit_size 2G
@@ -881,6 +888,9 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
     bucket              ${S3_BUCKET_NAME}
     s3_key_format /\$TAG/logs/log
 EOF
+  # Append conditional config for the first [OUTPUT]
+  append_role_and_external_id
+fi
 
 # # wrap the cat command in a conditional to avoid writing the file if the storage backend is if S3_AWS_ACCESS_KEY_ID and S3_AWS_SECRET_ACCESS_KEY are empty
 #   if [[ -n "${S3_AWS_ACCESS_KEY_ID}" && -n "${S3_AWS_SECRET_ACCESS_KEY}" ]]; then
