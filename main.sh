@@ -286,12 +286,12 @@ check_fluentbit_status() { #{{{
 
   # spinner_msg "Starting backend storage check" 0
 
-  timeout=20
+  timeout=30
   tries=0
 
-  until (( $(grep -ia -A2 "stream processor started" "$log_file" | wc -l) >= 2 )) || (( tries >= timeout )); do
-    info "Try #$((++tries))" # Increment tries and print the attempt number
-    sleep 1
+  until (( $(grep -ia -A2 "stream processor started" "$log_file" | wc -l) >= 2 )) && (( tries >= timeout )); do
+    info "Try #$((++tries))"
+    sleep 2
   done & spinner "$!" "Waiting for fluentbit logs"
 
   if (( tries < timeout )); then
@@ -300,8 +300,8 @@ check_fluentbit_status() { #{{{
     info "Timed out searchnig for stream processor to start in the logs file, perhaps there are lot of logs. Proceeding to check for errors anyway"
   fi
 
-  err_msg="$(grep -aiA4 -m1 -E "\[error.*" "$log_file" | tr -d "'\0")"
-
+  err_msg="$(grep -aiA4 -m1 -E "\[error.*" "$log_file" | tr -d '\0')"
+  echo err_msg: $err_msg
   # if [[ "$STORAGE_BACKEND_TYPE" == "aws_s3" ]]; then
   #   debug "Checking" "AWS S3" "errors"
   #   err_msg="$(grep -aioA4 -E "error='.*'|\[error.*" "$log_file" \
