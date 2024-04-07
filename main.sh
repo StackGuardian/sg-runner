@@ -302,6 +302,10 @@ check_fluentbit_status() { #{{{
 
   err_msg="$(grep -aiA4 -m1 -E "\[error.*" "$log_file" | tr -d '\0')"
   echo err_msg: $err_msg
+  sleep 5
+  
+  err_msg="$(grep -aiA4 -m1 -E "\[error.*" "$log_file" | tr -d '\0')"
+  echo err_msg: $err_msg
   # if [[ "$STORAGE_BACKEND_TYPE" == "aws_s3" ]]; then
   #   debug "Checking" "AWS S3" "errors"
   #   err_msg="$(grep -aioA4 -E "error='.*'|\[error.*" "$log_file" \
