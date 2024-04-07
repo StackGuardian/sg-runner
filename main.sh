@@ -290,7 +290,7 @@ check_fluentbit_status() { #{{{
   tries=0
 
   until (( $(grep -ia -A2 "stream processor started" "$log_file" | wc -l) >= 2 )) || (( tries >= timeout )); do
-    info "Try #$((++tries))"
+    info "Try #$((++tries)): No stream processor started message found."
     sleep 2
   done & spinner "$!" "Waiting for fluentbit logs"
 
@@ -300,22 +300,17 @@ check_fluentbit_status() { #{{{
     info "Timed out searchnig for stream processor to start in the logs file, perhaps there are lot of logs. Proceeding to check for errors anyway"
   fi
 
-  err_msg="$(grep -aiA4 -m1 -E "\[error.*" "$log_file" | tr -d '\0')"
-  echo err_msg: $err_msg
-  sleep 20
-  
-  err_msg="$(grep -aiA4 -m1 -E "\[error.*" "$log_file" | tr -d '\0')"
-  echo err_msg: $err_msg
-  # if [[ "$STORAGE_BACKEND_TYPE" == "aws_s3" ]]; then
-  #   debug "Checking" "AWS S3" "errors"
-  #   err_msg="$(grep -aioA4 -E "error='.*'|\[error.*" "$log_file" \
-  #     | grep -io -m1 -E "message='.*'" \
-  #     | grep -io -E "'.*'" | tr -d "'\0")"
-  # elif [[ "$STORAGE_BACKEND_TYPE" == "azure_blob_storage" ]]; then
-  #   debug "Checking" "Azure Blob" "errors"
-  #   err_msg="$(grep -aioA4 -m1 -E "\[error.*" "$log_file" \
-  #     | cut -d" " -f3- | tr -d '\0')"
-  # fi
+  tries=0
+  # Loop to check for errors
+  until err_msg="$(grep -iaA4 -m1 -E "\[error.*" "$log_file" | tr -d '\0')" || (( tries >= timeout )); do
+    if [[ -z "$err_msg" ]]; then
+      info "Try #$((++tries)): No error messages found."
+      sleep 2
+    else
+      # Exit the loop if an error message is found
+      break
+    fi
+  done & spinner "$!" "Checking for errors in Fluentbit logs..."
 
   if [[ -n "$err_msg" ]]; then
     if ignore_fluentbit_errors; then
