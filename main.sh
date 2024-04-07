@@ -297,7 +297,7 @@ check_fluentbit_status() { #{{{
   if (( tries < timeout )); then
     echo "Fluentbit stream processor started successfully, checking for errors"
   else
-    echo "Timed out waiting for stream processor to start"
+    echo "Timed out searchnig for stream processor to start in the logs file, perhaps there are lot of logs. Proceeding to check for errors anyway"
   fi & spinner "$!" "Waiting for fluentbit logs"
 
   err_msg="$(grep -aiA4 -m1 -E "\[error.*" "$log_file")"
