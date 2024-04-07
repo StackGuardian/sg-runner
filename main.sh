@@ -311,8 +311,8 @@ check_fluentbit_status() { #{{{
       err "Fluentbit encountered error(s)" "$err_msg"
       if ! no_clean_on_fail; then
         clean_local_setup & spinner "$!" "Starting cleanup"
-        info "Use --no-clean-on-fail to not clean up after Fluentbit errors are encountered" & spinner "$!" "Cleanup not performed"
-      fi
+        info "Use --no-clean-on-fail to not clean up after Fluentbit errors are encountered"
+      fi & spinner "$!" "Handling cleanup"
       info "Use --ignore-fluentbit-errors to ignore errors and proceed with the registration process"
       exit 1
     fi & spinner "$!" "Handling Fluentbit errors"
@@ -1450,8 +1450,8 @@ main() { #{{{
       fi
     elif [[ "$(grep "^GRUB_CMDLINE_LINUX=\".*systemd.unified_cgroup_hierarchy=0\"" /etc/default/grub)" == "" ]]; then
       err "Private runner does not support" "cgroupsv2"
-      cmd_example "Exec" "./main.sh cgroupsv2 disable" "to switch to cgroupsv1"
-      exit 1
+      info "Private runner is running on" "cgroupsv2"
+      cmd_example "Exec" "./main.sh cgroupsv2 disable" "to switch to cgroupsv1 (deprecated)"
     fi
   fi
 
