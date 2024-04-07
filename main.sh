@@ -1455,7 +1455,7 @@ main() { #{{{
     exit 1
   fi
 
-  info "Installing the Runner on" "$(cat /etc/*release | grep -oP '(?<=PRETTY_NAME=").*?(?=")')"
+  info "Installing the runner on" "$(cat /etc/*release | grep -oP '(?<=PRETTY_NAME=").*?(?=")')"
 
   if [[ -e /sys/fs/cgroup/cgroup.controllers ]]; then
     if [[ "$1" == "cgroupsv2" && "$2" =~ enable|disable ]]; then
