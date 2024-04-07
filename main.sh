@@ -289,7 +289,7 @@ check_fluentbit_status() { #{{{
   timeout=30
   tries=0
 
-  until (( $(grep -ia -A2 "stream processor started" "$log_file" | wc -l) >= 2 )) && (( tries >= timeout )); do
+  until (( $(grep -ia -A2 "stream processor started" "$log_file" | wc -l) >= 2 )) || (( tries >= timeout )); do
     info "Try #$((++tries))"
     sleep 2
   done & spinner "$!" "Waiting for fluentbit logs"
