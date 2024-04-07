@@ -800,10 +800,7 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
   append_s3_output_block "orgs**" "3s" "/\$TAG/logs/log"
 
 elif [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
-  append_common_service_and_input_blocks
-  # Adjust HC_Retry_Failure_Count only for Azure configuration
-  echo "HC_Retry_Failure_Count 5" >> ./fluent-bit.conf
-  
+  append_common_service_and_input_blocks  
   append_azure_blob_output_block "fluentbit" "fluentbit/log"
   append_azure_blob_output_block "ecsagent" "ecsagent/log"
   append_azure_blob_output_block "registrationinfo" "registrationinfo/log"
