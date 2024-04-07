@@ -288,6 +288,7 @@ check_fluentbit_status() { #{{{
 
   timeout=30
   tries=0
+
   until (( $(grep -ia -A2 "stream processor started" "$log_file" | wc -l) >= 2 )) || (( tries >= timeout )); do
     info "Try #$((++tries)): No stream processor started message found."
     sleep 2
@@ -300,12 +301,19 @@ check_fluentbit_status() { #{{{
   fi
 
   tries=0
-  until $(grep -iaA4 -m1 -E "\[error.*" "$log_file" | tr -d '\0') || (( tries >= timeout )); do
-    info "Try #$((++tries)): No error messages found."
-    sleep 2
-  done & spinner "$!" "Checking for errors in Fluentbit logs"
 
-  err_msg="$(grep -iaA4 -m1 -E "\[error.*" "$log_file" | tr -d '\0')"
+  until (( found_error != 0 )) || (( tries >= timeout )); do
+    err_msg="$(grep -iaA4 -m1 -E "\[error.*" "$log_file" | tr -d '\0')"
+    if [[ -z "$err_msg" ]]; then
+      info "Try #$((++tries)): No error messages found."
+      sleep 2
+    else
+      info "Error messages found."
+      found_error=1 
+      # Exit the loop if an error message is found
+      break
+    fi
+  done & spinner "$!" "Checking for errors in Fluentbit logs"
 
   if [[ -n "$err_msg" ]]; then
     if ignore_fluentbit_errors; then
