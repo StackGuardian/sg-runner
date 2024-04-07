@@ -287,9 +287,19 @@ check_fluentbit_status() { #{{{
 
   # spinner_msg "Starting backend storage check" 0
 
-  # until (( $(grep -ia -A2 "stream processor started" "$log_file" | wc -l)>=2 )); do
-  #   sleep 1
-  # done & spinner "$!" "Waiting for fluentbit logs"
+  timeout=20
+  tries=0
+
+  until (( $(grep -ia -A2 "stream processor started" "$log_file" | wc -l) >= 2 )) || (( tries >= timeout )); do
+    echo "Try #$((++tries))" # Increment tries and print the attempt number
+    sleep 1
+  done
+
+  if (( tries < timeout )); then
+    echo "Fluentbit stream processor started successfully, checking for errors"
+  else
+    echo "Timed out waiting for stream processor to start"
+  fi & spinner "$!" "Waiting for fluentbit logs"
 
   err_msg="$(grep -aiA4 -m1 -E "\[error.*" "$log_file")"
 
@@ -306,7 +316,7 @@ check_fluentbit_status() { #{{{
 
   if [[ -n "$err_msg" ]]; then
     if ignore_fluentbit_errors; then
-      info "Ignoring: Fluentbit encountered error(s)" "$err_msg"
+      info "Ignoring Fluentbit error(s)" "$err_msg"
     else
       err "Fluentbit encountered error(s)" "$err_msg"
       if ! no_clean_on_fail; then
@@ -658,6 +668,95 @@ check_variable_value() { #{{{
 }
 #}}}
 
+# Define a function to append common SERVICE and INPUT blocks
+append_common_service_and_input_blocks() {
+  cat > ./fluent-bit.conf << EOF
+[SERVICE]
+    Flush         1
+    Log_Level     info
+    Buffer_Chunk_size 1M
+    Buffer_Max_Size 6M
+    HTTP_Server On
+    HTTP_Listen 0.0.0.0
+    HTTP_PORT 2020
+    Health_Check On
+    HC_Errors_Count 5
+    HC_Retry_Failure_Count 5
+    HC_Period 5
+
+[INPUT]
+    Name forward
+    Listen 0.0.0.0
+    port 24224
+
+[INPUT]
+    Name tail
+    Tag ecsagent
+    path /var/lib/docker/containers/*/*-json.log
+    DB /var/log/flb_docker.db
+    Mem_Buf_Limit 50MB
+
+[INPUT]
+    Name tail
+    Tag registrationinfo
+    path /var/log/registration/*.txt
+    DB /var/log/flb_docker.db
+    Mem_Buf_Limit 50MB
+EOF
+}
+
+# Function to append Azure Blob OUTPUT block in fluent-bit.conf
+append_s3_output_block() {
+  local match=$1
+  local upload_timeout=$2
+  local s3_key_format=$3
+  local extra_config=$4 # Additional config if needed
+
+  cat >> ./fluent-bit.conf << EOF
+
+[OUTPUT]
+    Name s3
+    Match ${match}
+    region ${S3_AWS_REGION}
+    upload_timeout ${upload_timeout}
+    store_dir_limit_size 2G
+    total_file_size 250M
+    retry_limit 20
+    use_put_object On
+    compression gzip
+    bucket ${S3_BUCKET_NAME}
+    s3_key_format ${s3_key_format}
+EOF
+
+  if [[ -n "${S3_AWS_ROLE_ARN}" && -n "${S3_AWS_EXTERNAL_ID}" ]]; then
+    echo "    role_arn            ${S3_AWS_ROLE_ARN}" >> ./fluent-bit.conf
+    echo "    external_id         ${S3_AWS_EXTERNAL_ID}" >> ./fluent-bit.conf
+  fi
+}
+#}}}: append_s3_output_block
+
+# Function to append Azure Blob OUTPUT block in fluent-bit.conf
+append_azure_blob_output_block() {
+  local match=$1
+  local path=$2
+  local container_name=${3:-system} # Default to 'system' if not provided
+
+  cat >> ./fluent-bit.conf << EOF
+
+[OUTPUT]
+    Name azure_blob
+    Match ${match}
+    account_name ${STORAGE_ACCOUNT_NAME}
+    shared_key ${SHARED_KEY}
+    blob_type blockblob
+    path ${path}
+    container_name ${container_name}
+    auto_create_container on
+    tls on
+EOF
+}
+#}}}: append_azure_blob_output_block
+
 #}}}: Other
 
 #{{{ Local configuration
@@ -720,94 +819,7 @@ ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true
 ECS_EXTERNAL=true
 EOF
 
-# Define a function to append common SERVICE and INPUT blocks
-append_common_service_and_input_blocks() {
-  cat > ./fluent-bit.conf << EOF
-[SERVICE]
-    Flush         1
-    Log_Level     info
-    Buffer_Chunk_size 1M
-    Buffer_Max_Size 6M
-    HTTP_Server On
-    HTTP_Listen 0.0.0.0
-    HTTP_PORT 2020
-    Health_Check On
-    HC_Errors_Count 5
-    HC_Retry_Failure_Count 5
-    HC_Period 5
-
-[INPUT]
-    Name forward
-    Listen 0.0.0.0
-    port 24224
-
-[INPUT]
-    Name tail
-    Tag ecsagent
-    path /var/lib/docker/containers/*/*-json.log
-    DB /var/log/flb_docker.db
-    Mem_Buf_Limit 50MB
-
-[INPUT]
-    Name tail
-    Tag registrationinfo
-    path /var/log/registration/*.txt
-    DB /var/log/flb_docker.db
-    Mem_Buf_Limit 50MB
-EOF
-}
-
-# Function to append S3 OUTPUT block with conditional role_arn and external_id
-append_s3_output_block() {
-  local match=$1
-  local upload_timeout=$2
-  local s3_key_format=$3
-  local extra_config=$4 # Additional config if needed
-
-  cat >> ./fluent-bit.conf << EOF
-
-[OUTPUT]
-    Name s3
-    Match ${match}
-    region ${S3_AWS_REGION}
-    upload_timeout ${upload_timeout}
-    store_dir_limit_size 2G
-    total_file_size 250M
-    retry_limit 20
-    use_put_object On
-    compression gzip
-    bucket ${S3_BUCKET_NAME}
-    s3_key_format ${s3_key_format}
-EOF
-
-  if [[ -n "${S3_AWS_ROLE_ARN}" && -n "${S3_AWS_EXTERNAL_ID}" ]]; then
-    echo "    role_arn            ${S3_AWS_ROLE_ARN}" >> ./fluent-bit.conf
-    echo "    external_id         ${S3_AWS_EXTERNAL_ID}" >> ./fluent-bit.conf
-  fi
-}
-
-# Function to append Azure Blob OUTPUT block
-append_azure_blob_output_block() {
-  local match=$1
-  local path=$2
-  local container_name=${3:-system} # Default to 'system' if not provided
-
-  cat >> ./fluent-bit.conf << EOF
-
-[OUTPUT]
-    Name azure_blob
-    Match ${match}
-    account_name ${STORAGE_ACCOUNT_NAME}
-    shared_key ${SHARED_KEY}
-    blob_type blockblob
-    path ${path}
-    container_name ${container_name}
-    auto_create_container on
-    tls on
-EOF
-}
-
-# Main script starts here
+# Configure Fluentbit configuration inside /etc/fluentbit/fluent-bit.conf
 if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
   append_common_service_and_input_blocks
   append_s3_output_block "fluentbit" "15s" "/system/fluentbit/fluentbit"
