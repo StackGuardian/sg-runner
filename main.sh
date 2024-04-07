@@ -1455,6 +1455,8 @@ main() { #{{{
     exit 1
   fi
 
+  info "Installing the Runner on" "$(cat /etc/*release | grep -oP '(?<=PRETTY_NAME=").*?(?=")')"
+
   if [[ -e /sys/fs/cgroup/cgroup.controllers ]]; then
     if [[ "$1" == "cgroupsv2" && "$2" =~ enable|disable ]]; then
       if [[ "$CGROUPSV2_PREVIEW" != true ]]; then
@@ -1478,10 +1480,10 @@ main() { #{{{
   done
   (( ${#cmds[@]}>0 )) && \
     err "Commands" "${cmds[*]}" "not installed" && exit 1
-
+  
   for container_orchestrator in "${CONTAINER_ORCHESTRATORS[@]}"; do
     if check_container_orchestrator "$container_orchestrator"; then
-      info "Default container orchesrator:" "$container_orchestrator"
+      info "Default container orchesrator" "$container_orchestrator"
       if [[ "$container_orchestrator" == "podman" ]]; then
         info "Container orchestartor not supported. Aborting.."
         exit 0
