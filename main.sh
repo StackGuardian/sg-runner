@@ -327,7 +327,9 @@ check_fluentbit_status() { #{{{
       err "Fluentbit encountered error(s)" "$err_msg"
       if ! no_clean_on_fail; then
         clean_local_setup & spinner "$!" "Starting cleanup"
-        info "Use --no-clean-on-fail to not clean up after Fluentbit errors are encountered"
+        info "Use --no-clean-on-fail to not clean up after Fluentbit errors are encountered for debugging issues"
+      else
+        info "If retrying a new registration, do not use --no-clean-on-fail as it leaves the system in an inconsistent state only useful for debugging purposes"
       fi
       info "Use --ignore-fluentbit-errors to ignore errors and proceed with the registration process"
       exit 1
@@ -970,8 +972,13 @@ fetch_organization_info() { #{{{
     for var in S3_BUCKET_NAME S3_AWS_REGION; do
       check_variable_value "$var"
     done
-    if [[ -z "${S3_AWS_ACCESS_KEY_ID}" || -z "${S3_AWS_SECRET_ACCESS_KEY}" ]]; then
-      info "No AWS access keys provided for S3 Storage Backend in the runner confguration, using the instance profile, if atatched to this intance."
+    if [[ -n "${S3_AWS_ACCESS_KEY_ID}" || -n "${S3_AWS_SECRET_ACCESS_KEY}" ]]; then
+      info "No AWS access keys provided for S3 Storage Backend in the runner confguration"
+    else [[ -n "${S3_AWS_ROLE_ARN}" || -n "${S3_AWS_EXTERNAL_ID}" ]]; then
+      info "Auth for storage backend is not correctly configured"
+    else
+      err "Auth for storage backend is not correctly configured"
+      exit 1
     fi
   elif [[ "$STORAGE_BACKEND_TYPE" == "azure_blob_storage" ]]; then
     for var in SHARED_KEY STORAGE_ACCOUNT_NAME; do
