@@ -305,15 +305,20 @@ check_fluentbit_status() { #{{{
   # fi
 
   if [[ -n "$err_msg" ]]; then
-    err "Fluentbit is encountering errors" "$err_msg"
-    info "Use --no-clean to not clean up after Fluentbit errors are encountered"
-    info "Use --ignore-fluentbit-erros to ignore and proceed with the registration anyway" & spinner "$!" "Starting cleanup"
-    # TODO: cleanup on-demand or proceed anyway
-    # clean_local_setup 
-    exit 1
+    if ignore_fluentbit_errors; then
+      info "Ignoring: Fluentbit encountered error(s)" "$err_msg"
+    else
+      err "Fluentbit encountered error(s)" "$err_msg"
+      if ! no_clean_on_fail; then
+        clean_local_setup & spinner "$!" "Starting cleanup"
+        info "Use --no-clean-on-fail to not clean up after Fluentbit errors are encountered" & spinner "$!" "Cleanup not performed"
+      fi
+      info "Use --ignore-fluentbit-errors to ignore errors and proceed with the registration process"
+      exit 1
+    fi & spinner "$!" "Handling Fluentbit errors"
+  else
+    info "Storage backend status:" "healthy"
   fi
-
-  info "Storage backend status:" "healthy"
 }
 #}}}: check_fluentbit_status
 
@@ -570,6 +575,18 @@ force_exec() { #{{{
   return 1
 }
 #}}}: force_exec
+
+no_clean_on_fail() { #{{{
+  [[ "$NO_CLEAN_ON_FAIL" == true ]] && return 0
+  return 1
+}
+#}}}: no_clean_on_fail
+
+ignore_fluentbit_errors() { #{{{
+  [[ "$IGNORE_FLUENTBIT_ERRORS" == true ]] && return 0
+  return 1
+}
+#}}}: ignore_fluentbit_errors
 
 spinner() { #{{{
     local spinner_pid=$1
@@ -1380,6 +1397,14 @@ parse_arguments() { #{{{
       ;;
     -f | --force)
       FORCE_PASS=true
+      shift
+      ;;
+    -f | --no-clean-on-fail)
+      NO_CLEAN_ON_FAIL=true
+      shift
+      ;;
+    -f | --ignore-fluentbit-errors)
+      IGNORE_FLUENTBIT_ERRORS=true
       shift
       ;;
     --debug)
