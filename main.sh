@@ -229,7 +229,7 @@ print_details() { #{{{
   # TODO: Fix Organization and Runner ID dont printing correctly when registration is run on an already registered runner
   details_frame "Registration Details"
   details_item "Registration Date" "$(date +'%Y-%m-%d %H:%M:%S (GMT%z)')"
-  details_item "Organization" "${ORGANIZATION_NAME}"
+  details_item "Organization" "${ORGANIZATION_ID}"
   details_item "Runner Group" "${RUNNER_GROUP_ID}"
   details_item "Runner ID" "${RUNNER_ID}"
   echo
