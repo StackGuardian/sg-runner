@@ -322,14 +322,14 @@ check_fluentbit_status() { #{{{
 
   if [[ -n "$err_msg" ]]; then
     if ignore_fluentbit_errors; then
-      info "Ignoring Fluentbit error(s)" "$err_msg"
+      info "Ignoring Fluentbit error(s)\n$err_msg"
     else
-      err "Fluentbit encountered error(s)" "$err_msg"
+      err "Fluentbit encountered error(s)\n" "$err_msg"
       if ! no_clean_on_fail; then
         clean_local_setup & spinner "$!" "Starting cleanup"
         info "Use --no-clean-on-fail to not clean up after Fluentbit errors are encountered for debugging issues"
       else
-        info "WARNING" "If retrying a new registration, do not use --no-clean-on-fail as it leaves the system in an inconsistent state only useful for debugging purposes"
+        info "WARNING:" "If retrying a new registration, do not use --no-clean-on-fail as it leaves the system in an inconsistent state only useful for debugging purposes"
       fi
       info "Use --ignore-fluentbit-errors to ignore errors and proceed with the registration process"
       exit 1
