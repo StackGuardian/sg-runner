@@ -116,7 +116,6 @@ log_date() { #{{{
 
 err() { #{{{
   printf "%s ${C_RED_BOLD}ERROR: ${C_RESET}%s${C_BOLD} %s${C_RESET} %s\n" "$(log_date)" "${1}" "${2}" "${@:3}" >&2
-  printf "Use --debug for detailed logs" >&2
 }
 #}}}: err
 
@@ -233,7 +232,6 @@ details_item() { #{{{
 
 print_details() { #{{{
   echo
-  # TODO: Fix Organization and Runner ID dont printing correctly when registration is run on an already registered runner
   details_frame "Registration Details"
   # details_item "Registration Date" "$(date +'%Y-%m-%d %H:%M:%S (GMT%z)')"
   details_item "Organization" "${ORGANIZATION_ID}"
@@ -1160,7 +1158,7 @@ register_instance() { #{{{
     fi
     sleep 5
     # TODO: Resolve grep: /var/lib/docker/containers/cffefe/cffefe-json.log: No such file or directory
-    full_err_msg=$(grep -ioa -m1 -P '(?<=\[error\] logger=structured ).*?(?=status code)' "$log_path")
+    full_err_msg=$(grep -ioa -m1 -P '(?<=\[error\] logger=structured ).*?(?=status code)' "$log_path" 2>/dev/null)
     if [[ -n "$full_err_msg" ]]; then
       debug "Full Error:" "$full_err_msg"
       err=$(echo "$full_err_msg" | grep -io -P '(?<=msg=\\\").*?(?=\\\")')
