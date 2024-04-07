@@ -316,7 +316,7 @@ check_fluentbit_status() { #{{{
       found_error=1 
       break
     fi
-  done & spinner "$!" "Checking for errors in Fluentbit logs"
+  done & spinner "$!" "Checking for any errors in Fluentbit logs"
 
   err_msg="$(grep -iaA4 -m1 -E "\[error.*" "$log_file" | tr -d '\0')"
 
