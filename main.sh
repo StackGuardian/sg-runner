@@ -1521,7 +1521,7 @@ main() { #{{{
 
   if [ -n "$attached_iam_role" ]; then
     debug "Response:" "$attached_iam_role"
-    info "Found an IAM role attached to the instance: $attached_iam_role"
+    info "Found an IAM role attached to the instance" "$attached_iam_role"
   fi
 
   case "${1}" in
