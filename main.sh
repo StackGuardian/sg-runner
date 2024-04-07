@@ -997,6 +997,8 @@ fetch_organization_info() { #{{{
   debug_variable "S3_AWS_REGION"
   debug_variable "S3_AWS_ACCESS_KEY_ID"
   debug_secret "S3_AWS_SECRET_ACCESS_KEY"
+  debug_variable "S3_AWS_ROLE_ARN"
+  debug_secret "S3_AWS_EXTERNAL_ID"
 }
 #}}}: fetch_organization_info
 
