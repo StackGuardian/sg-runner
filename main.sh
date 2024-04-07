@@ -774,9 +774,9 @@ append_azure_blob_output_block() {
   local match=$1
   local path=$2
   local container_name=${3:-system} # Default to 'system' if not provided
-  local extra_config=$4
 
   cat >> ./fluent-bit.conf << EOF
+
 [OUTPUT]
     Name azure_blob
     Match ${match}
@@ -787,7 +787,6 @@ append_azure_blob_output_block() {
     container_name ${container_name}
     auto_create_container on
     tls on
-${extra_config}
 EOF
 }
 
@@ -804,7 +803,7 @@ elif [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
   append_azure_blob_output_block "fluentbit" "fluentbit/log"
   append_azure_blob_output_block "ecsagent" "ecsagent/log"
   append_azure_blob_output_block "registrationinfo" "registrationinfo/log"
-  append_azure_blob_output_block "orgs**" "/\$TAG/logs/log" "runner" ""
+  append_azure_blob_output_block "orgs**" "/\$TAG/logs/log" "runner"
 fi
 
   spinner_msg "Configuring local data" 0
