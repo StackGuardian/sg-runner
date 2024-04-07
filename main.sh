@@ -110,6 +110,7 @@ log_date() { #{{{
 
 err() { #{{{
   printf "%s ${C_RED_BOLD}ERROR: ${C_RESET}%s${C_BOLD} %s${C_RESET} %s\n" "$(log_date)" "${1}" "${2}" "${@:3}" >&2
+  printf "Use --debug for detailed logs" >&2
 }
 #}}}: err
 
