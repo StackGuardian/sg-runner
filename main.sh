@@ -1039,13 +1039,13 @@ configure_fluentbit() { #{{{
         /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf"
       $docker_run_command $extra_options >> "$LOG_FILE" 2>&1
     fi
-    else
-      if [[ -z "${running}" ]]; then
-        $CONTAINER_ORCHESTRATOR start fluentbit-agent >&/dev/null
-    fi
   else
-    NO_CLEAN_ON_FAIL=true
-    IGNORE_FLUENTBIT_ERRORS=true
+    if [[ -z "${running}" ]]; then
+      $CONTAINER_ORCHESTRATOR start fluentbit-agent >&/dev/null
+    else
+      NO_CLEAN_ON_FAIL=true
+      IGNORE_FLUENTBIT_ERRORS=true
+    fi
   fi
   spinner_msg "Starting fluentbit agent" 0
   check_fluentbit_status
