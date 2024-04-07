@@ -973,11 +973,11 @@ fetch_organization_info() { #{{{
       check_variable_value "$var"
     done
     if [[ -n "${S3_AWS_ACCESS_KEY_ID}" || -n "${S3_AWS_SECRET_ACCESS_KEY}" ]]; then
-      info "No AWS access keys provided for S3 Storage Backend in the runner confguration"
-    else [[ -n "${S3_AWS_ROLE_ARN}" || -n "${S3_AWS_EXTERNAL_ID}" ]]; then
-      info "Auth for storage backend is not correctly configured"
+      info "AWS staic credentials are used for S3 Storage Backend auth"
+    elif [[ -n "${S3_AWS_ROLE_ARN}" || -n "${S3_AWS_EXTERNAL_ID}" ]]; then
+      info "AWS role is used for S3 Storage Backend auth" "$S3_AWS_ROLE_ARN"
     else
-      err "Auth for storage backend is not correctly configured"
+      err "Auth for storage backend is not correctly configured, neither AWS_STATIC nor AWS_RBAC integration is provided"
       exit 1
     fi
   elif [[ "$STORAGE_BACKEND_TYPE" == "azure_blob_storage" ]]; then
