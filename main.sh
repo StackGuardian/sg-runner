@@ -1057,9 +1057,6 @@ configure_fluentbit() { #{{{
   else
     if [[ -z "${running}" ]]; then
       $CONTAINER_ORCHESTRATOR start fluentbit-agent >&/dev/null
-    else
-      NO_CLEAN_ON_FAIL=true
-      IGNORE_FLUENTBIT_ERRORS=true
     fi
   fi
   spinner_msg "Starting fluentbit agent" 0
@@ -1094,6 +1091,9 @@ register_instance() { #{{{
   if [[ -n "${container_id}" && "$container_health" == "healthy" ]]; then
     debug "Instance ecs-agent health:" "${container_health}"
     info "Instance agent already registered and running."
+    # Setting the following variables to avoid cleanup or raise errors from fluentbit error if it has been running for a while. As these erros could be intermittent.
+    NO_CLEAN_ON_FAIL=true
+    IGNORE_FLUENTBIT_ERRORS=true
     configure_fluentbit
     configure_local_network
     print_details
