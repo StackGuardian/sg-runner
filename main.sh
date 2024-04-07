@@ -302,7 +302,7 @@ check_fluentbit_status() { #{{{
 
   err_msg="$(grep -aiA4 -m1 -E "\[error.*" "$log_file" | tr -d '\0')"
   echo err_msg: $err_msg
-  sleep 5
+  sleep 20
   
   err_msg="$(grep -aiA4 -m1 -E "\[error.*" "$log_file" | tr -d '\0')"
   echo err_msg: $err_msg
