@@ -183,7 +183,7 @@ cmd_example() { #{{{
 exit_help() { #{{{
   exit_code=$?
   (( exit_code!=0 )) && \
-    printf "\n(Try ${C_BOLD}%s --help${C_RESET} for more information.)\n" "$(basename "${0}")"
+    printf "\n(Try ${C_BOLD}%s --help${C_RESET} for more information. Use --debug for verbose logs.)\n" "$(basename "${0}")"
 }
 #}}}: exit_help
 
@@ -274,7 +274,6 @@ print_details() { #{{{
 #######################################
 check_fluentbit_status() { #{{{
   spinner_wait "Starting backend storage check.."
-  # TODO: Verify funationality, did not raise error when role_arn was not correctly set and fluentbit was not able to write to S3
   local container_id
   local log_file
 
@@ -1027,7 +1026,7 @@ configure_fluentbit() { #{{{
   fi
 
   spinner_wait "Configuring fluentbit agent for workflow log collection.."
-  # TODO: --network host, use-case
+  # TODO: Identify --network host use-case
   docker_run_command="$CONTAINER_ORCHESTRATOR run -d \
       --name fluentbit-agent \
       --restart=always \
@@ -1157,7 +1156,6 @@ register_instance() { #{{{
       continue
     fi
     sleep 5
-    # TODO: Resolve grep: /var/lib/docker/containers/cffefe/cffefe-json.log: No such file or directory
     full_err_msg=$(grep -ioa -m1 -P '(?<=\[error\] logger=structured ).*?(?=status code)' "$log_path" 2>/dev/null)
     if [[ -n "$full_err_msg" ]]; then
       debug "Full Error:" "$full_err_msg"
