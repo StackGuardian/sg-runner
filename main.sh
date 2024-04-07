@@ -307,10 +307,11 @@ check_fluentbit_status() { #{{{
       info "Try #$((++tries)): No error messages found."
       sleep 2
     else
+      info "Error messages found."
       # Exit the loop if an error message is found
       break
     fi
-  done & spinner "$!" "Checking for errors in Fluentbit logs..."
+  done & spinner "$!" "Checking for errors in Fluentbit logs"
 
   if [[ -n "$err_msg" ]]; then
     if ignore_fluentbit_errors; then
