@@ -300,7 +300,7 @@ check_fluentbit_status() { #{{{
     echo "Timed out searchnig for stream processor to start in the logs file, perhaps there are lot of logs. Proceeding to check for errors anyway"
   fi & spinner "$!" "Waiting for fluentbit logs"
 
-  err_msg="$(grep -aiA4 -m1 -E "\[error.*" "$log_file")"
+  err_msg="$(grep -aiA4 -m1 -E "\[error.*" "$log_file" | tr -d "'\0")"
 
   # if [[ "$STORAGE_BACKEND_TYPE" == "aws_s3" ]]; then
   #   debug "Checking" "AWS S3" "errors"
