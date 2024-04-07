@@ -739,7 +739,7 @@ EOF
 
   if [[ -n "${S3_AWS_ROLE_ARN}" && -n "${S3_AWS_EXTERNAL_ID}" ]]; then
     echo "    role_arn ${S3_AWS_ROLE_ARN}" >> ./fluent-bit.conf
-    echo "    external_id {S3_AWS_EXTERNAL_ID}" >> ./fluent-bit.conf
+    echo "    external_id ${S3_AWS_EXTERNAL_ID}" >> ./fluent-bit.conf
   fi
 }
 #}}}: append_s3_output_block
