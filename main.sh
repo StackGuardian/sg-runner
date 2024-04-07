@@ -285,25 +285,30 @@ check_fluentbit_status() { #{{{
   done
   debug "Fluentbit log file:" "$log_file"
 
-  spinner_msg "Starting backend storage check" 0
+  # spinner_msg "Starting backend storage check" 0
 
-  until (( $(grep -ia -A2 "stream processor started" "$log_file" | wc -l)>=2 )); do
-    sleep 1
-  done & spinner "$!" "Waiting for fluentbit logs"
+  # until (( $(grep -ia -A2 "stream processor started" "$log_file" | wc -l)>=2 )); do
+  #   sleep 1
+  # done & spinner "$!" "Waiting for fluentbit logs"
 
-  if [[ "$STORAGE_BACKEND_TYPE" == "aws_s3" ]]; then
-    debug "Checking" "AWS S3" "errors"
-    err_msg="$(grep -aio -E "error='.*'" "$log_file" \
-      | grep -io -m1 -E "message='.*'" \
-      | grep -io -E "'.*'" | tr -d "'\0")"
-  elif [[ "$STORAGE_BACKEND_TYPE" == "azure_blob_storage" ]]; then
-    debug "Checking" "Azure Blob" "errors"
-    err_msg="$(grep -aio -m1 -E "\[error.*" "$log_file" \
-      | cut -d" " -f3- | tr -d '\0')"
-  fi
+  err_msg="$(grep -aiA4 -m1 -E "\[error.*" "$log_file")"
+
+  # if [[ "$STORAGE_BACKEND_TYPE" == "aws_s3" ]]; then
+  #   debug "Checking" "AWS S3" "errors"
+  #   err_msg="$(grep -aioA4 -E "error='.*'|\[error.*" "$log_file" \
+  #     | grep -io -m1 -E "message='.*'" \
+  #     | grep -io -E "'.*'" | tr -d "'\0")"
+  # elif [[ "$STORAGE_BACKEND_TYPE" == "azure_blob_storage" ]]; then
+  #   debug "Checking" "Azure Blob" "errors"
+  #   err_msg="$(grep -aioA4 -m1 -E "\[error.*" "$log_file" \
+  #     | cut -d" " -f3- | tr -d '\0')"
+  # fi
 
   if [[ -n "$err_msg" ]]; then
-    err "Fluentbit failed to start:" "$err_msg"
+    err "Fluentbit is encountering errors" "$err_msg"
+    info "Use --no-clean to not clean up after Fluentbit errors are encountered"
+    info "Use --ignore-fluentbit-erros to ignore and proceed with the registration anyway"
+    # TODO: cleanup on-demand or proceed anyway
     clean_local_setup & spinner "$!" "Starting cleanup"
     exit 1
   fi
@@ -698,13 +703,6 @@ ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true
 ECS_EXTERNAL=true
 EOF
 
-info "S3_AWS_ROLE_ARN" "${S3_AWS_ROLE_ARN}"
-info "S3_AWS_EXTERNAL_ID" "${S3_AWS_EXTERNAL_ID}"
-if [[ -n "${S3_AWS_ROLE_ARN}" && -n "${S3_AWS_EXTERNAL_ID}" ]]; then
-    echo "    role_arn            ${S3_AWS_ROLE_ARN}"
-    echo "    external_id         ${S3_AWS_EXTERNAL_ID}"
-  fi
-
 # Define a function to append common SERVICE and INPUT blocks
 append_common_service_and_input_blocks() {
   cat > ./fluent-bit.conf << EOF
@@ -750,6 +748,7 @@ append_s3_output_block() {
   local extra_config=$4 # Additional config if needed
 
   cat >> ./fluent-bit.conf << EOF
+
 [OUTPUT]
     Name s3
     Match ${match}
@@ -762,7 +761,6 @@ append_s3_output_block() {
     compression gzip
     bucket ${S3_BUCKET_NAME}
     s3_key_format ${s3_key_format}
-    ${extra_config}
 EOF
 
   if [[ -n "${S3_AWS_ROLE_ARN}" && -n "${S3_AWS_EXTERNAL_ID}" ]]; then
@@ -796,10 +794,10 @@ EOF
 # Main script starts here
 if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
   append_common_service_and_input_blocks
-  append_s3_output_block "fluentbit" "15s" "/system/fluentbit/fluentbit" ""
-  append_s3_output_block "ecsagent" "5m" "/system/ecsagent/ecsagent" ""
-  append_s3_output_block "registrationinfo" "2m" "/system/registrationinfo/registrationinfo" ""
-  append_s3_output_block "orgs**" "3s" "/\$TAG/logs/log" "auto_retry_requests true"
+  append_s3_output_block "fluentbit" "15s" "/system/fluentbit/fluentbit"
+  append_s3_output_block "ecsagent" "5m" "/system/ecsagent/ecsagent"
+  append_s3_output_block "registrationinfo" "2m" "/system/registrationinfo/registrationinfo"
+  append_s3_output_block "orgs**" "3s" "/\$TAG/logs/log"
 
 elif [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
   append_common_service_and_input_blocks
@@ -811,16 +809,6 @@ elif [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
   append_azure_blob_output_block "registrationinfo" "registrationinfo/log"
   append_azure_blob_output_block "orgs**" "/\$TAG/logs/log" "runner" ""
 fi
-
-# # wrap the cat command in a conditional to avoid writing the file if the storage backend is if S3_AWS_ACCESS_KEY_ID and S3_AWS_SECRET_ACCESS_KEY are empty
-#   if [[ -n "${S3_AWS_ACCESS_KEY_ID}" && -n "${S3_AWS_SECRET_ACCESS_KEY}" ]]; then
-#     cat > ./aws-credentials << EOF
-# [default]
-# region = ${S3_AWS_REGION}
-# aws_access_key_id = ${S3_AWS_ACCESS_KEY_ID}
-# aws_secret_access_key = ${S3_AWS_SECRET_ACCESS_KEY}
-# EOF
-#   fi
 
   spinner_msg "Configuring local data" 0
 }
@@ -1007,7 +995,7 @@ configure_fluentbit() { #{{{
     spinner "$!" "Pulling image"
   fi
 
-  spinner_wait "Starting fluentbit agent.."
+  spinner_wait "Configuring fluentbit agent for workflow log collection.."
   # TODO: --network host, use-case
   docker_run_command="$CONTAINER_ORCHESTRATOR run -d \
       --name fluentbit-agent \
@@ -1024,6 +1012,9 @@ configure_fluentbit() { #{{{
        "
   running=$($CONTAINER_ORCHESTRATOR ps -q --filter "name=fluentbit-agent")
   exists=$($CONTAINER_ORCHESTRATOR ps -aq --filter "name=fluentbit-agent")
+
+  echo running:$running
+  echo exists:$exists
 
   if [[ -z "${exists}" ]]; then
     if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" && -n "${S3_AWS_ACCESS_KEY_ID}" && -n "${S3_AWS_SECRET_ACCESS_KEY}" && -n "${S3_AWS_REGION}" ]]; then
