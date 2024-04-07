@@ -303,7 +303,6 @@ check_fluentbit_status() { #{{{
   tries=0
   until (( found_error == 1 )) || (( tries >= timeout )); do
     err_msg="$(grep -iaA4 -m1 -E "\[error.*" "$log_file" | tr -d '\0')"
-    echo err_msg1: $err_msg
     if [[ -z "$err_msg" ]]; then
       info "Try #$((++tries)): No error messages found."
       sleep 2
@@ -313,7 +312,9 @@ check_fluentbit_status() { #{{{
       break
     fi
   done & spinner "$!" "Checking for errors in Fluentbit logs"
-  echo err_msg2: $err_msg
+
+  err_msg="$(grep -iaA4 -m1 -E "\[error.*" "$log_file" | tr -d '\0')"
+
   if [[ -n "$err_msg" ]]; then
     if ignore_fluentbit_errors; then
       info "Ignoring Fluentbit error(s)" "$err_msg"
