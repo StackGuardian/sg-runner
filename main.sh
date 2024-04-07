@@ -321,10 +321,10 @@ check_fluentbit_status() { #{{{
       if ! no_clean_on_fail; then
         clean_local_setup & spinner "$!" "Starting cleanup"
         info "Use --no-clean-on-fail to not clean up after Fluentbit errors are encountered"
-      fi & spinner "$!" "Handling cleanup"
+      fi
       info "Use --ignore-fluentbit-errors to ignore errors and proceed with the registration process"
       exit 1
-    fi & spinner "$!" "Handling Fluentbit errors"
+    fi
   else
     info "Storage backend status:" "healthy"
   fi
