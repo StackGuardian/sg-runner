@@ -243,9 +243,9 @@ print_details() { #{{{
   details_item "Load Average" "$(uptime | awk -F 'load average:' '{print $2}')"
   echo
   details_frame "Hardware Information"
-  details_item "CPU Cores" "$(echo "$(nproc) Core [Use: $(top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4}' | awk '{printf "%.0f%%", $1}')]")"
-  details_item "Memory" "$(free -h | awk '/^Mem:/ {printf "%s [Use: %.0f%%]\n", $2, $3/$2*100}')"
-  details_item "Disk Size" "$(df -h --total | awk '/^total/ {printf "%s [Use: %s]\n", $2, $(NF-1)}')"
+  details_item "CPU Cores" "$(echo "$(nproc) Core [Used: $(top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4}' | awk '{printf "%.0f%%", $1}')]")"
+  details_item "Memory" "$(free -h | awk '/^Mem:/ {printf "%s [Used: %s]\n", $2, $3}')"
+  details_item "Disk Size" "$(df -h --total | awk '/^total/ {printf "%s [Used: %s]\n", $2, $(NF-1)}')"
   echo
 }
 #}}}: print_details
