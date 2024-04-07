@@ -987,7 +987,7 @@ fetch_organization_info() { #{{{
   debug_variable "ORGANIZATION_ID"
   debug_variable "RUNNER_ID"
   debug_variable "RUNNER_GROUP_ID"
-  debug_variable "SHARED_KEY"
+  debug_secret "SHARED_KEY"
   debug_variable "STORAGE_ACCOUNT_NAME"
   debug_variable "STORAGE_BACKEND_TYPE"
   debug_variable "S3_BUCKET_NAME"
