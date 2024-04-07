@@ -79,7 +79,7 @@ Available commands:
   status                        Show health status of used services/containers
   info                          Show information about instance/registration
   prune                         Prune container system older than 10 days
-  cgroupsv2 [enable|disable]    Manage cgroups versions
+  cgroupsv2 [enable|disable]    Manage cgroups versions (deprecated)
 
 Options:
   --sg-node-token '': (required)
@@ -90,6 +90,12 @@ Options:
 
   --runner-group '': (required)
     The runner group where new runner will be registered.
+
+  --no-clean-on-fail
+    Do not clean up local setup in case of errors during registration.
+
+  --ignore-fluentbit-errors
+    Ignore Fluentbit errors and proceed with the registration process.
 
   --debug
     Print more verbose output during command execution.
