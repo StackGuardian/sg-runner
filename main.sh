@@ -1026,9 +1026,6 @@ configure_fluentbit() { #{{{
   running=$($CONTAINER_ORCHESTRATOR ps -q --filter "name=fluentbit-agent")
   exists=$($CONTAINER_ORCHESTRATOR ps -aq --filter "name=fluentbit-agent")
 
-  echo running:$running
-  echo exists:$exists
-
   if [[ -z "${exists}" ]]; then
     if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" && -n "${S3_AWS_ACCESS_KEY_ID}" && -n "${S3_AWS_SECRET_ACCESS_KEY}" && -n "${S3_AWS_REGION}" ]]; then
       extra_options="-e AWS_ACCESS_KEY_ID=${S3_AWS_ACCESS_KEY_ID} \
@@ -1046,6 +1043,9 @@ configure_fluentbit() { #{{{
       if [[ -z "${running}" ]]; then
         $CONTAINER_ORCHESTRATOR start fluentbit-agent >&/dev/null
     fi
+  else
+    NO_CLEAN_ON_FAIL=true
+    IGNORE_FLUENTBIT_ERRORS=true
   fi
   spinner_msg "Starting fluentbit agent" 0
   check_fluentbit_status
