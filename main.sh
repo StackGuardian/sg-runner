@@ -307,9 +307,9 @@ check_fluentbit_status() { #{{{
   if [[ -n "$err_msg" ]]; then
     err "Fluentbit is encountering errors" "$err_msg"
     info "Use --no-clean to not clean up after Fluentbit errors are encountered"
-    info "Use --ignore-fluentbit-erros to ignore and proceed with the registration anyway"
+    info "Use --ignore-fluentbit-erros to ignore and proceed with the registration anyway" & spinner "$!" "Starting cleanup"
     # TODO: cleanup on-demand or proceed anyway
-    clean_local_setup & spinner "$!" "Starting cleanup"
+    # clean_local_setup 
     exit 1
   fi
 
