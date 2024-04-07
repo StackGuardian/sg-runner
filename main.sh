@@ -301,9 +301,11 @@ check_fluentbit_status() { #{{{
   fi
 
   tries=0
-
-  until (( found_error != 0 )) || (( tries >= timeout )); do
+  err_msg="$(grep -iaA4 -m1 -E "\[error.*" "$log_file" | tr -d '\0')"
+  echo err_msg0 $err_msg
+  until (( found_error == 1 )) || (( tries >= timeout )); do
     err_msg="$(grep -iaA4 -m1 -E "\[error.*" "$log_file" | tr -d '\0')"
+    echo err_msg1 $err_msg
     if [[ -z "$err_msg" ]]; then
       info "Try #$((++tries)): No error messages found."
       sleep 2
