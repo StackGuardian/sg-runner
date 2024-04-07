@@ -329,7 +329,7 @@ check_fluentbit_status() { #{{{
         clean_local_setup & spinner "$!" "Starting cleanup"
         info "Use --no-clean-on-fail to not clean up after Fluentbit errors are encountered for debugging issues"
       else
-        info "If retrying a new registration, do not use --no-clean-on-fail as it leaves the system in an inconsistent state only useful for debugging purposes"
+        info "WARNING" "If retrying a new registration, do not use --no-clean-on-fail as it leaves the system in an inconsistent state only useful for debugging purposes"
       fi
       info "Use --ignore-fluentbit-errors to ignore errors and proceed with the registration process"
       exit 1
@@ -737,7 +737,7 @@ append_s3_output_block() {
 EOF
 
   if [[ -n "${S3_AWS_ROLE_ARN}" && -n "${S3_AWS_EXTERNAL_ID}" ]]; then
-    echo "    role_arn            ${S3_AWS_ROLE_ARN}" >> ./fluent-bit.conf
+    echo "    role_arn ${S3_AWS_ROLE_ARN}" >> ./fluent-bit.conf
     # echo "    external_id         ${S3_AWS_EXTERNAL_ID}" >> ./fluent-bit.conf
   fi
 }
