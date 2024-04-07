@@ -304,6 +304,7 @@ check_fluentbit_status() { #{{{
     info "Timed out searchnig for stream processor to start in the logs file, perhaps there are lot of logs. Proceeding to check for errors anyway"
   fi
 
+  timeout=5
   tries=0
   until (( found_error == 1 )) || (( tries >= timeout )); do
     err_msg="$(grep -iaA4 -m1 -E "\[error.*" "$log_file" | tr -d '\0')"
