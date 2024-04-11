@@ -1465,7 +1465,7 @@ main() { #{{{
     exit 1
   fi
 
-  info "Installing the runner on" "$(cat /etc/*release | grep -oP '(?<=PRETTY_NAME=").*?(?=")')"
+  info "Running on" "$(cat /etc/*release | grep -oP '(?<=PRETTY_NAME=").*?(?=")')"
 
   if [[ -e /sys/fs/cgroup/cgroup.controllers ]]; then
     if [[ "$1" == "cgroupsv2" && "$2" =~ enable|disable ]]; then
@@ -1515,9 +1515,9 @@ main() { #{{{
 
   # Use the token if available; otherwise, proceed without it for IMDSv1 compatibility
   if [ -n "$imdsv2_token" ]; then
-    attached_iam_role=$(curl -fSsLk --proto "https" -H "X-aws-ec2-metadata-token: $imdsv2_token" "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null )
+    attached_iam_role=$(curl -fSsLk --proto "https" -H "X-aws-ec2-metadata-token: $imdsv2_token" "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null)
   else
-    attached_iam_role=$(curl -fSsLk "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null )
+    attached_iam_role=$(curl -fSsLk "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null)
   fi
 
   if [ -n "$attached_iam_role" ]; then
