@@ -834,21 +834,20 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
   append_s3_output_block "fluentbit" "15s" "/system/fluentbit/fluentbit"
   append_s3_output_block "ecsagent" "5m" "/system/ecsagent/ecsagent"
   append_s3_output_block "registrationinfo" "2m" "/system/registrationinfo/registrationinfo"
-  append_s3_output_block "orgs**" "3s" "/\$TAG/logs/log"
   cat >> ./fluent-bit.conf << EOF
 
 [OUTPUT]
     Name s3
     Match_Regex orgs**
     region ${S3_AWS_REGION}
-    upload_timeout ${upload_timeout}
+    upload_timeout 3s
     store_dir_limit_size 2G
     total_file_size 250M
     retry_limit 20
     use_put_object On
     compression gzip
     bucket ${S3_BUCKET_NAME}
-    s3_key_format ${s3_key_format}
+    s3_key_format /\$TAG/logs/log
 EOF
 
   if [[ -n "${S3_AWS_ROLE_ARN}" && -n "${S3_AWS_EXTERNAL_ID}" ]]; then
@@ -861,7 +860,6 @@ elif [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
   append_azure_blob_output_block "fluentbit" "fluentbit/log"
   append_azure_blob_output_block "ecsagent" "ecsagent/log"
   append_azure_blob_output_block "registrationinfo" "registrationinfo/log"
-  append_azure_blob_output_block "orgs**" "/\$TAG/logs/log" "runner"
   cat >> ./fluent-bit.conf << EOF
 
 [OUTPUT]
@@ -869,7 +867,7 @@ elif [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
     Match_Regex orgs**
     account_name ${STORAGE_ACCOUNT_NAME}
     shared_key ${SHARED_KEY}
-    container_name ${container_name}
+    container_name runner
     auto_create_container on
     tls on
 EOF
