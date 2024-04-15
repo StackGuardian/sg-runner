@@ -273,7 +273,6 @@ print_details() { #{{{
 #   if successfull/error.
 #######################################
 check_fluentbit_status() { #{{{
-  # TODO: Try running on a long running fluentbit continer, private runner with a lot of logs
   spinner_wait "Starting backend storage check.."
   local container_id
   local log_file
@@ -308,6 +307,7 @@ check_fluentbit_status() { #{{{
   timeout=5
   tries=0
   until (( found_error == 1 )) || (( tries >= timeout )); do
+    # TODO: Do not run error chesks at all if ignore_fluentbit_errors is set
     err_msg="$(grep -iaA4 -m1 -E "\[error.*" "$log_file" | tr -d '\0')"
     if [[ -z "$err_msg" ]]; then
       debug "Try #$((++tries)): No error messages found."
