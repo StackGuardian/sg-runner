@@ -478,6 +478,7 @@ cgroupsv2() { #{{{
 #}}}: cgroupsv2
 
 api_call() { #{{{
+  # TODO: Support draining of instance
   if [[ -n "$1" ]]; then
     response=$(curl -i -s \
       -X POST \
