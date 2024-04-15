@@ -273,6 +273,7 @@ print_details() { #{{{
 #   if successfull/error.
 #######################################
 check_fluentbit_status() { #{{{
+  # TODO: Try running on a long running fluentbit continer, private runner with a lot of logs
   spinner_wait "Starting backend storage check.."
   local container_id
   local log_file
@@ -322,7 +323,7 @@ check_fluentbit_status() { #{{{
 
   if [[ -n "$err_msg" ]]; then
     if ignore_fluentbit_errors; then
-      info "Ignoring Fluentbit error(s) $err_msg"
+      debug "Ignoring Fluentbit error(s) $err_msg"
     else
       err "Fluentbit encountered error(s)" "$err_msg"
       if ! no_clean_on_fail; then
