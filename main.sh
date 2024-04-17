@@ -882,7 +882,7 @@ fi
 #######################################
 # Configure local network.
 # Globals:
-#   SG_DOCKER_NETWORK
+#   SG_DOCKER_NETWORK; not used
 # Arguments:
 #   None
 # Outputs:
@@ -891,7 +891,7 @@ fi
 configure_local_network() { #{{{
   spinner_wait "Configuring local network.."
 
-  # Create SG_DOCKER_NETWORK $CONTAINER_ORCHESTRATOR network
+  # Create SG_DOCKER_NETWORK $CONTAINER_ORCHESTRATOR network; not used
   $CONTAINER_ORCHESTRATOR network create --driver bridge "${SG_DOCKER_NETWORK}" >&/dev/null
   bridge_id="br-$($CONTAINER_ORCHESTRATOR network ls -q --filter "name=${SG_DOCKER_NETWORK}")"
   iptables \
