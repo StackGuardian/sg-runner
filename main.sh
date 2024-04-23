@@ -250,7 +250,7 @@ print_details() { #{{{
   details_frame "Hardware Information"
   details_item "CPU Cores" "$(echo "$(nproc) Core [Used: $(top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4}' | awk '{printf "%.0f%%", $1}')]")"
   details_item "Memory" "$(free -h | awk '/^Mem:/ {printf "%s [Used: %s]\n", $2, $3}')"
-  details_item "Disk Size" "$(df -h --total | awk '/^total/ {printf "%s [Used: %s]\n", $2, $(NF-1)}')"
+  details_item "Disk Size" "$(df -h --total / | awk '/^total/ {printf "%s [Used: %s]\n", $2, $(NF-1)}')"
   echo
 }
 #}}}: print_details
@@ -882,7 +882,7 @@ fi
 #######################################
 # Configure local network.
 # Globals:
-#   SG_DOCKER_NETWORK
+#   SG_DOCKER_NETWORK; not used
 # Arguments:
 #   None
 # Outputs:
@@ -891,7 +891,7 @@ fi
 configure_local_network() { #{{{
   spinner_wait "Configuring local network.."
 
-  # Create SG_DOCKER_NETWORK $CONTAINER_ORCHESTRATOR network
+  # Create SG_DOCKER_NETWORK $CONTAINER_ORCHESTRATOR network; not used
   $CONTAINER_ORCHESTRATOR network create --driver bridge "${SG_DOCKER_NETWORK}" >&/dev/null
   bridge_id="br-$($CONTAINER_ORCHESTRATOR network ls -q --filter "name=${SG_DOCKER_NETWORK}")"
   iptables \
