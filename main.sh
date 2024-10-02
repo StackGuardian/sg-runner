@@ -75,7 +75,7 @@ Examples:
 
 Available commands:
   register [options]            Register new Private Runner
-  deregsiter [options]          Deregister existing Private Runner
+  deregister [options]          Deregister existing Private Runner
   status                        Show health status of used services/containers
   info                          Show information about instance/registration
   prune                         Prune container system older than 10 days
