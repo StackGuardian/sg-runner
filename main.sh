@@ -214,6 +214,7 @@ doctor_frame() { #{{{
 #   ORGANIZATION_NAME
 #   RUNNER_GROUP_ID
 #   RUNNER_ID
+#   HTTP_PROXY
 # Arguments:
 #   None
 # Outputs:
@@ -241,6 +242,7 @@ print_details() { #{{{
   details_item "Hostaname" "$HOSTNAME"
   details_item "Private IP Address" "$(ip route | grep default | cut -d" " -f9)"
   details_item "Public IP Address" "$(curl -fSs ifconfig.me)"
+  details_item "HTTP PROXY" "$HTTP_PROXY"
   echo
   details_frame "System Information"
   details_item "OS Release" "$(cat /etc/*release | grep -oP '(?<=PRETTY_NAME=").*?(?=")')"
@@ -780,6 +782,7 @@ EOF
 #   ORGANIZATION_ID
 #   RUNNER_ID
 #   RUNNER_GROUP_ID
+#   HTTP_PROXY
 # Arguments:
 #   None
 # Outputs:
@@ -829,6 +832,11 @@ ECS_ENABLE_TASK_IAM_ROLE=true
 ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true
 ECS_EXTERNAL=true
 EOF
+
+if [[ -n "${HTTP_PROXY}" ]]; then
+  debug "Setting up HTTP PROXY to ${HTTP_PROXY} for the ECS agent."
+  echo "HTTP_PROXY=${HTTP_PROXY}" >> /etc/ecs/ecs.config
+fi
 
 # Configure Fluentbit configuration inside /etc/fluentbit/fluent-bit.conf
 if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
@@ -1029,6 +1037,7 @@ fetch_organization_info() { #{{{
   debug_variable "ORGANIZATION_ID"
   debug_variable "RUNNER_ID"
   debug_variable "RUNNER_GROUP_ID"
+  debug_variable "HTTP_PROXY"
   debug_secret "SHARED_KEY"
   debug_variable "STORAGE_ACCOUNT_NAME"
   debug_variable "STORAGE_BACKEND_TYPE"
@@ -1453,15 +1462,20 @@ parse_arguments() { #{{{
       RUNNER_GROUP_ID="${2}"
       shift 2
       ;;
+    --http-proxy)
+      check_arg_value "${1}" "${2}"
+      HTTP_PROXY="${2}"
+      shift 2
+      ;;
     -f | --force)
       FORCE_PASS=true
       shift
       ;;
-    -f | --no-clean-on-fail)
+    --no-clean-on-fail)
       NO_CLEAN_ON_FAIL=true
       shift
       ;;
-    -f | --ignore-fluentbit-errors)
+    --ignore-fluentbit-errors)
       IGNORE_FLUENTBIT_ERRORS=true
       shift
       ;;
