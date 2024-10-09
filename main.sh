@@ -836,6 +836,7 @@ EOF
 if [[ -n "${HTTP_PROXY}" ]]; then
   debug "Setting up HTTP PROXY to ${HTTP_PROXY} for the ECS agent."
   echo "HTTP_PROXY=${HTTP_PROXY}" >> /etc/ecs/ecs.config
+  echo "NO_PROXY=169.254.169.254,169.254.170.2,/var/run/docker.sock" >> /etc/ecs/ecs.config
 fi
 
 # Configure Fluentbit configuration inside /etc/fluentbit/fluent-bit.conf
