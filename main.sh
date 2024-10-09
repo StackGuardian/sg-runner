@@ -252,7 +252,7 @@ print_details() { #{{{
   details_frame "Hardware Information"
   details_item "CPU Cores" "$(echo "$(nproc) Core [Used: $(top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4}' | awk '{printf "%.0f%%", $1}')]")"
   details_item "Memory" "$(free -h | awk '/^Mem:/ {printf "%s [Used: %s]\n", $2, $3}')"
-  details_item "Disk Size" "$(df -h --total / | awk '/^total/ {printf "%s [Used: %s]\n", $2, $(NF-1)}')"
+  details_item "Size /var" "$(df -h --total /var | awk '/^total/ {if ($2 ~ /G/ && $2 + 0 < 100) printf "\033[31m%s [Used: %s]\033[0m\n", $2, $(NF-1); else printf "%s [Used: %s]\n", $2, $(NF-1)}')"
   echo
 }
 #}}}: print_details
