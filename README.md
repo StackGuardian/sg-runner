@@ -16,8 +16,8 @@
 ## 1.0 Introduction
 
 **StackGuardian Private Runner** represents infrastructure that supports
-registering external (self-hosted) instances to the StackGuradian platform.
-Configuration is very simple, get credentials from StackGuradian platform,
+registering external (self-hosted) instances to the StackGuardian platform.
+Configuration is very simple, get credentials from StackGuardian platform,
 and run `main.sh` script with credentials.
 
 Check [Setup](#setup) for more details.
@@ -33,7 +33,7 @@ Only, _task definition_ will live on _AWS ECS_.
 
 ## 3.0 Setup
 
-> **IMPROTANT:**
+> **IMPORTANT:**
 > To ensure a smooth lifecycle for your instance, it is important to avoid having any IAM Roles attached to it.
 > Having IAM Roles attached can potentially cause connection issues and disrupt the instance's functioning.
 > Therefore, it is recommended to remove or detach any IAM Roles from the instance to prevent any complications during its lifecycle.
@@ -52,7 +52,7 @@ provided credentials from _StackGuardian_ platform.
 
 ### 3.1 Environment
 
-There are couple of environment variables that can be overriden for the purposes of testing:
+There are couple of environment variables that can be overridden for the purposes of testing:
 
 ```
 SG_BASE_API
@@ -104,8 +104,8 @@ main.sh deregister \
 
 ### 3.4 Restart
 
-As of now, restart is not nativly supported.
-But, to achieve similar experinece it is enough to [`deregister`](#32-de-registration) and then [`register`](#31-registration) again.
+As of now, restart is not natively supported.
+But, to achieve similar experience it is enough to [`deregister`](#33-de-registration) and then [`register`](#32-registration) again.
 
 > This should fix all troubles if something is not working.
 
