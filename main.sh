@@ -1541,7 +1541,7 @@ main() { #{{{
     exit 1
   fi
 
-  # Attempt to get token for IMDSv2, will fail silently for IMDSv1
+  # Attempt to get token for IMDSv2 on AWS, will fail silently for IMDSv1, This will fail for non-AWS instances but is handled gracefully
   imdsv2_token=$(curl --max-time 5 -fSsLkX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 120" 2>/dev/null)
 
   # Use the token if available; otherwise, proceed without it for IMDSv1 compatibility
