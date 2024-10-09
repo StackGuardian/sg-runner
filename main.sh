@@ -480,14 +480,14 @@ cgroupsv2() { #{{{
 api_call() { #{{{
   # TODO: Support draining of instance
   if [[ -n "$1" ]]; then
-    response=$(curl -i -s \
+    response=$(curl --max-time 10 -i -s \
       -X POST \
       -H "Authorization: apikey ${SG_NODE_TOKEN}" \
       -H "Content-Type: application/json" \
       -d "$1" \
       "${url}")
   else
-    response=$(curl -i -s \
+    response=$(curl --max-time 10 -i -s \
       -X POST \
       -H "Authorization: apikey ${SG_NODE_TOKEN}" \
       -H "Content-Type: application/json" \
@@ -1151,7 +1151,7 @@ register_instance() { #{{{
   configure_local_network
 
   spinner_wait "Downloading support files.."
-  if ! curl -fSsLk \
+  if ! curl --max-time 30 -fSsLk \
     --proto "https" \
     -o "/tmp/ecs-anywhere-install.sh" \
     "https://amazon-ecs-agent.s3.amazonaws.com/ecs-anywhere-install-latest.sh" \
@@ -1542,13 +1542,13 @@ main() { #{{{
   fi
 
   # Attempt to get token for IMDSv2, will fail silently for IMDSv1
-  imdsv2_token=$(curl -fSsLkX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 120" 2>/dev/null)
+  imdsv2_token=$(curl --max-time 5 -fSsLkX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 120" 2>/dev/null)
 
   # Use the token if available; otherwise, proceed without it for IMDSv1 compatibility
   if [ -n "$imdsv2_token" ]; then
-    attached_iam_role=$(curl -fSsLk --proto "https" -H "X-aws-ec2-metadata-token: $imdsv2_token" "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null)
+    attached_iam_role=$(curl --max-time 10 -fSsLk --proto "https" -H "X-aws-ec2-metadata-token: $imdsv2_token" "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null)
   else
-    attached_iam_role=$(curl -fSsLk "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null)
+    attached_iam_role=$(curl --max-time 10 -fSsLk "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null)
   fi
 
   if [ -n "$attached_iam_role" ]; then
