@@ -835,10 +835,31 @@ ECS_EXTERNAL=true
 EOF
 
 if [[ -n "${HTTP_PROXY}" ]]; then
+  info "Setting up Porxy confguration for the registration process."
+  info "Docker should be setup to use the same proxy. For more info see: https://docs.docker.com/engine/cli/proxy/"
   debug "Setting up HTTP PROXY to ${HTTP_PROXY} for the ECS agent."
   echo "HTTP_PROXY=${HTTP_PROXY}" >> /etc/ecs/ecs.config
   echo "HTTPS_PROXY=${HTTP_PROXY}" >> /etc/ecs/ecs.config
   echo "NO_PROXY=169.254.169.254,169.254.170.2,/var/run/docker.sock" >> /etc/ecs/ecs.config
+
+  # Setting up proxy for ecs-init too as the above did not help https://repost.aws/knowledge-center/http-proxy-docker-ecs, https://docs.aws.amazon.com/AmazonECS/latest/developerguide/http_proxy_config.html
+  # TODO: Handle correct setup of HTTPS_PROXY and HTTP_PROXY refer to https://docs.aws.amazon.com/systems-manager/latest/userguide/configure-proxy-ssm-agent.html
+  # TODO: Handle for systemd and upstart based systems
+  mkdir -p /etc/init
+  cat <<EOF > /etc/init/ecs.override
+env HTTP_PROXY=${HTTP_PROXY}
+env HTTPS_PROXY=${HTTP_PROXY}
+env NO_PROXY=169.254.169.254,169.254.170.2,/var/run/docker.sock
+EOF
+
+  # TODO: Handle for systemd and upstart based systems
+  mkdir -p /etc/systemd/system/ecs.service.d
+  cat <<EOF > /etc/systemd/system/ecs.service.d/http-proxy.conf
+Environment="HTTP_PROXY=${HTTP_PROXY}"
+Environment="HTTPS_PROXY=${HTTP_PROXY}"
+Environment="NO_PROXY=169.254.169.254,169.254.170.2,/var/run/docker.sock"
+EOF
+
 fi
 
 # Configure Fluentbit configuration inside /etc/fluentbit/fluent-bit.conf
