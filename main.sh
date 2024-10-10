@@ -75,7 +75,7 @@ Examples:
 
 Available commands:
   register [options]            Register new Private Runner
-  deregsiter [options]          Deregister existing Private Runner
+  deregister [options]          Deregister existing Private Runner
   status                        Show health status of used services/containers
   info                          Show information about instance/registration
   prune                         Prune container system older than 10 days
@@ -90,6 +90,9 @@ Options:
 
   --runner-group '': (required)
     The runner group where new runner will be registered.
+
+  --http-proxy
+    The hostname (or IP address) and port number of an HTTP proxy
 
   --no-clean-on-fail
     Do not clean up local setup in case of errors during registration.
@@ -214,6 +217,7 @@ doctor_frame() { #{{{
 #   ORGANIZATION_NAME
 #   RUNNER_GROUP_ID
 #   RUNNER_ID
+#   HTTP_PROXY
 # Arguments:
 #   None
 # Outputs:
@@ -241,6 +245,7 @@ print_details() { #{{{
   details_item "Hostaname" "$HOSTNAME"
   details_item "Private IP Address" "$(ip route | grep default | cut -d" " -f9)"
   details_item "Public IP Address" "$(curl -fSs ifconfig.me)"
+  details_item "HTTP PROXY" "$HTTP_PROXY"
   echo
   details_frame "System Information"
   details_item "OS Release" "$(cat /etc/*release | grep -oP '(?<=PRETTY_NAME=").*?(?=")')"
@@ -250,7 +255,7 @@ print_details() { #{{{
   details_frame "Hardware Information"
   details_item "CPU Cores" "$(echo "$(nproc) Core [Used: $(top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4}' | awk '{printf "%.0f%%", $1}')]")"
   details_item "Memory" "$(free -h | awk '/^Mem:/ {printf "%s [Used: %s]\n", $2, $3}')"
-  details_item "Disk Size" "$(df -h --total | awk '/^total/ {printf "%s [Used: %s]\n", $2, $(NF-1)}')"
+  details_item "Size /var" "$(df -h --total /var | awk '/^total/ {if ($2 ~ /G/ && $2 + 0 < 100) printf "\033[31m%s [Used: %s]\033[0m\n", $2, $(NF-1); else printf "%s [Used: %s]\n", $2, $(NF-1)}')"
   echo
 }
 #}}}: print_details
@@ -480,14 +485,14 @@ cgroupsv2() { #{{{
 api_call() { #{{{
   # TODO: Support draining of instance
   if [[ -n "$1" ]]; then
-    response=$(curl -i -s \
+    response=$(curl --max-time 10 -i -s \
       -X POST \
       -H "Authorization: apikey ${SG_NODE_TOKEN}" \
       -H "Content-Type: application/json" \
       -d "$1" \
       "${url}")
   else
-    response=$(curl -i -s \
+    response=$(curl --max-time 10 -i -s \
       -X POST \
       -H "Authorization: apikey ${SG_NODE_TOKEN}" \
       -H "Content-Type: application/json" \
@@ -505,9 +510,8 @@ api_call() { #{{{
     && echo "${response}" \
     && echo "-----"
 
-  # get first status code from response
-  status_code="$(echo "$response" \
-    | awk '/^HTTP/ {print $2}')"
+  # get the last status code from response as the first one could be about a proxy connection
+  status_code=$(echo "$response" | awk '/^HTTP\/[12]/ {code=$2} END {print code}')
 
   # actual response data
   response="$(echo "$response" \
@@ -780,6 +784,7 @@ EOF
 #   ORGANIZATION_ID
 #   RUNNER_ID
 #   RUNNER_GROUP_ID
+#   HTTP_PROXY
 # Arguments:
 #   None
 # Outputs:
@@ -803,7 +808,7 @@ configure_local_data() { #{{{
 # AWS_ACCESS_KEY_ID
 # AWS_SECRET_ACCESS_KEY
 # AWS_SESSION_TOKEN
-# ECS_ALTERNATE_CREDENTIAL_PROFILE
+# ECS_ALTERNATE_CREDENTIAL_PROFILE=sg-runner
 # ECS_IMAGE_PULL_BEHAVIOR=prefer-cached # The behavior used to customize the pull image process. If default is specified, the image will be pulled remotely, if the pull fails then the cached image in the instance will be used. If always is specified, the image will be pulled remotely, if the pull fails then the task will fail. If once is specified, the image will be pulled remotely if it has not been pulled before or if the image was removed by image cleanup, otherwise the cached image in the instance will be used. If prefer-cached is specified, the image will be pulled remotely if there is no cached image, otherwise the cached image in the instance will be used.
 
 # ECS_ENGINE_AUTH_TYPE	"docker" | "dockercfg"	The type of auth data that is stored in the ECS_ENGINE_AUTH_DATA key.		
@@ -820,7 +825,6 @@ ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION=24h
 ECS_IMAGE_CLEANUP_INTERVAL=24h
 ECS_IMAGE_MINIMUM_CLEANUP_AGE=1h
 NON_ECS_IMAGE_MINIMUM_CLEANUP_AGE=1h
-# ECS_ALTERNATE_CREDENTIAL_PROFILE=sg-runner
 ECS_TASK_METADATA_RPS_LIMIT=300,400
 AWS_EC2_METADATA_DISABLED=true
 ECS_LOGFILE=/log/ecs-agent.log
@@ -829,6 +833,34 @@ ECS_ENABLE_TASK_IAM_ROLE=true
 ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true
 ECS_EXTERNAL=true
 EOF
+
+if [[ -n "${HTTP_PROXY}" ]]; then
+  info "Setting up Porxy confguration for the registration process."
+  info "Docker should be setup to use the same proxy. For more info see: https://docs.docker.com/engine/cli/proxy/"
+  debug "Setting up HTTP PROXY to ${HTTP_PROXY} for the ECS agent."
+  echo "HTTP_PROXY=${HTTP_PROXY}" >> /etc/ecs/ecs.config
+  echo "HTTPS_PROXY=${HTTP_PROXY}" >> /etc/ecs/ecs.config
+  echo "NO_PROXY=169.254.169.254,169.254.170.2,/var/run/docker.sock" >> /etc/ecs/ecs.config
+
+  # Setting up proxy for ecs-init too as the above did not help https://repost.aws/knowledge-center/http-proxy-docker-ecs, https://docs.aws.amazon.com/AmazonECS/latest/developerguide/http_proxy_config.html
+  # TODO: Handle correct setup of HTTPS_PROXY and HTTP_PROXY refer to https://docs.aws.amazon.com/systems-manager/latest/userguide/configure-proxy-ssm-agent.html
+  # TODO: Handle for systemd and upstart based systems
+  mkdir -p /etc/init
+  cat <<EOF > /etc/init/ecs.override
+env HTTP_PROXY=${HTTP_PROXY}
+env HTTPS_PROXY=${HTTP_PROXY}
+env NO_PROXY=169.254.169.254,169.254.170.2,/var/run/docker.sock
+EOF
+
+  # TODO: Handle for systemd and upstart based systems
+  mkdir -p /etc/systemd/system/ecs.service.d
+  cat <<EOF > /etc/systemd/system/ecs.service.d/http-proxy.conf
+Environment="HTTP_PROXY=${HTTP_PROXY}"
+Environment="HTTPS_PROXY=${HTTP_PROXY}"
+Environment="NO_PROXY=169.254.169.254,169.254.170.2,/var/run/docker.sock"
+EOF
+
+fi
 
 # Configure Fluentbit configuration inside /etc/fluentbit/fluent-bit.conf
 if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
@@ -882,7 +914,7 @@ fi
 #######################################
 # Configure local network.
 # Globals:
-#   SG_DOCKER_NETWORK
+#   SG_DOCKER_NETWORK; not used
 # Arguments:
 #   None
 # Outputs:
@@ -891,7 +923,7 @@ fi
 configure_local_network() { #{{{
   spinner_wait "Configuring local network.."
 
-  # Create SG_DOCKER_NETWORK $CONTAINER_ORCHESTRATOR network
+  # Create SG_DOCKER_NETWORK $CONTAINER_ORCHESTRATOR network; not used
   $CONTAINER_ORCHESTRATOR network create --driver bridge "${SG_DOCKER_NETWORK}" >&/dev/null
   bridge_id="br-$($CONTAINER_ORCHESTRATOR network ls -q --filter "name=${SG_DOCKER_NETWORK}")"
   iptables \
@@ -1029,6 +1061,7 @@ fetch_organization_info() { #{{{
   debug_variable "ORGANIZATION_ID"
   debug_variable "RUNNER_ID"
   debug_variable "RUNNER_GROUP_ID"
+  debug_variable "HTTP_PROXY"
   debug_secret "SHARED_KEY"
   debug_variable "STORAGE_ACCOUNT_NAME"
   debug_variable "STORAGE_BACKEND_TYPE"
@@ -1151,7 +1184,7 @@ register_instance() { #{{{
   configure_local_network
 
   spinner_wait "Downloading support files.."
-  if ! curl -fSsLk \
+  if ! curl --max-time 30 -fSsLk \
     --proto "https" \
     -o "/tmp/ecs-anywhere-install.sh" \
     "https://amazon-ecs-agent.s3.amazonaws.com/ecs-anywhere-install-latest.sh" \
@@ -1453,15 +1486,20 @@ parse_arguments() { #{{{
       RUNNER_GROUP_ID="${2}"
       shift 2
       ;;
+    --http-proxy)
+      check_arg_value "${1}" "${2}"
+      HTTP_PROXY="${2}"
+      shift 2
+      ;;
     -f | --force)
       FORCE_PASS=true
       shift
       ;;
-    -f | --no-clean-on-fail)
+    --no-clean-on-fail)
       NO_CLEAN_ON_FAIL=true
       shift
       ;;
-    -f | --ignore-fluentbit-errors)
+    --ignore-fluentbit-errors)
       IGNORE_FLUENTBIT_ERRORS=true
       shift
       ;;
@@ -1541,14 +1579,14 @@ main() { #{{{
     exit 1
   fi
 
-  # Attempt to get token for IMDSv2, will fail silently for IMDSv1
-  imdsv2_token=$(curl -fSsLkX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 120" 2>/dev/null)
+  # Attempt to get token for IMDSv2 on AWS, will fail silently for IMDSv1, This will fail for non-AWS instances but is handled gracefully
+  imdsv2_token=$(curl --max-time 5 -fSsLkX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 120" 2>/dev/null)
 
   # Use the token if available; otherwise, proceed without it for IMDSv1 compatibility
   if [ -n "$imdsv2_token" ]; then
-    attached_iam_role=$(curl -fSsLk --proto "https" -H "X-aws-ec2-metadata-token: $imdsv2_token" "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null)
+    attached_iam_role=$(curl --max-time 10 -fSsLk --proto "https" -H "X-aws-ec2-metadata-token: $imdsv2_token" "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null)
   else
-    attached_iam_role=$(curl -fSsLk "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null)
+    attached_iam_role=$(curl --max-time 10 -fSsLk "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null)
   fi
 
   if [ -n "$attached_iam_role" ]; then
