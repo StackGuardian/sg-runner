@@ -510,9 +510,8 @@ api_call() { #{{{
     && echo "${response}" \
     && echo "-----"
 
-  # get first status code from response
-  status_code="$(echo "$response" \
-    | awk '/^HTTP/ {print $2}')"
+  # get the last status code from response as the first one could be about a proxy connection
+  status_code=$(echo "$response" | awk '/^HTTP\/[12]/ {code=$2} END {print code}')
 
   # actual response data
   response="$(echo "$response" \
@@ -809,7 +808,7 @@ configure_local_data() { #{{{
 # AWS_ACCESS_KEY_ID
 # AWS_SECRET_ACCESS_KEY
 # AWS_SESSION_TOKEN
-# ECS_ALTERNATE_CREDENTIAL_PROFILE
+# ECS_ALTERNATE_CREDENTIAL_PROFILE=sg-runner
 # ECS_IMAGE_PULL_BEHAVIOR=prefer-cached # The behavior used to customize the pull image process. If default is specified, the image will be pulled remotely, if the pull fails then the cached image in the instance will be used. If always is specified, the image will be pulled remotely, if the pull fails then the task will fail. If once is specified, the image will be pulled remotely if it has not been pulled before or if the image was removed by image cleanup, otherwise the cached image in the instance will be used. If prefer-cached is specified, the image will be pulled remotely if there is no cached image, otherwise the cached image in the instance will be used.
 
 # ECS_ENGINE_AUTH_TYPE	"docker" | "dockercfg"	The type of auth data that is stored in the ECS_ENGINE_AUTH_DATA key.		
@@ -826,7 +825,6 @@ ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION=24h
 ECS_IMAGE_CLEANUP_INTERVAL=24h
 ECS_IMAGE_MINIMUM_CLEANUP_AGE=1h
 NON_ECS_IMAGE_MINIMUM_CLEANUP_AGE=1h
-# ECS_ALTERNATE_CREDENTIAL_PROFILE=sg-runner
 ECS_TASK_METADATA_RPS_LIMIT=300,400
 AWS_EC2_METADATA_DISABLED=true
 ECS_LOGFILE=/log/ecs-agent.log
