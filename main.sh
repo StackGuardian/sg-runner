@@ -840,6 +840,7 @@ if [[ -n "${HTTP_PROXY}" ]]; then
   debug "Setting up HTTP PROXY to ${HTTP_PROXY} for the ECS agent."
   echo "HTTP_PROXY=${HTTP_PROXY}" >> /etc/ecs/ecs.config
   echo "HTTPS_PROXY=${HTTP_PROXY}" >> /etc/ecs/ecs.config
+  # TODO: read current value and append NO_PROXY not overwrite
   echo "NO_PROXY=169.254.169.254,169.254.170.2,/var/run/docker.sock" >> /etc/ecs/ecs.config
 
   # Setting up proxy for ecs-init too as the above did not help https://repost.aws/knowledge-center/http-proxy-docker-ecs, https://docs.aws.amazon.com/AmazonECS/latest/developerguide/http_proxy_config.html
@@ -1562,7 +1563,7 @@ main() { #{{{
   
   for container_orchestrator in "${CONTAINER_ORCHESTRATORS[@]}"; do
     if check_container_orchestrator "$container_orchestrator"; then
-      info "Default container orchesrator" "$container_orchestrator"
+      info "Default container orchestartor" "$container_orchestrator"
       if [[ "$container_orchestrator" == "podman" ]]; then
         info "Container orchestartor not supported. Aborting.."
         exit 0
