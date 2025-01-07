@@ -792,7 +792,7 @@ EOF
 #######################################
 configure_local_data() { #{{{
   mkdir -p /var/log/ecs /etc/ecs /var/lib/ecs/data /etc/fluentbit/ /var/log/registration/
-  rm -rf /etc/ecs/ecs.config > /dev/null
+  #rm -rf /etc/ecs/ecs.config > /dev/null
 
   spinner_wait "Configuring local data.."
 
@@ -814,7 +814,7 @@ configure_local_data() { #{{{
 # ECS_ENGINE_AUTH_TYPE	"docker" | "dockercfg"	The type of auth data that is stored in the ECS_ENGINE_AUTH_DATA key.		
 # ECS_ENGINE_AUTH_DATA
 
-  cat > /etc/ecs/ecs.config << EOF
+  cat >> /etc/ecs/ecs.config << EOF
 ECS_CLUSTER=${ECS_CLUSTER}
 AWS_DEFAULT_REGION=${LOCAL_AWS_DEFAULT_REGION}
 ECS_INSTANCE_ATTRIBUTES={"sg_organization": "${ORGANIZATION_NAME}","sg_runner_id": "${RUNNER_ID}", "sg_runner_group_id": "${RUNNER_GROUP_ID}"}
@@ -834,34 +834,7 @@ ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true
 ECS_EXTERNAL=true
 EOF
 
-if [[ -n "${HTTP_PROXY}" ]]; then
-  info "Setting up Porxy confguration for the registration process."
-  info "Docker should be setup to use the same proxy. For more info see: https://docs.docker.com/engine/cli/proxy/"
-  debug "Setting up HTTP PROXY to ${HTTP_PROXY} for the ECS agent."
-  echo "HTTP_PROXY=${HTTP_PROXY}" >> /etc/ecs/ecs.config
-  echo "HTTPS_PROXY=${HTTP_PROXY}" >> /etc/ecs/ecs.config
-  # TODO: read current value and append NO_PROXY not overwrite
-  echo "NO_PROXY=169.254.169.254,169.254.170.2,/var/run/docker.sock" >> /etc/ecs/ecs.config
 
-  # Setting up proxy for ecs-init too as the above did not help https://repost.aws/knowledge-center/http-proxy-docker-ecs, https://docs.aws.amazon.com/AmazonECS/latest/developerguide/http_proxy_config.html
-  # TODO: Handle correct setup of HTTPS_PROXY and HTTP_PROXY refer to https://docs.aws.amazon.com/systems-manager/latest/userguide/configure-proxy-ssm-agent.html
-  # TODO: Handle for systemd and upstart based systems
-  mkdir -p /etc/init
-  cat <<EOF > /etc/init/ecs.override
-env HTTP_PROXY=${HTTP_PROXY}
-env HTTPS_PROXY=${HTTP_PROXY}
-env NO_PROXY=169.254.169.254,169.254.170.2,/var/run/docker.sock
-EOF
-
-  # TODO: Handle for systemd and upstart based systems
-  mkdir -p /etc/systemd/system/ecs.service.d
-  cat <<EOF > /etc/systemd/system/ecs.service.d/http-proxy.conf
-Environment="HTTP_PROXY=${HTTP_PROXY}"
-Environment="HTTPS_PROXY=${HTTP_PROXY}"
-Environment="NO_PROXY=169.254.169.254,169.254.170.2,/var/run/docker.sock"
-EOF
-
-fi
 
 # Configure Fluentbit configuration inside /etc/fluentbit/fluent-bit.conf
 if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
@@ -1520,6 +1493,87 @@ parse_arguments() { #{{{
 
 #}}}: Argument/init checks
 
+configure_http_proxy(){
+  if [[ -n "${HTTP_PROXY}" ]]; then
+    info "Setting up Porxy confguration for the registration process."
+    info "Docker should be setup to use the same proxy. For more info see: https://docs.docker.com/engine/cli/proxy/"
+    debug "Setting up HTTP PROXY to ${HTTP_PROXY} for the ECS agent."
+    mkdir -p /etc/ecs
+    echo "HTTP_PROXY=${HTTP_PROXY}" >>/etc/ecs/ecs.config
+    echo "HTTPS_PROXY=${HTTP_PROXY}" >>/etc/ecs/ecs.config
+    # TODO: read current value and append NO_PROXY not overwrite
+    echo "NO_PROXY=169.254.169.254,169.254.170.2,/var/run/docker.sock" >>/etc/ecs/ecs.config
+
+    # Setting up proxy for ecs-init too as the above did not help https://repost.aws/knowledge-center/http-proxy-docker-ecs, https://docs.aws.amazon.com/AmazonECS/latest/developerguide/http_proxy_config.html
+    # TODO: Handle correct setup of HTTPS_PROXY and HTTP_PROXY refer to https://docs.aws.amazon.com/systems-manager/latest/userguide/configure-proxy-ssm-agent.html
+    # TODO: Handle for systemd and upstart based systems
+    mkdir -p /etc/init
+    cat <<EOF >/etc/init/ecs.override
+env HTTP_PROXY=${HTTP_PROXY}
+env HTTPS_PROXY=${HTTP_PROXY}
+env NO_PROXY=169.254.169.254,169.254.170.2,/var/run/docker.sock
+EOF
+
+    # TODO: Handle for systemd and upstart based systems
+    mkdir -p /etc/systemd/system/ecs.service.d
+    cat <<EOF >/etc/systemd/system/ecs.service.d/http-proxy.conf
+[Service]
+Environment="HTTP_PROXY=${HTTP_PROXY}"
+Environment="HTTPS_PROXY=${HTTP_PROXY}"
+Environment="NO_PROXY=169.254.169.254,169.254.170.2,/var/run/docker.sock"
+EOF
+
+    # SSM HTTP proxy configuration
+    mkdir -p /etc/systemd/system/amazon-ssm-agent.service.d
+    cat <<EOF >/etc/systemd/system/amazon-ssm-agent.service.d/http-proxy.conf
+[Service]
+Environment="http_proxy=http://10.3.0.5:3128"
+Environment="https_proxy=http://10.3.0.5:3128"
+Environment="no_proxy=169.254.169.254,169.254.170.2,/var/run/docker.sock"
+EOF
+
+    # Docker config
+    mkdir -p $HOME/.docker
+    cat <<EOF >$HOME/.docker/config.json
+{
+ "proxies": {
+   "default": {
+     "httpProxy": "http://10.3.0.5:3128",
+     "httpsProxy": "http://10.3.0.5:3128",
+     "noProxy": "169.254.169.254,169.254.170.2,/var/run/docker.sock"
+   }
+ }
+}
+EOF
+
+    # Docker Daemon config
+    cat <<EOF >/etc/docker/daemon.json
+{
+  "proxies": {
+    "http-proxy": "http://10.3.0.5:3128",
+    "https-proxy": "http://10.3.0.5:3128",
+    "no-proxy": "169.254.169.254,169.254.170.2,/var/run/docker.sock"
+  }
+}
+EOF
+    systemctl daemon-reload
+    systemctl restart docker
+    systemctl restart amazon-ssm-agent
+
+    cat <<EOF >/etc/profile.d/sg-private-runner.sh
+export https_proxy=10.3.0.5:3128
+export http_proxy=10.3.0.5:3128
+export HTTP_PROXY=10.3.0.5:3128
+export HTTPS_PROXY=10.3.0.5:3128
+export SG_BASE_API=https://testapi.qa.stackguardian.io/api/v1
+EOF
+    source /etc/profile.d/sg-private-runner.sh
+
+    echo -e 'Acquire::http::Proxy "http://10.3.0.5:3128";' >/etc/apt/apt.conf.d/proxy
+
+  fi
+}
+
 main() { #{{{
 
   [[ "${*}" =~ --help || $# -lt 1 ]] && show_help && exit 0
@@ -1600,12 +1654,14 @@ main() { #{{{
       shift
       parse_arguments "$@"
       check_sg_args
+      configure_http_proxy
       register_instance
       ;;
     deregister)
       shift
       parse_arguments "$@"
       check_sg_args
+      configure_http_proxy
       deregister_instance
       ;;
     prune)
