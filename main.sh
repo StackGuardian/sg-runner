@@ -1565,7 +1565,6 @@ export https_proxy=${HTTP_PROXY}
 export http_proxy=${HTTP_PROXY}
 export HTTP_PROXY=${HTTP_PROXY}
 export HTTPS_PROXY=${HTTP_PROXY}
-export SG_BASE_API=https://testapi.qa.stackguardian.io/api/v1
 EOF
     source /etc/profile.d/sg-private-runner.sh
 
