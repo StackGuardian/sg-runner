@@ -1527,8 +1527,8 @@ EOF
     mkdir -p /etc/systemd/system/amazon-ssm-agent.service.d
     cat <<EOF >/etc/systemd/system/amazon-ssm-agent.service.d/http-proxy.conf
 [Service]
-Environment="http_proxy=http://10.3.0.5:3128"
-Environment="https_proxy=http://10.3.0.5:3128"
+Environment="http_proxy=http://${HTTP_PROXY}"
+Environment="https_proxy=http://${HTTP_PROXY}"
 Environment="no_proxy=169.254.169.254,169.254.170.2,/var/run/docker.sock"
 EOF
 
@@ -1538,8 +1538,8 @@ EOF
 {
  "proxies": {
    "default": {
-     "httpProxy": "http://10.3.0.5:3128",
-     "httpsProxy": "http://10.3.0.5:3128",
+     "httpProxy": "http://${HTTP_PROXY}",
+     "httpsProxy": "http://${HTTP_PROXY}",
      "noProxy": "169.254.169.254,169.254.170.2,/var/run/docker.sock"
    }
  }
@@ -1550,8 +1550,8 @@ EOF
     cat <<EOF >/etc/docker/daemon.json
 {
   "proxies": {
-    "http-proxy": "http://10.3.0.5:3128",
-    "https-proxy": "http://10.3.0.5:3128",
+    "http-proxy": "http://${HTTP_PROXY}",
+    "https-proxy": "http://${HTTP_PROXY}",
     "no-proxy": "169.254.169.254,169.254.170.2,/var/run/docker.sock"
   }
 }
@@ -1561,15 +1561,15 @@ EOF
     systemctl restart amazon-ssm-agent
 
     cat <<EOF >/etc/profile.d/sg-private-runner.sh
-export https_proxy=10.3.0.5:3128
-export http_proxy=10.3.0.5:3128
-export HTTP_PROXY=10.3.0.5:3128
-export HTTPS_PROXY=10.3.0.5:3128
+export https_proxy=${HTTP_PROXY}
+export http_proxy=${HTTP_PROXY}
+export HTTP_PROXY=${HTTP_PROXY}
+export HTTPS_PROXY=${HTTP_PROXY}
 export SG_BASE_API=https://testapi.qa.stackguardian.io/api/v1
 EOF
     source /etc/profile.d/sg-private-runner.sh
 
-    echo -e 'Acquire::http::Proxy "http://10.3.0.5:3128";' >/etc/apt/apt.conf.d/proxy
+    echo -e "Acquire::http::Proxy \"http://${HTTP_PROXY}\";" >/etc/apt/apt.conf.d/proxy
 
   fi
 }
