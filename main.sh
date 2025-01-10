@@ -665,8 +665,14 @@ clean_local_setup() { #{{{
     /var/log/registration \
     ./ssm-binaries \
     /var/lib/amazon/ssm \
-    /root/.aws/credentials >&/dev/null
+    /root/.aws/credentials >&/dev/null \
+    $HOME/.docker/config.json \
+    /etc/docker/daemon.json \
+    /etc/systemd/system/ecs.service.d/http-proxy.conf \
+    /etc/systemd/system/amazon-ssm-agent.service.d/http-proxy.conf \
   clean_cron
+
+  source /tmp/env_variables.sh
 
   # Wait for AWS SSM Managed Instance to deregister on AWS side
   sleep 10s
@@ -1493,6 +1499,14 @@ parse_arguments() { #{{{
 
 #}}}: Argument/init checks
 
+patch_json(){
+  debug "editing $1"
+  file="$1"
+  patch_json="$2"
+  [[ -f "${file}" && -s "${file}" ]] && org_json=$(cat "$file") || org_json='{}'
+  jq -s '.[0] * .[1]' <(echo "$org_json") <(echo "$patch_json") > $file
+}
+
 configure_http_proxy(){
   if [[ -n "${HTTP_PROXY}" ]]; then
     info "Setting up Porxy confguration for the registration process."
@@ -1507,21 +1521,21 @@ configure_http_proxy(){
     # Setting up proxy for ecs-init too as the above did not help https://repost.aws/knowledge-center/http-proxy-docker-ecs, https://docs.aws.amazon.com/AmazonECS/latest/developerguide/http_proxy_config.html
     # TODO: Handle correct setup of HTTPS_PROXY and HTTP_PROXY refer to https://docs.aws.amazon.com/systems-manager/latest/userguide/configure-proxy-ssm-agent.html
     # TODO: Handle for systemd and upstart based systems
-    mkdir -p /etc/init
-    cat <<EOF >/etc/init/ecs.override
-env HTTP_PROXY=${HTTP_PROXY}
-env HTTPS_PROXY=${HTTP_PROXY}
-env NO_PROXY=169.254.169.254,169.254.170.2,/var/run/docker.sock
-EOF
+#    mkdir -p /etc/init
+#    cat <<EOF >/etc/init/ecs.override
+#env HTTP_PROXY=${HTTP_PROXY}
+#env HTTPS_PROXY=${HTTP_PROXY}
+#env NO_PROXY=169.254.169.254,169.254.170.2,/var/run/docker.sock
+#EOF
 
     # TODO: Handle for systemd and upstart based systems
-    mkdir -p /etc/systemd/system/ecs.service.d
-    cat <<EOF >/etc/systemd/system/ecs.service.d/http-proxy.conf
-[Service]
-Environment="HTTP_PROXY=${HTTP_PROXY}"
-Environment="HTTPS_PROXY=${HTTP_PROXY}"
-Environment="NO_PROXY=169.254.169.254,169.254.170.2,/var/run/docker.sock"
-EOF
+#    mkdir -p /etc/systemd/system/ecs.service.d
+#    cat <<EOF >/etc/systemd/system/ecs.service.d/http-proxy.conf
+#[Service]
+#Environment="HTTP_PROXY=${HTTP_PROXY}"
+#Environment="HTTPS_PROXY=${HTTP_PROXY}"
+#Environment="NO_PROXY=169.254.169.254,169.254.170.2,/var/run/docker.sock"
+#EOF
 
     # SSM HTTP proxy configuration
     mkdir -p /etc/systemd/system/amazon-ssm-agent.service.d
@@ -1533,32 +1547,25 @@ Environment="no_proxy=169.254.169.254,169.254.170.2,/var/run/docker.sock"
 EOF
 
     # Docker config
-    mkdir -p $HOME/.docker
-    cat <<EOF >$HOME/.docker/config.json
-{
- "proxies": {
-   "default": {
-     "httpProxy": "http://${HTTP_PROXY}",
-     "httpsProxy": "http://${HTTP_PROXY}",
-     "noProxy": "169.254.169.254,169.254.170.2,/var/run/docker.sock"
-   }
- }
-}
-EOF
+    # Required for the docker client interacting with the internet
+    # sets proxy configuration for containers
+    # Required by fluentbit
+    http_proxy_docker_config="{ \"proxies\": { \"default\": { \"httpProxy\": \"http://${HTTP_PROXY}\", \"httpsProxy\": \"http://${HTTP_PROXY}\", \"noProxy\": \"169.254.169.254,169.254.170.2,/var/run/docker.sock\" } } }"
+    patch_json "$HOME/.docker/config.json" "$http_proxy_docker_config"
 
+    # Required for authenticating to the registry and fetching images
     # Docker Daemon config
-    cat <<EOF >/etc/docker/daemon.json
-{
-  "proxies": {
-    "http-proxy": "http://${HTTP_PROXY}",
-    "https-proxy": "http://${HTTP_PROXY}",
-    "no-proxy": "169.254.169.254,169.254.170.2,/var/run/docker.sock"
-  }
-}
-EOF
+    http_proxy_docker_daemon_config="{ \"proxies\": { \"http-proxy\": \"http://${HTTP_PROXY}\", \"https-proxy\": \"http://${HTTP_PROXY}\", \"no-proxy\": \"169.254.169.254,169.254.170.2,/var/run/docker.sock\" } }"
+    patch_json "/etc/docker/daemon.json" "$http_proxy_docker_daemon_config"
+
+    info "restarting services"
     systemctl daemon-reload
     systemctl restart docker
     systemctl restart amazon-ssm-agent
+
+    env | while IFS='=' read -r var value; do
+        echo "export $var=\"$value\"" >> /tmp/env_variables.sh
+    done
 
     cat <<EOF >/etc/profile.d/sg-private-runner.sh
 export https_proxy=${HTTP_PROXY}
@@ -1660,7 +1667,6 @@ main() { #{{{
       shift
       parse_arguments "$@"
       check_sg_args
-      configure_http_proxy
       deregister_instance
       ;;
     prune)
@@ -1680,6 +1686,9 @@ main() { #{{{
       ;;
     enable-cgroupsv2)
       cgroupsv2 1
+      ;;
+    clean)
+      clean_local_setup & spinner "$!" "Starting cleanup"
       ;;
   esac
 
