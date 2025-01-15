@@ -798,7 +798,6 @@ EOF
 #######################################
 configure_local_data() { #{{{
   mkdir -p /var/log/ecs /etc/ecs /var/lib/ecs/data /etc/fluentbit/ /var/log/registration/
-  #rm -rf /etc/ecs/ecs.config > /dev/null
 
   spinner_wait "Configuring local data.."
 
