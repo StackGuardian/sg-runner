@@ -1420,7 +1420,7 @@ is_root() { #{{{
 #}}}: is_root
 
 init_args_are_valid() { #{{{
-  if [[ ! "$1" =~ ^register$|^deregister$|^status$|^info$|^prune$|^cgroupsv2$ ]]; then
+  if [[ ! "$1" =~ ^register$|^deregister$|^status$|^info$|^prune$|^cgroupsv2|^clean$ ]]; then
     err "Provided option" "${1}" "is invalid"
     exit 1
   elif [[ "$1" == "cgroupsv2" && ! "$2" =~ ^enable$|^disable$ ]]; then
@@ -1550,6 +1550,7 @@ EOF
     # Required for the docker client interacting with the internet
     # sets proxy configuration for containers
     # Required by fluentbit
+    mkdir -p "${HOME}/.docker"
     http_proxy_docker_config="{ \"proxies\": { \"default\": { \"httpProxy\": \"http://${HTTP_PROXY}\", \"httpsProxy\": \"http://${HTTP_PROXY}\", \"noProxy\": \"169.254.169.254,169.254.170.2,/var/run/docker.sock\" } } }"
     patch_json "$HOME/.docker/config.json" "$http_proxy_docker_config"
 
@@ -1558,13 +1559,12 @@ EOF
     http_proxy_docker_daemon_config="{ \"proxies\": { \"http-proxy\": \"http://${HTTP_PROXY}\", \"https-proxy\": \"http://${HTTP_PROXY}\", \"no-proxy\": \"169.254.169.254,169.254.170.2,/var/run/docker.sock\" } }"
     patch_json "/etc/docker/daemon.json" "$http_proxy_docker_daemon_config"
 
-    info "restarting services"
     systemctl daemon-reload
     systemctl restart docker
-    systemctl restart amazon-ssm-agent
 
+    echo "" >/tmp/env_variables.sh
     env | while IFS='=' read -r var value; do
-        echo "export $var=\"$value\"" >> /tmp/env_variables.sh
+        echo "export $var=\"${!var}\"" >> /tmp/env_variables.sh
     done
 
     cat <<EOF >/etc/profile.d/sg-private-runner.sh
