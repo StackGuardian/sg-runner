@@ -1575,9 +1575,6 @@ export HTTPS_PROXY=${HTTP_PROXY}
 EOF
     source /etc/profile.d/sg-private-runner.sh
 
-    os_type=$(awk -F= '/^NAME/ {gsub(/"/, ""); print $2}' /etc/os-release)
-    [[ $os_type == "Ubuntu" ]] && echo -e "Acquire::http::Proxy \"http://${HTTP_PROXY}\";" >/etc/apt/apt.conf.d/proxy
-
   fi
 }
 
