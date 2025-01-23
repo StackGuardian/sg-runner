@@ -1091,10 +1091,6 @@ configure_fluentbit() { #{{{
       -v $(pwd)/volumes/db-state/:/var/log/ \
       -v $(pwd)/fluent-bit.conf:/fluent-bit/etc/fluentbit.conf \
       -v /var/log/registration:/var/log/registration \
-      -e "HTTP_PROXY=http://${HTTP_PROXY}" \
-      -e "http_proxy=http://${HTTP_PROXY}" \
-      -e "HTTPS_PROXY=http://${HTTP_PROXY}" \
-      -e "https_proxy=http://${HTTP_PROXY}" \
       --log-driver=fluentd \
       --log-opt tag=fluentbit
        "
@@ -1548,6 +1544,14 @@ Environment="http_proxy=http://${HTTP_PROXY}"
 Environment="https_proxy=http://${HTTP_PROXY}"
 Environment="no_proxy=169.254.169.254,169.254.170.2,/var/run/docker.sock"
 EOF
+
+    # Docker config
+    # Required for the docker client interacting with the internet
+    # sets proxy configuration for containers
+    # Required by fluentbit
+    mkdir -p "${HOME}/.docker"
+    http_proxy_docker_config="{ \"proxies\": { \"default\": { \"httpProxy\": \"http://${HTTP_PROXY}\", \"httpsProxy\": \"http://${HTTP_PROXY}\", \"noProxy\": \"169.254.169.254,169.254.170.2,/var/run/docker.sock\" } } }"
+    patch_json "$HOME/.docker/config.json" "$http_proxy_docker_config"
 
     # Required for authenticating to the registry and fetching images
     # Docker Daemon config
