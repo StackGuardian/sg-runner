@@ -1470,6 +1470,11 @@ parse_arguments() { #{{{
       HTTP_PROXY="${2}"
       shift 2
       ;;
+    --no-proxy)
+      check_arg_value "${1}" "${2}"
+      NO_PROXY="${2}"
+      shift 2
+      ;;
     -f | --force)
       FORCE_PASS=true
       shift
@@ -1515,7 +1520,7 @@ configure_http_proxy(){
     echo "HTTP_PROXY=${HTTP_PROXY}" >>/etc/ecs/ecs.config
     echo "HTTPS_PROXY=${HTTP_PROXY}" >>/etc/ecs/ecs.config
     # TODO: read current value and append NO_PROXY not overwrite
-    echo "NO_PROXY=169.254.169.254,169.254.170.2,/var/run/docker.sock" >>/etc/ecs/ecs.config
+    echo "NO_PROXY=${NO_PROXY}" >>/etc/ecs/ecs.config
 
     # Setting up proxy for ecs-init too as the above did not help https://repost.aws/knowledge-center/http-proxy-docker-ecs, https://docs.aws.amazon.com/AmazonECS/latest/developerguide/http_proxy_config.html
     # TODO: Handle correct setup of HTTPS_PROXY and HTTP_PROXY refer to https://docs.aws.amazon.com/systems-manager/latest/userguide/configure-proxy-ssm-agent.html
@@ -1542,7 +1547,7 @@ configure_http_proxy(){
 [Service]
 Environment="http_proxy=http://${HTTP_PROXY}"
 Environment="https_proxy=http://${HTTP_PROXY}"
-Environment="no_proxy=169.254.169.254,169.254.170.2,/var/run/docker.sock"
+Environment="no_proxy=${NO_PROXY}"
 EOF
 
     # Docker config
@@ -1550,12 +1555,12 @@ EOF
     # sets proxy configuration for containers
     # Required by fluentbit
     mkdir -p "${HOME}/.docker"
-    http_proxy_docker_config="{ \"proxies\": { \"default\": { \"httpProxy\": \"http://${HTTP_PROXY}\", \"httpsProxy\": \"http://${HTTP_PROXY}\", \"noProxy\": \"169.254.169.254,169.254.170.2,/var/run/docker.sock\" } } }"
+    http_proxy_docker_config="{ \"proxies\": { \"default\": { \"httpProxy\": \"http://${HTTP_PROXY}\", \"httpsProxy\": \"http://${HTTP_PROXY}\", \"noProxy\": \"${NO_PROXY}\" } } }"
     patch_json "$HOME/.docker/config.json" "$http_proxy_docker_config"
 
     # Required for authenticating to the registry and fetching images
     # Docker Daemon config
-    http_proxy_docker_daemon_config="{ \"proxies\": { \"http-proxy\": \"http://${HTTP_PROXY}\", \"https-proxy\": \"http://${HTTP_PROXY}\", \"no-proxy\": \"169.254.169.254,169.254.170.2,/var/run/docker.sock\" } }"
+    http_proxy_docker_daemon_config="{ \"proxies\": { \"http-proxy\": \"http://${HTTP_PROXY}\", \"https-proxy\": \"http://${HTTP_PROXY}\", \"no-proxy\": \"${NO_PROXY}\" } }"
     patch_json "/etc/docker/daemon.json" "$http_proxy_docker_daemon_config"
 
     systemctl daemon-reload
