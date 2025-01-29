@@ -1516,6 +1516,9 @@ configure_http_proxy(){
     info "Setting up Porxy confguration for the registration process."
     info "Docker should be setup to use the same proxy. For more info see: https://docs.docker.com/engine/cli/proxy/"
     debug "Setting up HTTP PROXY to ${HTTP_PROXY} for the ECS agent."
+    
+    NO_PROXY=${NO_PROXY:="169.254.169.254,169.254.170.2,/var/run/docker.sock"}
+    
     mkdir -p /etc/ecs
     echo "HTTP_PROXY=${HTTP_PROXY}" >>/etc/ecs/ecs.config
     echo "HTTPS_PROXY=${HTTP_PROXY}" >>/etc/ecs/ecs.config
