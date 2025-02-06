@@ -654,22 +654,34 @@ clean_local_setup() { #{{{
   debug "Removing $CONTAINER_ORCHESTRATOR network: ${SG_DOCKER_NETWORK}.."
   $CONTAINER_ORCHESTRATOR network rm "${SG_DOCKER_NETWORK}" >&/dev/nul
   debug "Removing local configuration.."
-  rm -rf \
-    /var/log/ecs \
-    /etc/ecs \
-    /var/lib/ecs \
-    ./fluent-bit.conf \
-    volumes/ \
-    ./aws-credentials \
-    ./db-state \
-    /var/log/registration \
-    ./ssm-binaries \
-    /var/lib/amazon/ssm \
-    /root/.aws/credentials >&/dev/null \
-    $HOME/.docker/config.json \
-    /etc/docker/daemon.json \
-    /etc/systemd/system/ecs.service.d/http-proxy.conf \
-    /etc/systemd/system/amazon-ssm-agent.service.d/http-proxy.conf \
+  
+  files_or_dir_to_remove=(
+    "/var/log/ecs"
+    "/etc/ecs"
+    "/var/lib/ecs"
+    "./fluent-bit.conf"
+    "volumes/"
+    "./aws-credentials"
+    "./db-state"
+    "/var/log/registration"
+    "./ssm-binaries"
+    "/var/lib/amazon/ssm"
+    "/root/.aws/credentials >&/dev/null"
+    "/etc/systemd/system/ecs.service.d/http-proxy.conf"
+    "/etc/systemd/system/amazon-ssm-agent.service.d/http-proxy.conf"
+  )
+
+  # Loop through the array and remove each item
+  for item in "${files_and_dir_to_remove[@]}"; do
+    if [[ -e "${item}" ]]; then
+      rm -rf "$item" && debug "$item removed successfully." || debug "Failed to remove $item."
+    fi
+  done
+    
+  # revert config to as it was earlier
+  [[ -e "${HOME}/original_docker_config.json" ]] && cp "${HOME}/original_docker_config.json" "${HOME}/.docker/config.json"
+  [[ -e "${HOME}/original_docker_daemon.json" ]] && cp "${HOME}/original_docker_daemon.json" "/etc/docker/daemon.json"
+
   clean_cron
 
   source /tmp/env_variables.sh
@@ -1519,11 +1531,11 @@ configure_http_proxy(){
     
     NO_PROXY_DEFAULT="169.254.169.254,169.254.170.2,/var/run/docker.sock"
     [[ -n "${NO_PROXY}" ]] && NO_PROXY="${NO_PROXY_DEFAULT},${NO_PROXY}" || NO_PROXY="${NO_PROXY_DEFAULT}"
+    debug "Using no proxy: ${NO_PROXY}"
     
     mkdir -p /etc/ecs
     echo "HTTP_PROXY=${HTTP_PROXY}" >>/etc/ecs/ecs.config
     echo "HTTPS_PROXY=${HTTP_PROXY}" >>/etc/ecs/ecs.config
-    # TODO: read current value and append NO_PROXY not overwrite
     echo "NO_PROXY=${NO_PROXY}" >>/etc/ecs/ecs.config
 
     # Setting up proxy for ecs-init too as the above did not help https://repost.aws/knowledge-center/http-proxy-docker-ecs, https://docs.aws.amazon.com/AmazonECS/latest/developerguide/http_proxy_config.html
@@ -1560,11 +1572,13 @@ EOF
     # Required by fluentbit
     mkdir -p "${HOME}/.docker"
     http_proxy_docker_config="{ \"proxies\": { \"default\": { \"httpProxy\": \"http://${HTTP_PROXY}\", \"httpsProxy\": \"http://${HTTP_PROXY}\", \"noProxy\": \"${NO_PROXY}\" } } }"
+    [[ -e "$HOME/.docker/config.json" ]] && cp "$HOME/.docker/config.json" "$HOME/original_docker_config.json"
     patch_json "$HOME/.docker/config.json" "$http_proxy_docker_config"
 
     # Required for authenticating to the registry and fetching images
     # Docker Daemon config
     http_proxy_docker_daemon_config="{ \"proxies\": { \"http-proxy\": \"http://${HTTP_PROXY}\", \"https-proxy\": \"http://${HTTP_PROXY}\", \"no-proxy\": \"${NO_PROXY}\" } }"
+    [[ -e "/etc/docker/daemon.json" ]] &&  cp "/etc/docker/daemon.json" "$HOME/original_docker_daemon.json"
     patch_json "/etc/docker/daemon.json" "$http_proxy_docker_daemon_config"
 
     systemctl daemon-reload
