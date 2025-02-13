@@ -655,7 +655,7 @@ clean_local_setup() { #{{{
   $CONTAINER_ORCHESTRATOR network rm "${SG_DOCKER_NETWORK}" >&/dev/nul
   debug "Removing local configuration.."
   
-  files_or_dir_to_remove=(
+  files_and_dir_to_remove=(
     "/var/log/ecs"
     "/etc/ecs"
     "/var/lib/ecs"
@@ -1708,6 +1708,8 @@ main() { #{{{
       cgroupsv2 1
       ;;
     clean)
+      shift
+      parse_arguments "$@"
       clean_local_setup & spinner "$!" "Starting cleanup"
       ;;
   esac
