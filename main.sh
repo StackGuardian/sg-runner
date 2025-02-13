@@ -91,8 +91,11 @@ Options:
   --runner-group '': (required)
     The runner group where new runner will be registered.
 
-  --http-proxy
+  --http-proxy [hostname or IP address]:[port]
     The hostname (or IP address) and port number of an HTTP proxy
+    
+  --no-proxy
+    Comma separated hostname (or IP address)
 
   --no-clean-on-fail
     Do not clean up local setup in case of errors during registration.
