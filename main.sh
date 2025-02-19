@@ -341,7 +341,6 @@ check_fluentbit_status() { #{{{
     if ignore_fluentbit_errors; then
       debug "Ignoring Fluentbit error(s) $err_msg"
     else
-      # TODO: update runner group with error
       err "Fluentbit encountered error(s)" "$err_msg"
       if ! no_clean_on_fail; then
         clean_local_setup & spinner "$!" "Starting cleanup"
@@ -351,7 +350,6 @@ check_fluentbit_status() { #{{{
         info "WARNING:" "If retrying a new registration, do not use --no-clean-on-fail as it leaves the system in an inconsistent state only useful for debugging purposes"
       fi
       info "Use --ignore-fluentbit-errors to ignore errors and proceed with the registration process"
-  # TODO: update runner group with error
       exit 1
     fi
   else
@@ -498,7 +496,11 @@ cgroupsv2() { #{{{
 update_runner_group(){
   url="${SG_BASE_API}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/"
   
-  payload="{ \"RegistrationErrors\": { \"${RUNNER_ID}\": \"$(echo -n "$1" | sed 's/[][\\.^$*\/|(){}?&"\'']//g')\" } }"
+  err_msg=$(echo -n "$1" | tr -cd "[:print:]")
+
+  debug "Error message ${err_msg}"
+
+  payload="{ \"RunnerRegistrationErrors\": { \"$(ip route | grep default | cut -d" " -f9)\" :  { \"RunnerId\": \"${RUNNER_ID}\" , \"error\": \"${err_msg}\", \"timestamp\": \"$( date -u -Iseconds )\", \"command\": \"${0} ${@}\" } } }"
   
   if api_call "PATCH" "$payload"; then
     debug "updated runner group with error msg"   
@@ -525,7 +527,6 @@ api_call() { #{{{
   fi
 
   if [[ -z "$response" ]]; then
-  # TODO: update runner group with error
     exit 1
   else
     full_response="$response"
@@ -555,7 +556,6 @@ api_call() { #{{{
 
   if [[ -z "$status_code" ]]; then
     err "Unknown status code."
-  # TODO: update runner group with error
     exit 1
   elif [ "$status_code" != "200" ] && [ "$status_code" != "201" ] && [ "$status_code" != "100" ]; then
     return 1
@@ -723,7 +723,6 @@ clean_local_setup() { #{{{
 
 check_variable_value() { #{{{
   local variable_name=$1
-  # TODO: update runner group with error
   [[ -z "${!variable_name}" ]] && \
     err "Variable can't be empty" "$variable_name" && exit 1
   return 0
@@ -1018,15 +1017,12 @@ fetch_organization_info() { #{{{
     metadata="$(echo "${response}" | jq -r '.data.RegistrationMetadata[0]')"
     if [[ "$metadata" == "null" || -z "$metadata" ]]; then
       spinner_msg "Preparing environment.." 1
-      # TODO: update runner group with error
       err "API data missing registration metadata."
       exit 1
     fi
   else
     spinner_msg "Trying to fetch registration data" 1
-    # TODO: update runner group with error
     err "Could not fetch data from API." "$status_code" "$message"
-  # TODO: update runner group with error
     exit 1
   fi
   spinner_msg "Preparing environment" 0
@@ -1073,7 +1069,6 @@ fetch_organization_info() { #{{{
       info "AWS role is used for S3 Storage Backend auth" "$S3_AWS_ROLE_ARN"
     else
       err "Auth for storage backend is not correctly configured, neither AWS_STATIC nor AWS_RBAC integration is provided"
-      # TODO: update runner group with error
       exit 1
     fi
   elif [[ "$STORAGE_BACKEND_TYPE" == "azure_blob_storage" ]]; then
@@ -1082,7 +1077,6 @@ fetch_organization_info() { #{{{
     done
   else
     err "Unsupported storage backend type!"
-    # TODO: update runner group with error
     exit 1
   fi
 
@@ -1226,7 +1220,6 @@ register_instance() { #{{{
     debug "Response:" "$(cat $LOG_FILE)"
     spinner_msg "Downloading support files" 1
     err "Unable to download" "ecs-anywhere-install.sh" "script"
-    # TODO: update runner group with error
     exit 1
   fi
   spinner_msg "Downloading support files" 0
@@ -1275,7 +1268,6 @@ register_instance() { #{{{
       kill "$ecs_anywhere_pid" >&/dev/null
       sleep 2
       echo "${err}:${msg}" >> "$LOG_FILE"
-      # TODO: update runner group with error
       exit 1
     fi
   done & spinner "$!" "Verifying registration of this runner"
@@ -1306,7 +1298,6 @@ deregister_instance() { #{{{
       | jq -r '.sg_runner_group_id')"
     if [[ "$RUNNER_GROUP_ID_ECS_CONFIG" != "$RUNNER_GROUP_ID" ]]; then 
       err "Different configured and provided --runner-group. Configured: $RUNNER_GROUP_ID_ECS_CONFIG, Provided: $RUNNER_GROUP_ID"
-      # TODO: update runner group with error
       exit 1
     fi
     RUNNER_ID="$(grep ECS_INSTANCE_ATTRIBUTES /etc/ecs/ecs.config \
@@ -1316,7 +1307,6 @@ deregister_instance() { #{{{
     if ! force_exec; then
       err "Instance probably deregistered"
       cmd_example "Try rerunning with" "-f/--force" "to force local cleanup"
-      # TODO: update runner group with error
       exit 1
     fi
   fi
@@ -1351,7 +1341,6 @@ deregister_instance() { #{{{
     else
       info "Deregister with -f/--force to force local cleanup. Needed if you are registering this machine again."
     fi
-    # TODO: update runner group with error
     exit 1
   fi
 }
@@ -1460,11 +1449,9 @@ check_arg_value() { #{{{
   ## TODO: make sure to validate double parameter input
   if [[ "${2:0:2}" == "--" ]]; then
     err "Argument" "${1}" "has invalid value: $2"
-    # TODO: update runner group with error
     exit 1
   elif [[ -z "${2}" ]]; then
     err "Argument" "${1}" "can't be empty"
-    # TODO: update runner group with error
     exit 1
   fi
   return 0
@@ -1474,7 +1461,6 @@ check_arg_value() { #{{{
 is_root() { #{{{
   if (( $(id -u) != 0 )); then
     err "This script must be run as" "root"
-    # TODO: update runner group with error
     exit 1
   fi
   return 0
@@ -1484,18 +1470,15 @@ is_root() { #{{{
 init_args_are_valid() { #{{{
   if [[ ! "$1" =~ ^register$|^deregister$|^status$|^info$|^prune$|^cgroupsv2|^clean$ ]]; then
     err "Provided option" "${1}" "is invalid"
-    # TODO: update runner group with error
     exit 1
   elif [[ "$1" == "cgroupsv2" && ! "$2" =~ ^enable$|^disable$ ]]; then
     err "Arguments:" "enable, disable" "are required."
-    # TODO: update runner group with error
     exit 1
   elif [[ "$1" =~ register|deregister && \
     ( ! "$*" =~ --sg-node-token || \
     ! "$*" =~ --organization || \
     ! "$*" =~ --runner-group ) ]]; then
     err "Arguments:" "--sg-node-token, --organization, --runner-group" "are required"
-    # TODO: update runner group with error
     exit 1
   fi
   return 0
@@ -1507,7 +1490,6 @@ check_sg_args() { #{{{
     || -z "${ORGANIZATION_ID}" \
     || -z "${RUNNER_GROUP_ID}" ]]; then
     err "Arguments: " "--sg-node-token, --organization, --runner-group" "are required"
-    # TODO: update runner group with error
     exit 1
   fi
   return 0
@@ -1561,7 +1543,6 @@ parse_arguments() { #{{{
     *)
       [[ -z "${1}" ]] && break
       err "Invalid argument:" "${1}"
-      # TODO: update runner group with error
       exit 1
       ;;
     esac
@@ -1637,7 +1618,6 @@ main() { #{{{
 
   if [[ ! -d /run/systemd/system ]]; then
     err "Private runner is only available for" "systemd-based" "systems"
-    # TODO: update runner group with error
     exit 1
   fi
 
@@ -1664,7 +1644,6 @@ main() { #{{{
       cmds+=( "$cmd" )
     fi
   done
-  # TODO: update runner group with error
   (( ${#cmds[@]}>0 )) && \
     err "Commands" "${cmds[*]}" "not installed" && exit 1
   
@@ -1684,7 +1663,6 @@ main() { #{{{
 
   if [[ -z $CONTAINER_ORCHESTRATOR ]]; then
     err "One of following container orchestrators required:" "${CONTAINER_ORCHESTRATORS[*]}"
-  # TODO: update runner group with error
     exit 1
   fi
 
