@@ -260,6 +260,9 @@ print_details() { #{{{
   details_item "Memory" "$(free -h | awk '/^Mem:/ {printf "%s [Used: %s]\n", $2, $3}')"
   details_item "Size /var" "$(df -h --total /var | awk '/^total/ {if ($2 ~ /G/ && $2 + 0 < 100) printf "\033[31m%s [Used: %s]\033[0m\n", $2, $(NF-1); else printf "%s [Used: %s]\n", $2, $(NF-1)}')"
   echo
+  details_frame "Runner Group Link"
+  details_item "Link" "https://app.stackguardian.io/orchestrator/orgs/${ORGANIZATION_NAME}/runnergroups/${RUNNER_GROUP_ID}"
+  echo
 }
 #}}}: print_details
 
