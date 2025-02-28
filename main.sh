@@ -243,7 +243,7 @@ print_details() { #{{{
   # details_item "Registration Date" "$(date +'%Y-%m-%d %H:%M:%S (GMT%z)')"
   details_item "Organization" "${ORGANIZATION_ID}"
   details_item "Runner Group" "${RUNNER_GROUP_ID}"
-  details_item "Link" "https://app.stackguardian.io/orchestrator/orgs/${ORGANIZATION_NAME}/runnergroups/${RUNNER_GROUP_ID}"
+  # details_item "Link" "https://app.stackguardian.io/orchestrator/orgs/${ORGANIZATION_NAME}/runnergroups/${RUNNER_GROUP_ID}"
   echo
   details_frame "Host Information"
   details_item "Hostaname" "$HOSTNAME"
