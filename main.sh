@@ -1107,7 +1107,8 @@ configure_fluentbit() { #{{{
       -v $(pwd)/fluent-bit.conf:/fluent-bit/etc/fluentbit.conf \
       -v /var/log/registration:/var/log/registration \
       --log-driver=fluentd \
-      --log-opt tag=fluentbit
+      --log-opt tag=fluentbit \
+      --log-opt fluentd-async
        "
   running=$($CONTAINER_ORCHESTRATOR ps -q --filter "name=fluentbit-agent")
   exists=$($CONTAINER_ORCHESTRATOR ps -aq --filter "name=fluentbit-agent")
