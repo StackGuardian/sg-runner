@@ -1116,9 +1116,8 @@ configure_fluentbit() { #{{{
       -v $(pwd)/volumes/db-state/:/var/log/ \
       -v $(pwd)/fluent-bit.conf:/fluent-bit/etc/fluentbit.conf \
       -v /var/log/registration:/var/log/registration \
-      --log-opt fluentd-async=true
-      --log-opt tag=fluentbit \
-      --log-opt fluentd-async=true
+      --log-opt fluentd-async=true \
+      --log-opt tag=fluentbit
        "
   running=$($CONTAINER_ORCHESTRATOR ps -q --filter "name=fluentbit-agent")
   exists=$($CONTAINER_ORCHESTRATOR ps -aq --filter "name=fluentbit-agent")
