@@ -11,6 +11,7 @@ CONTAINER_ORCHESTRATOR=
 LOG_DEBUG=${LOG_DEBUG:=false}
 CGROUPSV2_PREVIEW=${CGROUPSV2_PREVIEW:=false}
 SG_BASE_API=${SG_BASE_API:="https://api.app.stackguardian.io/api/v1"}
+NO_PROXY="169.254.169.254,169.254.170.2,/var/run/docker.sock"
 
 readonly LOG_FILE="/tmp/sg_runner.log"
 
@@ -814,6 +815,7 @@ EOF
 #######################################
 configure_local_data() { #{{{
   mkdir -p /var/log/ecs /etc/ecs /var/lib/ecs/data /etc/fluentbit/ /var/log/registration/
+  rm -rf /etc/ecs/ecs.config > /dev/null
 
   spinner_wait "Configuring local data.."
 
@@ -835,7 +837,7 @@ configure_local_data() { #{{{
 # ECS_ENGINE_AUTH_TYPE	"docker" | "dockercfg"	The type of auth data that is stored in the ECS_ENGINE_AUTH_DATA key.		
 # ECS_ENGINE_AUTH_DATA
 
-  cat >> /etc/ecs/ecs.config << EOF
+  cat > /etc/ecs/ecs.config << EOF
 ECS_CLUSTER=${ECS_CLUSTER}
 AWS_DEFAULT_REGION=${LOCAL_AWS_DEFAULT_REGION}
 ECS_INSTANCE_ATTRIBUTES={"sg_organization": "${ORGANIZATION_NAME}","sg_runner_id": "${RUNNER_ID}", "sg_runner_group_id": "${RUNNER_GROUP_ID}"}
@@ -855,6 +857,13 @@ ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true
 ECS_EXTERNAL=true
 EOF
 
+  if [[ -n "${HTTP_PROXY}" ]]; then
+    cat >> /etc/ecs/ecs.config << EOF
+HTTP_PROXY=${HTTP_PROXY}
+HTTPS_PROXY=${HTTP_PROXY}
+NO_PROXY=${NO_PROXY}
+EOF
+  fi
 
 
 # Configure Fluentbit configuration inside /etc/fluentbit/fluent-bit.conf
@@ -1489,7 +1498,7 @@ parse_arguments() { #{{{
       ;;
     --no-proxy)
       check_arg_value "${1}" "${2}"
-      NO_PROXY="${2}"
+      NO_PROXY="${NO_PROXY},${2}"
       shift 2
       ;;
     -f | --force)
@@ -1534,15 +1543,6 @@ configure_http_proxy(){
     info "Docker should be setup to use the same proxy. For more info see: https://docs.docker.com/engine/cli/proxy/"
     debug "Setting up HTTP PROXY to ${HTTP_PROXY} for the ECS agent."
     
-    NO_PROXY_DEFAULT="169.254.169.254,169.254.170.2,/var/run/docker.sock"
-    [[ -n "${NO_PROXY}" ]] && NO_PROXY="${NO_PROXY_DEFAULT},${NO_PROXY}" || NO_PROXY="${NO_PROXY_DEFAULT}"
-    debug "Using no proxy: ${NO_PROXY}"
-    
-    mkdir -p /etc/ecs
-    echo "HTTP_PROXY=${HTTP_PROXY}" >>/etc/ecs/ecs.config
-    echo "HTTPS_PROXY=${HTTP_PROXY}" >>/etc/ecs/ecs.config
-    echo "NO_PROXY=${NO_PROXY}" >>/etc/ecs/ecs.config
-
     # Setting up proxy for ecs-init too as the above did not help https://repost.aws/knowledge-center/http-proxy-docker-ecs, https://docs.aws.amazon.com/AmazonECS/latest/developerguide/http_proxy_config.html
     # TODO: Handle correct setup of HTTPS_PROXY and HTTP_PROXY refer to https://docs.aws.amazon.com/systems-manager/latest/userguide/configure-proxy-ssm-agent.html
     # TODO: Handle for systemd and upstart based systems
@@ -1591,7 +1591,7 @@ EOF
 
     echo "" >/tmp/env_variables.sh
     env | while IFS='=' read -r var value; do
-        echo "export $var=\"${!var}\"" >> /tmp/env_variables.sh
+        echo "export $var=\"${!var}\"" >> /tmp/env_variables.sh 2>/dev/null
     done
 
     cat <<EOF >/etc/profile.d/sg-private-runner.sh
