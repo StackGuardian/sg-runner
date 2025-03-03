@@ -689,7 +689,7 @@ clean_local_setup() { #{{{
 
   clean_cron
 
-  source /tmp/env_variables.sh
+  [[ -e "/tmp/env_variables.sh" ]] && source /tmp/env_variables.sh || :
 
   # Wait for AWS SSM Managed Instance to deregister on AWS side
   sleep 10s
@@ -1116,7 +1116,7 @@ configure_fluentbit() { #{{{
       -v $(pwd)/volumes/db-state/:/var/log/ \
       -v $(pwd)/fluent-bit.conf:/fluent-bit/etc/fluentbit.conf \
       -v /var/log/registration:/var/log/registration \
-      --log-driver=fluentd \
+      --log-opt fluentd-async=true
       --log-opt tag=fluentbit \
       --log-opt fluentd-async=true
        "
