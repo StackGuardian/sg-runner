@@ -1116,6 +1116,7 @@ configure_fluentbit() { #{{{
       -v $(pwd)/volumes/db-state/:/var/log/ \
       -v $(pwd)/fluent-bit.conf:/fluent-bit/etc/fluentbit.conf \
       -v /var/log/registration:/var/log/registration \
+      --log-driver=fluentd \
       --log-opt fluentd-async=true \
       --log-opt tag=fluentbit
        "
