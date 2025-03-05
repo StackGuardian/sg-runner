@@ -1594,13 +1594,10 @@ EOF
         echo "export $var=\"${!var}\"" >> /tmp/env_variables.sh 2>/dev/null
     done
 
-    cat <<EOF >/etc/profile.d/sg-private-runner.sh
-export https_proxy=${HTTP_PROXY}
-export http_proxy=${HTTP_PROXY}
-export HTTP_PROXY=${HTTP_PROXY}
-export HTTPS_PROXY=${HTTP_PROXY}
-EOF
-    source /etc/profile.d/sg-private-runner.sh
+    export https_proxy=${HTTP_PROXY}
+    export http_proxy=${HTTP_PROXY}
+    export HTTP_PROXY=${HTTP_PROXY}
+    export HTTPS_PROXY=${HTTP_PROXY}
 
   fi
 }
