@@ -11,6 +11,9 @@ CONTAINER_ORCHESTRATOR=
 LOG_DEBUG=${LOG_DEBUG:=false}
 CGROUPSV2_PREVIEW=${CGROUPSV2_PREVIEW:=false}
 SG_BASE_API=${SG_BASE_API:="https://api.app.stackguardian.io/api/v1"}
+# NO_PROXY variable is set to bypass proxy for specific addresses and paths.
+# This is added as it is used by AWS ECS and SSM services running locally.
+# User provided NO_PROXY will be appended to this variable.
 NO_PROXY="169.254.169.254,169.254.170.2,/var/run/docker.sock"
 
 readonly LOG_FILE="/tmp/sg_runner.log"
@@ -93,7 +96,7 @@ Options:
     The runner group where new runner will be registered.
 
   --http-proxy [hostname or IP address]:[port]
-    The hostname (or IP address) and port number of an HTTP proxy
+    The hostname (or IP address) and port of an HTTP and HTTPS proxy
     
   --no-proxy
     Comma separated hostname (or IP address)
@@ -317,7 +320,7 @@ check_fluentbit_status() { #{{{
   timeout=5
   tries=0
   until (( found_error == 1 )) || (( tries >= timeout )); do
-    # TODO: Do not run error chesks at all if ignore_fluentbit_errors is set
+    # TODO: Do not run error checks at all if ignore_fluentbit_errors is set
     err_msg="$(grep -iaA4 -m1 -E "\[error.*" "$log_file" | tr -d '\0')"
     if [[ -z "$err_msg" ]]; then
       debug "Try #$((++tries)): No error messages found."
@@ -1594,10 +1597,10 @@ EOF
         echo "export $var=\"${!var}\"" >> /tmp/env_variables.sh 2>/dev/null
     done
 
-    export https_proxy=${HTTP_PROXY}
-    export http_proxy=${HTTP_PROXY}
     export HTTP_PROXY=${HTTP_PROXY}
     export HTTPS_PROXY=${HTTP_PROXY}
+    export http_proxy=${HTTP_PROXY}
+    export https_proxy=${HTTP_PROXY}
 
   fi
 }
