@@ -671,7 +671,7 @@ clean_local_setup() { #{{{
     "/var/log/registration"
     "./ssm-binaries"
     "/var/lib/amazon/ssm"
-    "/root/.aws/credentials >&/dev/null"
+    "/root/.aws/credentials"
     "/etc/systemd/system/ecs.service.d/http-proxy.conf"
     "/etc/systemd/system/amazon-ssm-agent.service.d/http-proxy.conf"
   )
