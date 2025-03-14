@@ -74,7 +74,7 @@ Examples:
   # De-Register new runner
   ./$(basename "$0") deregister --sg-node-token "some-token" --organization "demo-org" --runner-group "private-runner-group"
 
-  # Disable cgroupsv2
+  # Disable cgroups2
   # ./$(basename "$0") cgropusv2 disable
 
 Available commands:
@@ -250,7 +250,7 @@ print_details() { #{{{
   # details_item "Link" "https://app.stackguardian.io/orchestrator/orgs/${ORGANIZATION_NAME}/runnergroups/${RUNNER_GROUP_ID}"
   echo
   details_frame "Host Information"
-  details_item "Hostaname" "$HOSTNAME"
+  details_item "Hostname" "$HOSTNAME"
   details_item "Private IP Address" "$(ip route | grep default | cut -d" " -f9)"
   details_item "Public IP Address" "$(curl -fSs ifconfig.me)"
   # TODO: Print only when HTTP_PROXY is set
@@ -284,7 +284,7 @@ print_details() { #{{{
 #   None
 # Outputs:
 #   Write to STDOUT/STDERR
-#   if successfull/error.
+#   if successful/error.
 #######################################
 check_fluentbit_status() { #{{{
   spinner_wait "Starting backend storage check.."
@@ -315,7 +315,7 @@ check_fluentbit_status() { #{{{
   if (( tries < timeout )); then
     info "Fluentbit stream processor started successfully, checking for errors"
   else
-    info "Timed out searchnig for stream processor to start in the logs file, perhaps there are lot of logs. Proceeding to check for errors anyway"
+    info "Timed out searching for stream processor to start in the logs file, perhaps there are lot of logs. Proceeding to check for errors anyway"
   fi
 
   timeout=5
@@ -357,7 +357,7 @@ check_fluentbit_status() { #{{{
 #}}}: check_fluentbit_status
 
 #######################################
-# Check if specific service.$1 is runing.
+# Check if specific service.$1 is running.
 # If not try reload or restart.
 # Globals:
 #   None
@@ -367,11 +367,11 @@ check_fluentbit_status() { #{{{
 #   None
 # Outputs:
 #   Write to STDOUT/STDERR
-#   if successfull/error.
+#   if successful/error.
 #######################################
 check_systemctl_status() { #{{{
   if ! systemctl is-active "$1" >&/dev/null; then
-    debug "Reloading/Restarting neccessary services.."
+    debug "Reloading/Restarting necessary services.."
     if ! systemctl reload-or-restart "$1" 2>/dev/null; then
       return 2
     fi
@@ -392,8 +392,8 @@ check_systemctl_status() { #{{{
 # Returns:
 #   0 if ecs.service does not exists
 # Outputs:
-#   Write to STDOUT/STERR
-#   if successfull/error.
+#   Write to STDOUT/STDERR
+#   if successful/error.
 #######################################
 check_systemctl_ecs_status() { #{{{
   systemctl status ecs --no-pager >&/dev/null
@@ -415,8 +415,8 @@ check_systemctl_ecs_status() { #{{{
 # Returns:
 #   None
 # Outputs:
-#   Write to STDOUT/STERR
-#   if successfull/error.
+#   Write to STDOUT/STDERR
+#   if successful/error.
 #######################################
 check_container_orchestrator() { #{{{
   if type "$1" >&/dev/null; then
@@ -437,8 +437,8 @@ check_container_orchestrator() { #{{{
 # Returns:
 #   None
 # Outputs:
-#   Write to STDOUT/STERR
-#   if successfull/error.
+#   Write to STDOUT/STDERR
+#   if successful/error.
 #######################################
 cgroupsv2() { #{{{
   local cgroup_toggle
@@ -556,8 +556,8 @@ api_call() { #{{{
 #   AWS_ACCESS_KEY_ID
 #   AWS_SECRET_ACCESS_KEY
 # Outputs:
-#   Write to STDOUT/STERR
-#   if successfull/error.
+#   Write to STDOUT/STDERR
+#   if successful/error.
 #######################################
 # This portion checks whether the STORAGE_BACKEND_TYPE is
 # aws_s3 or azure_blob and runs the container accordingly.
@@ -979,7 +979,7 @@ configure_local_network() { #{{{
 #   None
 # Outputs:
 #   Write to STDERR if error and exit.
-#   Set all neccessary environment variables.
+#   Set all necessary environment variables.
 #######################################
 fetch_organization_info() { #{{{
   local url
@@ -1088,8 +1088,8 @@ fetch_organization_info() { #{{{
 #   AWS_ACCESS_KEY_ID
 #   AWS_SECRET_ACCESS_KEY
 # Outputs:
-#   Write to STDOUT/STERR
-#   if successfull/error.
+#   Write to STDOUT/STDERR
+#   if successful/error.
 #######################################
 # This portion checks whether the STORAGE_BACKEND_TYPE is
 # aws_s3 or azure_blob and runs the container accordingly.
@@ -1158,8 +1158,8 @@ configure_fluentbit() { #{{{
 # Arguments:
 #   None
 # Outputs:
-#   Write to STDOUT/STERR
-#   if successfull/error.
+#   Write to STDOUT/STDERR
+#   if successful/error.
 #######################################
 register_instance() { #{{{
 
@@ -1175,7 +1175,7 @@ register_instance() { #{{{
   if [[ -n "${container_id}" && "$container_health" == "healthy" ]]; then
     debug "Instance ecs-agent health:" "${container_health}"
     info "Instance agent already registered and running."
-    # Setting the following variables to avoid cleanup or raise errors from fluentbit error if it has been running for a while. As these erros could be intermittent.
+    # Setting the following variables to avoid cleanup or raise errors from fluentbit error if it has been running for a while. As these errors could be intermittent.
     NO_CLEAN_ON_FAIL=true
     IGNORE_FLUENTBIT_ERRORS=true
     configure_fluentbit
@@ -1266,7 +1266,7 @@ register_instance() { #{{{
 #   None
 # Outputs:
 #   Writes to STDOUT/STDERR
-#   if de-registration is sucessfull.
+#   if de-registration is successful.
 #######################################
 deregister_instance() { #{{{
   local url
@@ -1416,9 +1416,9 @@ prune() { #{{{
   # | cut -d: -f2 | tr -d ' ')
 
   spinner_msg "Cleaning up system" 0
-  info "Reclimed at:" "$curr_time"
-  info "Reclimed from containers and images:" "$reclaimed_containers_images"
-  info "Reclimed from volumes:" "$reclaimed_volumes"
+  info "Reclaimed at:" "$curr_time"
+  info "Reclaimed from containers and images:" "$reclaimed_containers_images"
+  info "Reclaimed from volumes:" "$reclaimed_volumes"
 }
 #}}}: prune
 
@@ -1541,7 +1541,7 @@ patch_json(){
 
 configure_http_proxy(){
   if [[ -n "${HTTP_PROXY}" ]]; then
-    info "Setting up Porxy confguration for the registration process."
+    info "Setting up Proxy configuration for the registration process."
     info "Docker should be setup to use the same proxy. For more info see: https://docs.docker.com/engine/cli/proxy/"
     debug "Setting up HTTP PROXY to ${HTTP_PROXY} for the ECS agent."
 
