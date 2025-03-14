@@ -253,6 +253,7 @@ print_details() { #{{{
   details_item "Hostaname" "$HOSTNAME"
   details_item "Private IP Address" "$(ip route | grep default | cut -d" " -f9)"
   details_item "Public IP Address" "$(curl -fSs ifconfig.me)"
+  # TODO: Print only when HTTP_PROXY is set
   details_item "HTTP PROXY" "$HTTP_PROXY"
   echo
   details_frame "System Information"
@@ -405,7 +406,7 @@ check_systemctl_ecs_status() { #{{{
 #}}}: check_systemctl_status
 
 #######################################
-# Check if container orchestartor exists
+# Check if container orchestrator exists
 # and if it is healthy and running.
 # Globals:
 #   None
@@ -691,8 +692,6 @@ clean_local_setup() { #{{{
   [[ -e "${HOME}/original_docker_daemon.json" ]] && cp "${HOME}/original_docker_daemon.json" "/etc/docker/daemon.json"
 
   clean_cron
-
-  [[ -e "/tmp/env_variables.sh" ]] && source /tmp/env_variables.sh || :
 
   # Wait for AWS SSM Managed Instance to deregister on AWS side
   sleep 10s
@@ -1294,7 +1293,7 @@ deregister_instance() { #{{{
   url="${SG_BASE_API}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/deregister/"
 
   debug "Calling URL:" "${url}"
-
+  # TODO: Handle when RunnerId is blank. ERROR: Could not fetch data from API. 400 {'RunnerId': [ErrorDetail(string='This field may not be blank.', code='blank')]}
   payload="{ \"RunnerId\": \"${RUNNER_ID}\" }"
 
   debug "Payload:" "${payload}"
@@ -1545,25 +1544,6 @@ configure_http_proxy(){
     info "Setting up Porxy confguration for the registration process."
     info "Docker should be setup to use the same proxy. For more info see: https://docs.docker.com/engine/cli/proxy/"
     debug "Setting up HTTP PROXY to ${HTTP_PROXY} for the ECS agent."
-    
-    # Setting up proxy for ecs-init too as the above did not help https://repost.aws/knowledge-center/http-proxy-docker-ecs, https://docs.aws.amazon.com/AmazonECS/latest/developerguide/http_proxy_config.html
-    # TODO: Handle correct setup of HTTPS_PROXY and HTTP_PROXY refer to https://docs.aws.amazon.com/systems-manager/latest/userguide/configure-proxy-ssm-agent.html
-    # TODO: Handle for systemd and upstart based systems
-#    mkdir -p /etc/init
-#    cat <<EOF >/etc/init/ecs.override
-#env HTTP_PROXY=${HTTP_PROXY}
-#env HTTPS_PROXY=${HTTP_PROXY}
-#env NO_PROXY=169.254.169.254,169.254.170.2,/var/run/docker.sock
-#EOF
-
-    # TODO: Handle for systemd and upstart based systems
-#    mkdir -p /etc/systemd/system/ecs.service.d
-#    cat <<EOF >/etc/systemd/system/ecs.service.d/http-proxy.conf
-#[Service]
-#Environment="HTTP_PROXY=${HTTP_PROXY}"
-#Environment="HTTPS_PROXY=${HTTP_PROXY}"
-#Environment="NO_PROXY=169.254.169.254,169.254.170.2,/var/run/docker.sock"
-#EOF
 
     # SSM HTTP proxy configuration
     mkdir -p /etc/systemd/system/amazon-ssm-agent.service.d
@@ -1591,11 +1571,6 @@ EOF
 
     systemctl daemon-reload
     systemctl restart docker
-
-    echo "" >/tmp/env_variables.sh
-    env | while IFS='=' read -r var value; do
-        echo "export $var=\"${!var}\"" >> /tmp/env_variables.sh 2>/dev/null
-    done
 
     export HTTP_PROXY=${HTTP_PROXY}
     export HTTPS_PROXY=${HTTP_PROXY}
@@ -1648,9 +1623,9 @@ main() { #{{{
   
   for container_orchestrator in "${CONTAINER_ORCHESTRATORS[@]}"; do
     if check_container_orchestrator "$container_orchestrator"; then
-      info "Default container orchestartor" "$container_orchestrator"
+      info "Default container orchestrator" "$container_orchestrator"
       if [[ "$container_orchestrator" == "podman" ]]; then
-        info "Container orchestartor not supported. Aborting.."
+        info "Container orchestrator not supported. Aborting.."
         exit 0
       fi
       CONTAINER_ORCHESTRATOR="$container_orchestrator"
