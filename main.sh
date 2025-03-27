@@ -678,6 +678,7 @@ clean_local_setup() { #{{{
     "/root/.aws/credentials"
     "/etc/systemd/system/ecs.service.d/http-proxy.conf"
     "/etc/systemd/system/amazon-ssm-agent.service.d/http-proxy.conf"
+    "/etc/systemd/system/snap.amazon-ssm-agent.amazon-ssm-agent.service.d/http-proxy.conf"
   )
 
   # Loop through the array and remove each item
@@ -1546,13 +1547,18 @@ configure_http_proxy(){
     debug "Setting up HTTP PROXY to ${HTTP_PROXY} for the ECS agent."
 
     # SSM HTTP proxy configuration
-    mkdir -p /etc/systemd/system/amazon-ssm-agent.service.d
-    cat <<EOF >/etc/systemd/system/amazon-ssm-agent.service.d/http-proxy.conf
+    SSM_SERVICE_NAME="amazon-ssm-agent"
+    if systemctl is-enabled snap.amazon-ssm-agent.amazon-ssm-agent.service &>/dev/null; then
+        SSM_SERVICE_NAME="snap.amazon-ssm-agent.amazon-ssm-agent.service"
+    fi
+    mkdir -p "/etc/systemd/system/${SSM_SERVICE_NAME}.d"
+    cat <<EOF >"/etc/systemd/system/${SSM_SERVICE_NAME}.d/http-proxy.conf"
 [Service]
 Environment="http_proxy=http://${HTTP_PROXY}"
 Environment="https_proxy=http://${HTTP_PROXY}"
 Environment="no_proxy=${NO_PROXY}"
 EOF
+    debug "Generated http configuration for service ${SSM_SERVICE_NAME}"
 
     # Docker config
     # Required for the docker client interacting with the internet
@@ -1574,8 +1580,8 @@ EOF
 
     export HTTP_PROXY=${HTTP_PROXY}
     export HTTPS_PROXY=${HTTP_PROXY}
-    export http_proxy=${HTTP_PROXY}
-    export https_proxy=${HTTP_PROXY}
+    export http_proxy="http://${HTTP_PROXY}"
+    export https_proxy="http://${HTTP_PROXY}"
 
   fi
 }
