@@ -842,7 +842,7 @@ configure_local_data() { #{{{
   cat > /etc/ecs/ecs.config << EOF
 ECS_CLUSTER=${ECS_CLUSTER}
 AWS_DEFAULT_REGION=${LOCAL_AWS_DEFAULT_REGION}
-ECS_INSTANCE_ATTRIBUTES={"sg_organization": "${ORGANIZATION_ID}","sg_runner_id": "${RUNNER_ID}", "sg_runner_group_id": "${RUNNER_GROUP_ID}", "sg_runner_group_token": "${SG_NODE_TOKEN}"}
+ECS_INSTANCE_ATTRIBUTES={"sg_organization": "${ORGANIZATION_NAME}","sg_runner_id": "${RUNNER_ID}", "sg_runner_group_id": "${RUNNER_GROUP_ID}", "sg_runner_group_signature": "${SG_RUNNER_GROUP_SIGNATURE}"}
 ECS_LOGLEVEL=info
 ECS_DISABLE_PRIVILEGED=false
 ECS_ENABLE_UNTRACKED_IMAGE_CLEANUP=true
@@ -1481,6 +1481,11 @@ parse_arguments() { #{{{
     --sg-node-token)
       check_arg_value "${1}" "${2}"
       SG_NODE_TOKEN="${2}"
+      shift 2
+      ;;
+    --sg-runner-group-signature)
+      check_arg_value "${1}" "${2}"
+      SG_RUNNER_GROUP_SIGNATURE="${2}"
       shift 2
       ;;
     --organization)
