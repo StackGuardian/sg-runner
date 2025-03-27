@@ -1673,6 +1673,7 @@ main() { #{{{
       shift
       parse_arguments "$@"
       check_sg_args
+      configure_http_proxy
       deregister_instance
       ;;
     prune)
