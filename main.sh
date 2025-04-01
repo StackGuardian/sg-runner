@@ -11,6 +11,10 @@ CONTAINER_ORCHESTRATOR=
 LOG_DEBUG=${LOG_DEBUG:=false}
 CGROUPSV2_PREVIEW=${CGROUPSV2_PREVIEW:=false}
 SG_BASE_API=${SG_BASE_API:="https://api.app.stackguardian.io/api/v1"}
+# NO_PROXY variable is set to bypass proxy for specific addresses and paths.
+# This is added as it is used by AWS ECS and SSM services running locally.
+# User provided NO_PROXY will be appended to this variable.
+NO_PROXY="169.254.169.254,169.254.170.2,/var/run/docker.sock"
 
 readonly LOG_FILE="/tmp/sg_runner.log"
 
@@ -70,12 +74,12 @@ Examples:
   # De-Register new runner
   ./$(basename "$0") deregister --sg-node-token "some-token" --organization "demo-org" --runner-group "private-runner-group"
 
-  # Disable cgroupsv2
+  # Disable cgroups2
   # ./$(basename "$0") cgropusv2 disable
 
 Available commands:
   register [options]            Register new Private Runner
-  deregsiter [options]          Deregister existing Private Runner
+  deregister [options]          Deregister existing Private Runner
   status                        Show health status of used services/containers
   info                          Show information about instance/registration
   prune                         Prune container system older than 10 days
@@ -90,6 +94,12 @@ Options:
 
   --runner-group '': (required)
     The runner group where new runner will be registered.
+
+  --http-proxy [hostname or IP address]:[port]
+    The hostname (or IP address) and port of an HTTP and HTTPS proxy
+    
+  --no-proxy
+    Comma separated hostname (or IP address)
 
   --no-clean-on-fail
     Do not clean up local setup in case of errors during registration.
@@ -214,6 +224,7 @@ doctor_frame() { #{{{
 #   ORGANIZATION_NAME
 #   RUNNER_GROUP_ID
 #   RUNNER_ID
+#   HTTP_PROXY
 # Arguments:
 #   None
 # Outputs:
@@ -236,11 +247,14 @@ print_details() { #{{{
   # details_item "Registration Date" "$(date +'%Y-%m-%d %H:%M:%S (GMT%z)')"
   details_item "Organization" "${ORGANIZATION_ID}"
   details_item "Runner Group" "${RUNNER_GROUP_ID}"
+  # details_item "Link" "https://app.stackguardian.io/orchestrator/orgs/${ORGANIZATION_NAME}/runnergroups/${RUNNER_GROUP_ID}"
   echo
   details_frame "Host Information"
-  details_item "Hostaname" "$HOSTNAME"
+  details_item "Hostname" "$HOSTNAME"
   details_item "Private IP Address" "$(ip route | grep default | cut -d" " -f9)"
   details_item "Public IP Address" "$(curl -fSs ifconfig.me)"
+  # TODO: Print only when HTTP_PROXY is set
+  details_item "HTTP PROXY" "$HTTP_PROXY"
   echo
   details_frame "System Information"
   details_item "OS Release" "$(cat /etc/*release | grep -oP '(?<=PRETTY_NAME=").*?(?=")')"
@@ -250,7 +264,7 @@ print_details() { #{{{
   details_frame "Hardware Information"
   details_item "CPU Cores" "$(echo "$(nproc) Core [Used: $(top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4}' | awk '{printf "%.0f%%", $1}')]")"
   details_item "Memory" "$(free -h | awk '/^Mem:/ {printf "%s [Used: %s]\n", $2, $3}')"
-  details_item "Disk Size" "$(df -h --total | awk '/^total/ {printf "%s [Used: %s]\n", $2, $(NF-1)}')"
+  details_item "Size /var" "$(df -h --total /var | awk '/^total/ {if ($2 ~ /G/ && $2 + 0 < 100) printf "\033[31m%s [Used: %s]\033[0m\n", $2, $(NF-1); else printf "%s [Used: %s]\n", $2, $(NF-1)}')"
   echo
 }
 #}}}: print_details
@@ -270,7 +284,7 @@ print_details() { #{{{
 #   None
 # Outputs:
 #   Write to STDOUT/STDERR
-#   if successfull/error.
+#   if successful/error.
 #######################################
 check_fluentbit_status() { #{{{
   spinner_wait "Starting backend storage check.."
@@ -301,13 +315,13 @@ check_fluentbit_status() { #{{{
   if (( tries < timeout )); then
     info "Fluentbit stream processor started successfully, checking for errors"
   else
-    info "Timed out searchnig for stream processor to start in the logs file, perhaps there are lot of logs. Proceeding to check for errors anyway"
+    info "Timed out searching for stream processor to start in the logs file, perhaps there are lot of logs. Proceeding to check for errors anyway"
   fi
 
   timeout=5
   tries=0
   until (( found_error == 1 )) || (( tries >= timeout )); do
-    # TODO: Do not run error chesks at all if ignore_fluentbit_errors is set
+    # TODO: Do not run error checks at all if ignore_fluentbit_errors is set
     err_msg="$(grep -iaA4 -m1 -E "\[error.*" "$log_file" | tr -d '\0')"
     if [[ -z "$err_msg" ]]; then
       debug "Try #$((++tries)): No error messages found."
@@ -343,7 +357,7 @@ check_fluentbit_status() { #{{{
 #}}}: check_fluentbit_status
 
 #######################################
-# Check if specific service.$1 is runing.
+# Check if specific service.$1 is running.
 # If not try reload or restart.
 # Globals:
 #   None
@@ -353,11 +367,11 @@ check_fluentbit_status() { #{{{
 #   None
 # Outputs:
 #   Write to STDOUT/STDERR
-#   if successfull/error.
+#   if successful/error.
 #######################################
 check_systemctl_status() { #{{{
   if ! systemctl is-active "$1" >&/dev/null; then
-    debug "Reloading/Restarting neccessary services.."
+    debug "Reloading/Restarting necessary services.."
     if ! systemctl reload-or-restart "$1" 2>/dev/null; then
       return 2
     fi
@@ -378,8 +392,8 @@ check_systemctl_status() { #{{{
 # Returns:
 #   0 if ecs.service does not exists
 # Outputs:
-#   Write to STDOUT/STERR
-#   if successfull/error.
+#   Write to STDOUT/STDERR
+#   if successful/error.
 #######################################
 check_systemctl_ecs_status() { #{{{
   systemctl status ecs --no-pager >&/dev/null
@@ -392,7 +406,7 @@ check_systemctl_ecs_status() { #{{{
 #}}}: check_systemctl_status
 
 #######################################
-# Check if container orchestartor exists
+# Check if container orchestrator exists
 # and if it is healthy and running.
 # Globals:
 #   None
@@ -401,8 +415,8 @@ check_systemctl_ecs_status() { #{{{
 # Returns:
 #   None
 # Outputs:
-#   Write to STDOUT/STERR
-#   if successfull/error.
+#   Write to STDOUT/STDERR
+#   if successful/error.
 #######################################
 check_container_orchestrator() { #{{{
   if type "$1" >&/dev/null; then
@@ -423,8 +437,8 @@ check_container_orchestrator() { #{{{
 # Returns:
 #   None
 # Outputs:
-#   Write to STDOUT/STERR
-#   if successfull/error.
+#   Write to STDOUT/STDERR
+#   if successful/error.
 #######################################
 cgroupsv2() { #{{{
   local cgroup_toggle
@@ -480,14 +494,14 @@ cgroupsv2() { #{{{
 api_call() { #{{{
   # TODO: Support draining of instance
   if [[ -n "$1" ]]; then
-    response=$(curl -i -s \
+    response=$(curl --max-time 10 -i -s \
       -X POST \
       -H "Authorization: apikey ${SG_NODE_TOKEN}" \
       -H "Content-Type: application/json" \
       -d "$1" \
       "${url}")
   else
-    response=$(curl -i -s \
+    response=$(curl --max-time 10 -i -s \
       -X POST \
       -H "Authorization: apikey ${SG_NODE_TOKEN}" \
       -H "Content-Type: application/json" \
@@ -505,9 +519,8 @@ api_call() { #{{{
     && echo "${response}" \
     && echo "-----"
 
-  # get first status code from response
-  status_code="$(echo "$response" \
-    | awk '/^HTTP/ {print $2}')"
+  # get the last status code from response as the first one could be about a proxy connection
+  status_code=$(echo "$response" | awk '/^HTTP\/[12]/ {code=$2} END {print code}')
 
   # actual response data
   response="$(echo "$response" \
@@ -543,8 +556,8 @@ api_call() { #{{{
 #   AWS_ACCESS_KEY_ID
 #   AWS_SECRET_ACCESS_KEY
 # Outputs:
-#   Write to STDOUT/STERR
-#   if successfull/error.
+#   Write to STDOUT/STDERR
+#   if successful/error.
 #######################################
 # This portion checks whether the STORAGE_BACKEND_TYPE is
 # aws_s3 or azure_blob and runs the container accordingly.
@@ -650,18 +663,35 @@ clean_local_setup() { #{{{
   debug "Removing $CONTAINER_ORCHESTRATOR network: ${SG_DOCKER_NETWORK}.."
   $CONTAINER_ORCHESTRATOR network rm "${SG_DOCKER_NETWORK}" >&/dev/nul
   debug "Removing local configuration.."
-  rm -rf \
-    /var/log/ecs \
-    /etc/ecs \
-    /var/lib/ecs \
-    ./fluent-bit.conf \
-    volumes/ \
-    ./aws-credentials \
-    ./db-state \
-    /var/log/registration \
-    ./ssm-binaries \
-    /var/lib/amazon/ssm \
-    /root/.aws/credentials >&/dev/null
+  
+  files_and_dir_to_remove=(
+    "/var/log/ecs"
+    "/etc/ecs"
+    "/var/lib/ecs"
+    "./fluent-bit.conf"
+    "volumes/"
+    "./aws-credentials"
+    "./db-state"
+    "/var/log/registration"
+    "./ssm-binaries"
+    "/var/lib/amazon/ssm"
+    "/root/.aws/credentials"
+    "/etc/systemd/system/ecs.service.d/http-proxy.conf"
+    "/etc/systemd/system/amazon-ssm-agent.service.d/http-proxy.conf"
+    "/etc/systemd/system/snap.amazon-ssm-agent.amazon-ssm-agent.service.d/http-proxy.conf"
+  )
+
+  # Loop through the array and remove each item
+  for item in "${files_and_dir_to_remove[@]}"; do
+    if [[ -e "${item}" ]]; then
+      rm -rf "$item" && debug "$item removed successfully." || debug "Failed to remove $item."
+    fi
+  done
+    
+  # revert config to as it was earlier
+  [[ -e "${HOME}/original_docker_config.json" ]] && cp "${HOME}/original_docker_config.json" "${HOME}/.docker/config.json"
+  [[ -e "${HOME}/original_docker_daemon.json" ]] && cp "${HOME}/original_docker_daemon.json" "/etc/docker/daemon.json"
+
   clean_cron
 
   # Wait for AWS SSM Managed Instance to deregister on AWS side
@@ -780,6 +810,7 @@ EOF
 #   ORGANIZATION_ID
 #   RUNNER_ID
 #   RUNNER_GROUP_ID
+#   HTTP_PROXY
 # Arguments:
 #   None
 # Outputs:
@@ -803,7 +834,7 @@ configure_local_data() { #{{{
 # AWS_ACCESS_KEY_ID
 # AWS_SECRET_ACCESS_KEY
 # AWS_SESSION_TOKEN
-# ECS_ALTERNATE_CREDENTIAL_PROFILE
+# ECS_ALTERNATE_CREDENTIAL_PROFILE=sg-runner
 # ECS_IMAGE_PULL_BEHAVIOR=prefer-cached # The behavior used to customize the pull image process. If default is specified, the image will be pulled remotely, if the pull fails then the cached image in the instance will be used. If always is specified, the image will be pulled remotely, if the pull fails then the task will fail. If once is specified, the image will be pulled remotely if it has not been pulled before or if the image was removed by image cleanup, otherwise the cached image in the instance will be used. If prefer-cached is specified, the image will be pulled remotely if there is no cached image, otherwise the cached image in the instance will be used.
 
 # ECS_ENGINE_AUTH_TYPE	"docker" | "dockercfg"	The type of auth data that is stored in the ECS_ENGINE_AUTH_DATA key.		
@@ -820,7 +851,6 @@ ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION=24h
 ECS_IMAGE_CLEANUP_INTERVAL=24h
 ECS_IMAGE_MINIMUM_CLEANUP_AGE=1h
 NON_ECS_IMAGE_MINIMUM_CLEANUP_AGE=1h
-# ECS_ALTERNATE_CREDENTIAL_PROFILE=sg-runner
 ECS_TASK_METADATA_RPS_LIMIT=300,400
 AWS_EC2_METADATA_DISABLED=true
 ECS_LOGFILE=/log/ecs-agent.log
@@ -829,6 +859,15 @@ ECS_ENABLE_TASK_IAM_ROLE=true
 ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true
 ECS_EXTERNAL=true
 EOF
+
+  if [[ -n "${HTTP_PROXY}" ]]; then
+    cat >> /etc/ecs/ecs.config << EOF
+HTTP_PROXY=${HTTP_PROXY}
+HTTPS_PROXY=${HTTP_PROXY}
+NO_PROXY=${NO_PROXY}
+EOF
+  fi
+
 
 # Configure Fluentbit configuration inside /etc/fluentbit/fluent-bit.conf
 if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
@@ -882,7 +921,7 @@ fi
 #######################################
 # Configure local network.
 # Globals:
-#   SG_DOCKER_NETWORK
+#   SG_DOCKER_NETWORK; not used
 # Arguments:
 #   None
 # Outputs:
@@ -891,7 +930,7 @@ fi
 configure_local_network() { #{{{
   spinner_wait "Configuring local network.."
 
-  # Create SG_DOCKER_NETWORK $CONTAINER_ORCHESTRATOR network
+  # Create SG_DOCKER_NETWORK $CONTAINER_ORCHESTRATOR network; not used
   $CONTAINER_ORCHESTRATOR network create --driver bridge "${SG_DOCKER_NETWORK}" >&/dev/null
   bridge_id="br-$($CONTAINER_ORCHESTRATOR network ls -q --filter "name=${SG_DOCKER_NETWORK}")"
   iptables \
@@ -941,7 +980,7 @@ configure_local_network() { #{{{
 #   None
 # Outputs:
 #   Write to STDERR if error and exit.
-#   Set all neccessary environment variables.
+#   Set all necessary environment variables.
 #######################################
 fetch_organization_info() { #{{{
   local url
@@ -1029,6 +1068,7 @@ fetch_organization_info() { #{{{
   debug_variable "ORGANIZATION_ID"
   debug_variable "RUNNER_ID"
   debug_variable "RUNNER_GROUP_ID"
+  debug_variable "HTTP_PROXY"
   debug_secret "SHARED_KEY"
   debug_variable "STORAGE_ACCOUNT_NAME"
   debug_variable "STORAGE_BACKEND_TYPE"
@@ -1049,8 +1089,8 @@ fetch_organization_info() { #{{{
 #   AWS_ACCESS_KEY_ID
 #   AWS_SECRET_ACCESS_KEY
 # Outputs:
-#   Write to STDOUT/STERR
-#   if successfull/error.
+#   Write to STDOUT/STDERR
+#   if successful/error.
 #######################################
 # This portion checks whether the STORAGE_BACKEND_TYPE is
 # aws_s3 or azure_blob and runs the container accordingly.
@@ -1080,6 +1120,7 @@ configure_fluentbit() { #{{{
       -v $(pwd)/fluent-bit.conf:/fluent-bit/etc/fluentbit.conf \
       -v /var/log/registration:/var/log/registration \
       --log-driver=fluentd \
+      --log-opt fluentd-async=true \
       --log-opt tag=fluentbit
        "
   running=$($CONTAINER_ORCHESTRATOR ps -q --filter "name=fluentbit-agent")
@@ -1118,8 +1159,8 @@ configure_fluentbit() { #{{{
 # Arguments:
 #   None
 # Outputs:
-#   Write to STDOUT/STERR
-#   if successfull/error.
+#   Write to STDOUT/STDERR
+#   if successful/error.
 #######################################
 register_instance() { #{{{
 
@@ -1135,7 +1176,7 @@ register_instance() { #{{{
   if [[ -n "${container_id}" && "$container_health" == "healthy" ]]; then
     debug "Instance ecs-agent health:" "${container_health}"
     info "Instance agent already registered and running."
-    # Setting the following variables to avoid cleanup or raise errors from fluentbit error if it has been running for a while. As these erros could be intermittent.
+    # Setting the following variables to avoid cleanup or raise errors from fluentbit error if it has been running for a while. As these errors could be intermittent.
     NO_CLEAN_ON_FAIL=true
     IGNORE_FLUENTBIT_ERRORS=true
     configure_fluentbit
@@ -1151,7 +1192,7 @@ register_instance() { #{{{
   configure_local_network
 
   spinner_wait "Downloading support files.."
-  if ! curl -fSsLk \
+  if ! curl --max-time 30 -fSsLk \
     --proto "https" \
     -o "/tmp/ecs-anywhere-install.sh" \
     "https://amazon-ecs-agent.s3.amazonaws.com/ecs-anywhere-install-latest.sh" \
@@ -1226,7 +1267,7 @@ register_instance() { #{{{
 #   None
 # Outputs:
 #   Writes to STDOUT/STDERR
-#   if de-registration is sucessfull.
+#   if de-registration is successful.
 #######################################
 deregister_instance() { #{{{
   local url
@@ -1253,7 +1294,7 @@ deregister_instance() { #{{{
   url="${SG_BASE_API}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/deregister/"
 
   debug "Calling URL:" "${url}"
-
+  # TODO: Handle when RunnerId is blank. ERROR: Could not fetch data from API. 400 {'RunnerId': [ErrorDetail(string='This field may not be blank.', code='blank')]}
   payload="{ \"RunnerId\": \"${RUNNER_ID}\" }"
 
   debug "Payload:" "${payload}"
@@ -1376,9 +1417,9 @@ prune() { #{{{
   # | cut -d: -f2 | tr -d ' ')
 
   spinner_msg "Cleaning up system" 0
-  info "Reclimed at:" "$curr_time"
-  info "Reclimed from containers and images:" "$reclaimed_containers_images"
-  info "Reclimed from volumes:" "$reclaimed_volumes"
+  info "Reclaimed at:" "$curr_time"
+  info "Reclaimed from containers and images:" "$reclaimed_containers_images"
+  info "Reclaimed from volumes:" "$reclaimed_volumes"
 }
 #}}}: prune
 
@@ -1407,7 +1448,7 @@ is_root() { #{{{
 #}}}: is_root
 
 init_args_are_valid() { #{{{
-  if [[ ! "$1" =~ ^register$|^deregister$|^status$|^info$|^prune$|^cgroupsv2$ ]]; then
+  if [[ ! "$1" =~ ^register$|^deregister$|^status$|^info$|^prune$|^cgroupsv2|^clean$ ]]; then
     err "Provided option" "${1}" "is invalid"
     exit 1
   elif [[ "$1" == "cgroupsv2" && ! "$2" =~ ^enable$|^disable$ ]]; then
@@ -1453,15 +1494,25 @@ parse_arguments() { #{{{
       RUNNER_GROUP_ID="${2}"
       shift 2
       ;;
+    --http-proxy)
+      check_arg_value "${1}" "${2}"
+      HTTP_PROXY="${2}"
+      shift 2
+      ;;
+    --no-proxy)
+      check_arg_value "${1}" "${2}"
+      NO_PROXY="${NO_PROXY},${2}"
+      shift 2
+      ;;
     -f | --force)
       FORCE_PASS=true
       shift
       ;;
-    -f | --no-clean-on-fail)
+    --no-clean-on-fail)
       NO_CLEAN_ON_FAIL=true
       shift
       ;;
-    -f | --ignore-fluentbit-errors)
+    --ignore-fluentbit-errors)
       IGNORE_FLUENTBIT_ERRORS=true
       shift
       ;;
@@ -1480,6 +1531,60 @@ parse_arguments() { #{{{
 #}}}: parse_arguments
 
 #}}}: Argument/init checks
+
+patch_json(){
+  debug "editing $1"
+  file="$1"
+  patch_json="$2"
+  [[ -f "${file}" && -s "${file}" ]] && org_json=$(cat "$file") || org_json='{}'
+  jq -s '.[0] * .[1]' <(echo "$org_json") <(echo "$patch_json") > $file
+}
+
+configure_http_proxy(){
+  if [[ -n "${HTTP_PROXY}" ]]; then
+    info "Setting up Proxy configuration for the registration process."
+    info "Docker should be setup to use the same proxy. For more info see: https://docs.docker.com/engine/cli/proxy/"
+    debug "Setting up HTTP PROXY to ${HTTP_PROXY} for the ECS agent."
+
+    # SSM HTTP proxy configuration
+    SSM_SERVICE_NAME="amazon-ssm-agent"
+    if systemctl is-enabled snap.amazon-ssm-agent.amazon-ssm-agent.service &>/dev/null; then
+        SSM_SERVICE_NAME="snap.amazon-ssm-agent.amazon-ssm-agent.service"
+    fi
+    mkdir -p "/etc/systemd/system/${SSM_SERVICE_NAME}.d"
+    cat <<EOF >"/etc/systemd/system/${SSM_SERVICE_NAME}.d/http-proxy.conf"
+[Service]
+Environment="http_proxy=http://${HTTP_PROXY}"
+Environment="https_proxy=http://${HTTP_PROXY}"
+Environment="no_proxy=${NO_PROXY}"
+EOF
+    debug "Generated http configuration for service ${SSM_SERVICE_NAME}"
+
+    # Docker config
+    # Required for the docker client interacting with the internet
+    # sets proxy configuration for containers
+    # Required by fluentbit
+    mkdir -p "${HOME}/.docker"
+    http_proxy_docker_config="{ \"proxies\": { \"default\": { \"httpProxy\": \"http://${HTTP_PROXY}\", \"httpsProxy\": \"http://${HTTP_PROXY}\", \"noProxy\": \"${NO_PROXY}\" } } }"
+    [[ -e "$HOME/.docker/config.json" ]] && cp "$HOME/.docker/config.json" "$HOME/original_docker_config.json"
+    patch_json "$HOME/.docker/config.json" "$http_proxy_docker_config"
+
+    # Required for authenticating to the registry and fetching images
+    # Docker Daemon config
+    http_proxy_docker_daemon_config="{ \"proxies\": { \"http-proxy\": \"http://${HTTP_PROXY}\", \"https-proxy\": \"http://${HTTP_PROXY}\", \"no-proxy\": \"${NO_PROXY}\" } }"
+    [[ -e "/etc/docker/daemon.json" ]] &&  cp "/etc/docker/daemon.json" "$HOME/original_docker_daemon.json"
+    patch_json "/etc/docker/daemon.json" "$http_proxy_docker_daemon_config"
+
+    systemctl daemon-reload
+    systemctl restart docker
+
+    export HTTP_PROXY=${HTTP_PROXY}
+    export HTTPS_PROXY=${HTTP_PROXY}
+    export http_proxy="http://${HTTP_PROXY}"
+    export https_proxy="http://${HTTP_PROXY}"
+
+  fi
+}
 
 main() { #{{{
 
@@ -1524,9 +1629,9 @@ main() { #{{{
   
   for container_orchestrator in "${CONTAINER_ORCHESTRATORS[@]}"; do
     if check_container_orchestrator "$container_orchestrator"; then
-      info "Default container orchesrator" "$container_orchestrator"
+      info "Default container orchestrator" "$container_orchestrator"
       if [[ "$container_orchestrator" == "podman" ]]; then
-        info "Container orchestartor not supported. Aborting.."
+        info "Container orchestrator not supported. Aborting.."
         exit 0
       fi
       CONTAINER_ORCHESTRATOR="$container_orchestrator"
@@ -1541,14 +1646,14 @@ main() { #{{{
     exit 1
   fi
 
-  # Attempt to get token for IMDSv2, will fail silently for IMDSv1
-  imdsv2_token=$(curl -fSsLkX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 120" 2>/dev/null)
+  # Attempt to get token for IMDSv2 on AWS, will fail silently for IMDSv1, This will fail for non-AWS instances but is handled gracefully
+  imdsv2_token=$(curl --max-time 5 -fSsLkX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 120" 2>/dev/null)
 
   # Use the token if available; otherwise, proceed without it for IMDSv1 compatibility
   if [ -n "$imdsv2_token" ]; then
-    attached_iam_role=$(curl -fSsLk --proto "https" -H "X-aws-ec2-metadata-token: $imdsv2_token" "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null)
+    attached_iam_role=$(curl --max-time 10 -fSsLk --proto "https" -H "X-aws-ec2-metadata-token: $imdsv2_token" "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null)
   else
-    attached_iam_role=$(curl -fSsLk "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null)
+    attached_iam_role=$(curl --max-time 10 -fSsLk "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null)
   fi
 
   if [ -n "$attached_iam_role" ]; then
@@ -1561,12 +1666,14 @@ main() { #{{{
       shift
       parse_arguments "$@"
       check_sg_args
+      configure_http_proxy
       register_instance
       ;;
     deregister)
       shift
       parse_arguments "$@"
       check_sg_args
+      configure_http_proxy
       deregister_instance
       ;;
     prune)
@@ -1587,6 +1694,11 @@ main() { #{{{
     enable-cgroupsv2)
       cgroupsv2 1
       ;;
+    clean)
+      shift
+      parse_arguments "$@"
+      clean_local_setup & spinner "$!" "Starting cleanup"
+      ;;
   esac
 
   # TODO: API call to ping the node
@@ -1598,3 +1710,5 @@ trap cleanup SIGINT
 trap exit_help EXIT
 
 main "$@"
+
+
