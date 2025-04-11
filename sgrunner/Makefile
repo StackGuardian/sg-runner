@@ -1,0 +1,6 @@
+build-mocks:
+	export PATH=$PATH:$(go env GOPATH)/bin
+	go generate ./...
+	
+test:
+	go test ./...
