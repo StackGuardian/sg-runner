@@ -40,10 +40,10 @@ func (m *MockSystemService) EXPECT() *MockSystemServiceMockRecorder {
 }
 
 // Command mocks base method.
-func (m *MockSystemService) Command(cmd []string) ([]byte, error) {
+func (m *MockSystemService) Command(cmd []string) (string, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Command", cmd)
-	ret0, _ := ret[0].([]byte)
+	ret0, _ := ret[0].(string)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
@@ -54,17 +54,18 @@ func (mr *MockSystemServiceMockRecorder) Command(cmd any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Command", reflect.TypeOf((*MockSystemService)(nil).Command), cmd)
 }
 
-// SystemdServicesStatusAND mocks base method.
-func (m *MockSystemService) SystemdServicesStatusAND(systemdServices []string) (bool, error) {
+// SystemdServiceStatus mocks base method.
+func (m *MockSystemService) SystemdServiceStatus(service string) (bool, string, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SystemdServicesStatusAND", systemdServices)
+	ret := m.ctrl.Call(m, "SystemdServiceStatus", service)
 	ret0, _ := ret[0].(bool)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
+	ret1, _ := ret[1].(string)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
 }
 
-// SystemdServicesStatusAND indicates an expected call of SystemdServicesStatusAND.
-func (mr *MockSystemServiceMockRecorder) SystemdServicesStatusAND(systemdServices any) *gomock.Call {
+// SystemdServiceStatus indicates an expected call of SystemdServiceStatus.
+func (mr *MockSystemServiceMockRecorder) SystemdServiceStatus(service any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SystemdServicesStatusAND", reflect.TypeOf((*MockSystemService)(nil).SystemdServicesStatusAND), systemdServices)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SystemdServiceStatus", reflect.TypeOf((*MockSystemService)(nil).SystemdServiceStatus), service)
 }

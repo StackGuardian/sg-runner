@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"net/http"
 	"os"
@@ -16,7 +17,15 @@ import (
 )
 
 func main() {
-	networkService := httpreq.NewHttpReqService()
+
+	sgApiKey := flag.String("sg-node-token", "", "used to communicate with SG API")
+	sgApiBaseUri := flag.String("sg-base-uri", "https://api.stackguardian.io", "base uri for stackguardian API")
+	flag.Parse()
+
+	networkService := httpreq.NewHttpReqService(&httpreq.SgConfig{
+		SgApiKey:     *sgApiKey,
+		SgApiBaseUri: *sgApiBaseUri,
+	})
 	systemService := system.NewSystemService()
 
 	statusService := status.NewStatusService(networkService, systemService)
@@ -27,14 +36,12 @@ func main() {
 	r.HandleFunc("/status", httpHandlers.GetStatusHandler)
 
 	srv := &http.Server{
-		Addr:         "0.0.0.0:8080",
-		WriteTimeout: time.Second * 15,
-		ReadTimeout:  time.Second * 15,
-		IdleTimeout:  time.Second * 60,
-		Handler:      r,
+		Addr:    "0.0.0.0:8080",
+		Handler: r,
 	}
 
 	go func() {
+		log.Println("http server starting at 8080")
 		if err := srv.ListenAndServe(); err != nil {
 			log.Println(err)
 		}

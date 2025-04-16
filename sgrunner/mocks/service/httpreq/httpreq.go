@@ -40,12 +40,13 @@ func (m *MockHttpReqService) EXPECT() *MockHttpReqServiceMockRecorder {
 }
 
 // ECSMetadata mocks base method.
-func (m *MockHttpReqService) ECSMetadata() (bool, error) {
+func (m *MockHttpReqService) ECSMetadata() (bool, string, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ECSMetadata")
 	ret0, _ := ret[0].(bool)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
+	ret1, _ := ret[1].(string)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
 }
 
 // ECSMetadata indicates an expected call of ECSMetadata.
@@ -55,16 +56,33 @@ func (mr *MockHttpReqServiceMockRecorder) ECSMetadata() *gomock.Call {
 }
 
 // FluentBitHealth mocks base method.
-func (m *MockHttpReqService) FluentBitHealth() (bool, error) {
+func (m *MockHttpReqService) FluentBitHealth() (bool, string, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "FluentBitHealth")
 	ret0, _ := ret[0].(bool)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
+	ret1, _ := ret[1].(string)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
 }
 
 // FluentBitHealth indicates an expected call of FluentBitHealth.
 func (mr *MockHttpReqServiceMockRecorder) FluentBitHealth() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FluentBitHealth", reflect.TypeOf((*MockHttpReqService)(nil).FluentBitHealth))
+}
+
+// SgAPI mocks base method.
+func (m *MockHttpReqService) SgAPI() (bool, string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SgAPI")
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(string)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// SgAPI indicates an expected call of SgAPI.
+func (mr *MockHttpReqServiceMockRecorder) SgAPI() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SgAPI", reflect.TypeOf((*MockHttpReqService)(nil).SgAPI))
 }
