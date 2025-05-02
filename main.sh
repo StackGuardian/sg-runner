@@ -944,7 +944,8 @@ elif [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
   append_azure_blob_output_block "fluentbit" "fluentbit/log"
   append_azure_blob_output_block "ecsagent" "ecsagent/log"
   append_azure_blob_output_block "registrationinfo" "registrationinfo/log"
-  cat >> ./fluent-bit.conf << EOF
+  if [[ -n "${AZURE_STORAGE_AUTH_INTEGRATION_ID}" ]]; then
+    cat >> ./fluent-bit.conf << EOF
 
 [OUTPUT]
     Name azure_blob
@@ -955,6 +956,18 @@ elif [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
     auto_create_container on
     tls on
 EOF
+  else
+  cat >> ./fluent-bit.conf << EOF
+[OUTPUT]
+    Name azure_blob
+    Match_Regex orgs**
+    account_name ${STORAGE_ACCOUNT_NAME}
+    shared_key ${SHARED_KEY}
+    container_name runner
+    auto_create_container on
+    tls on
+EOF
+  fi
 fi
 
   spinner_msg "Configuring local data" 0
