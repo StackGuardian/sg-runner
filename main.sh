@@ -802,7 +802,8 @@ append_azure_blob_output_block() {
   local path=$2
   local container_name=${3:-system} # Default to 'system' if not provided
 
-  cat >> ./fluent-bit.conf << EOF
+  if [[ -n "${AZURE_STORAGE_AUTH_INTEGRATION_ID}" ]]; then
+    cat >> ./fluent-bit.conf << EOF
 
 [OUTPUT]
     Name azure_blob
@@ -815,6 +816,21 @@ append_azure_blob_output_block() {
     auto_create_container on
     tls on
 EOF
+  else
+    cat >> ./fluent-bit.conf << EOF
+
+[OUTPUT]
+    Name azure_blob
+    Match ${match}
+    account_name ${STORAGE_ACCOUNT_NAME}
+    shared_key ${SHARED_KEY}
+    blob_type blockblob
+    path ${path}
+    container_name ${container_name}
+    auto_create_container on
+    tls on
+EOF
+  fi
 }
 #}}}: append_azure_blob_output_block
 
@@ -1059,6 +1075,7 @@ fetch_organization_info() { #{{{
   SG_RUNNER_GROUP_SIGNATURE="$(echo "${response}" | jq -r '.data.RunnerGroup.RunnerGroupSignature // empty')"
   # TAGS="$(echo "${response}" | jq -r '.data.Tags')"
   STORAGE_ACCOUNT_NAME="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.azureBlobStorageAccountName // empty')"
+  AZURE_STORAGE_AUTH_INTEGRATION_ID="$( echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.integrationId // empty')"
   SHARED_KEY="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.azureBlobStorageAccessKey // empty')"
   STORAGE_BACKEND_TYPE="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.type // empty')"
   S3_BUCKET_NAME="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.s3BucketName // empty')"
@@ -1081,7 +1098,13 @@ fetch_organization_info() { #{{{
       exit 1
     fi
   elif [[ "$STORAGE_BACKEND_TYPE" == "azure_blob_storage" ]]; then
-    for var in SHARED_KEY STORAGE_ACCOUNT_NAME; do
+    keys=("STORAGE_ACCOUNT_NAME")
+    if [[ -n "${AZURE_STORAGE_AUTH_INTEGRATION_ID}" ]]; then
+      keys+=("AZURE_STORAGE_AUTH_INTEGRATION_ID")
+    else
+      keys+=("SHARED_KEY")
+    fi
+    for var in "${keys}"; do
       check_variable_value "$var"
     done
   else
