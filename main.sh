@@ -673,6 +673,8 @@ spinner() { #{{{
 
 clean_local_setup() { #{{{
   debug "Stopping services.."
+  systemctl stop sgrunner 2>/dev/null
+  debug "Stopping sgrunner.."
   systemctl stop ecs 2>/dev/null
   debug "Stopping $CONTAINER_ORCHESTRATOR containers.."
   $CONTAINER_ORCHESTRATOR stop ecs-agent fluentbit-agent >&/dev/null
@@ -697,6 +699,9 @@ clean_local_setup() { #{{{
     "/etc/systemd/system/ecs.service.d/http-proxy.conf"
     "/etc/systemd/system/amazon-ssm-agent.service.d/http-proxy.conf"
     "/etc/systemd/system/snap.amazon-ssm-agent.amazon-ssm-agent.service.d/http-proxy.conf"
+    "/var/log/sgrunner"
+    "/etc/systemd/system/sgrunner.service"
+    "/opt/sgrunner"
   )
 
   # Loop through the array and remove each item
@@ -1253,6 +1258,7 @@ register_instance() { #{{{
 
   fetch_organization_info
   configure_local_data
+  configure_golang_service
   configure_fluentbit
   configure_local_network
 
@@ -1648,6 +1654,54 @@ EOF
     export http_proxy="http://${HTTP_PROXY}"
     export https_proxy="http://${HTTP_PROXY}"
 
+  fi
+}
+
+configure_golang_service(){
+  info "Configuring golang service"
+  
+  mkdir -p /opt/sgrunner/
+  cp sgrunner /opt/sgrunner/sgrunner
+  
+  mkdir -p /var/log/sgrunner/
+  mkdir -p /etc/sgrunner
+  debug "writing sgrunner config"
+  cat > /etc/sgrunner/config.yaml << EOF
+sg_org: ${ORGANIZATION_NAME}
+sg_runner_group: ${RUNNER_GROUP_ID}
+sg_runner_group_token: ${SG_NODE_TOKEN}
+integration_id: ${AZURE_STORAGE_AUTH_INTEGRATION_ID}
+log_level: info
+EOF
+  debug "generated configuration for golang service"
+
+  debug "writing sgrunner systemd file"
+  cat > /etc/systemd/system/sgrunner.service << EOF
+[Unit]
+Description=My Go Application
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/sgrunner/sgrunner
+WorkingDirectory=/opt/sgrunner
+Restart=on-failure
+RestartSec=5s
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  debug "generated systemd file for sgrunner service"
+
+  systemctl daemon-reload
+  systemctl start sgrunner
+  if [[ $? != 0 ]]; then
+    err "failed to start the sgrunner service"
+    exit 1
   fi
 }
 
