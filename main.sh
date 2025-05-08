@@ -1660,6 +1660,20 @@ EOF
 configure_golang_service(){
   info "Configuring golang service"
   
+  # Create logrotate file
+  cat > /etc/logrotate.d/sgrunner <<EOF
+  /var/log/sgrunner/sgrunner.log {
+    weekly
+    rotate 7
+    missingok
+    notifempty
+    create 0644 root root
+    postrotate
+        kill -HUP `cat /var/run/sgrunner.pid`
+    endscript
+}
+EOF
+
   mkdir -p /opt/sgrunner/
   cp sgrunner /opt/sgrunner/sgrunner
   
