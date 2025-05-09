@@ -22,7 +22,7 @@ readonly LOG_FILE="/tmp/sg_runner.log"
 readonly COMMANDS=( "jq" "crontab" )
 # readonly CONTAINER_ORCHESTRATORS=( "docker" "podman" )
 readonly CONTAINER_ORCHESTRATORS=( "docker" )
-readonly FLUENTBIT_IMAGE="fluent/fluent-bit:2.2.0"
+FLUENTBIT_IMAGE="fluent/fluent-bit:2.2.0"
 
 # source .env if exists
 # overrides [main] environment variables
@@ -1095,16 +1095,42 @@ fetch_organization_info() { #{{{
 # This portion checks whether the STORAGE_BACKEND_TYPE is
 # aws_s3 or azure_blob and runs the container accordingly.
 ########################################
+pull_fluentbit_image(){
+  images=("public.ecr.aws/d4h1t0h5/private-runner/fluentbit:2.2.0" "fluent/fluent-bit:2.2.0")
+
+  for image in "${images}"; do
+    image_exists="$($CONTAINER_ORCHESTRATOR images -q -f reference="$FLUENTBIT_IMAGE")"
+
+    # return true if image is found
+    if [[ -n "$image_exists" ]]; then
+      FLUENTBIT_IMAGE="${image}"
+      return 0
+    fi
+  done
+
+  $CONTAINER_ORCHESTRATOR pull "${images[0]}" >> "$LOG_FILE" 2>&1
+  image_pulled=$?
+
+  FLUENTBIT_IMAGE="${images[0]}"
+
+  if [[ $image_pulled -gt 0 ]]; then
+    debug "failed to pull from public.ecr.aws"
+    $CONTAINER_ORCHESTRATOR pull "${images[1]}" >> "$LOG_FILE" 2>&1
+    image_pulled=$?
+  fi
+  FLUENTBIT_IMAGE="${images[1]}"
+
+  return $image_pulled
+}
+
 configure_fluentbit() { #{{{
   local running
   local exists
   local image
 
-  image="$($CONTAINER_ORCHESTRATOR images -q -f reference="$FLUENTBIT_IMAGE")"
-  if [[ -z "$image" ]]; then
-    info "Fluentbit image:" "$FLUENTBIT_IMAGE"
-    $CONTAINER_ORCHESTRATOR pull "$FLUENTBIT_IMAGE" >> "$LOG_FILE" 2>&1 &
-    spinner "$!" "Pulling image"
+  if ! pull_fluentbit_image; then
+    err "Failed to pull fluentbit image. Check if public.ecr.aws or *.docker.io is accessible"
+    exit 1
   fi
 
   spinner_wait "Configuring fluentbit agent for workflow log collection.."
