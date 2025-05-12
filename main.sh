@@ -839,10 +839,17 @@ configure_local_data() { #{{{
 # ECS_ENGINE_AUTH_TYPE	"docker" | "dockercfg"	The type of auth data that is stored in the ECS_ENGINE_AUTH_DATA key.		
 # ECS_ENGINE_AUTH_DATA
 
+
+  if [[ $RUNNER_GROUP_DOC_VERSION == "V4" ]]; then
+    ECS_INSTANCE_ATTRIBUTES="{\"sg_organization\": \"${ORGANIZATION_NAME}\",\"sg_runner_id\": \"${RUNNER_ID}\", \"sg_runner_group_id\": \"${RUNNER_GROUP_ID}\", \"sg_runner_group_signature\": \"${SG_RUNNER_GROUP_SIGNATURE}\"}"
+  else
+    ECS_INSTANCE_ATTRIBUTES="{\"sg_organization\": \"${ORGANIZATION_NAME}\",\"sg_runner_id\": \"${RUNNER_ID}\", \"sg_runner_group_id\": \"${RUNNER_GROUP_ID}\"}"
+  fi
+
   cat > /etc/ecs/ecs.config << EOF
 ECS_CLUSTER=${ECS_CLUSTER}
 AWS_DEFAULT_REGION=${LOCAL_AWS_DEFAULT_REGION}
-ECS_INSTANCE_ATTRIBUTES={"sg_organization": "${ORGANIZATION_NAME}","sg_runner_id": "${RUNNER_ID}", "sg_runner_group_id": "${RUNNER_GROUP_ID}", "sg_runner_group_signature": "${SG_RUNNER_GROUP_SIGNATURE}"}
+ECS_INSTANCE_ATTRIBUTES=${ECS_INSTANCE_ATTRIBUTES}
 ECS_LOGLEVEL=info
 ECS_DISABLE_PRIVILEGED=false
 ECS_ENABLE_UNTRACKED_IMAGE_CLEANUP=true
@@ -1027,6 +1034,8 @@ fetch_organization_info() { #{{{
   RUNNER_ID="$(echo "${response}" | jq -r '.data.RunnerId')"
   RUNNER_GROUP_ID="$(echo "${response}" | jq -r '.data.RunnerGroupId')"
   RUNNER_GROUP_ID="${RUNNER_GROUP_ID##*/}"
+  RUNNER_GROUP_DOC_VERSION="$(echo "${response}" | jq -r '.data.RunnerGroup.DocVersion // empty')"
+  SG_RUNNER_GROUP_SIGNATURE="$(echo "${response}" | jq -r '.data.RunnerGroup.RunnerGroupSignature // empty')"
   # TAGS="$(echo "${response}" | jq -r '.data.Tags')"
   STORAGE_ACCOUNT_NAME="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.azureBlobStorageAccountName // empty')"
   SHARED_KEY="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.azureBlobStorageAccessKey // empty')"
@@ -1481,11 +1490,6 @@ parse_arguments() { #{{{
     --sg-node-token)
       check_arg_value "${1}" "${2}"
       SG_NODE_TOKEN="${2}"
-      shift 2
-      ;;
-    --sg-runner-group-signature)
-      check_arg_value "${1}" "${2}"
-      SG_RUNNER_GROUP_SIGNATURE="${2}"
       shift 2
       ;;
     --organization)
