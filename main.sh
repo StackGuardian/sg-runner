@@ -1128,12 +1128,13 @@ configure_fluentbit() { #{{{
   local exists
   local image
 
+  spinner_wait "Configuring fluentbit agent for workflow log collection.."
   if ! pull_fluentbit_image; then
     err "Failed to pull fluentbit image. Check if public.ecr.aws or *.docker.io is accessible"
     exit 1
   fi
+  spinner_msg "Configuring fluentbit agent for workflow log collection.." 0
 
-  spinner_wait "Configuring fluentbit agent for workflow log collection.."
   # TODO: Identify --network host use-case
   docker_run_command="$CONTAINER_ORCHESTRATOR run -d \
       --name fluentbit-agent \
