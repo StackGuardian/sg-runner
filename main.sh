@@ -1134,6 +1134,9 @@ configure_fluentbit() { #{{{
     exit 1
   fi
   spinner_msg "Configuring fluentbit agent for workflow log collection.." 0
+  if [[ "${FLUENTBIT_IMAGE}" == "fluent/fluent-bit:2.2.0" ]]; then
+    info "WARNING: pulling from docker hub will be deprecated in the future"
+  fi
 
   # TODO: Identify --network host use-case
   docker_run_command="$CONTAINER_ORCHESTRATOR run -d \
