@@ -6,6 +6,8 @@ set -o pipefail
 
 #{{{ Environment variables
 
+readonly PRIVATE_IP_ADDRESS="$(ip route | grep default | cut -d" " -f9)"
+
 ## main
 CONTAINER_ORCHESTRATOR=
 LOG_DEBUG=${LOG_DEBUG:=false}
@@ -811,15 +813,19 @@ append_azure_blob_output_block() {
     cat >> ./fluent-bit.conf << EOF
 
 [OUTPUT]
-    Name azure_blob
-    Match ${match}
-    account_name ${STORAGE_ACCOUNT_NAME}
-    shared_key ${SHARED_KEY}
-    blob_type blockblob
-    path ${path}
-    container_name ${container_name}
-    auto_create_container on
-    tls on
+    Name          http
+    Match         ${match}
+    Host          ${PRIVATE_IP_ADDRESS}
+    Port          49153
+    URI           /fluentbit/log
+    Format        json
+    json_date_format iso8601
+    json_date_key @timestamp
+    header path ${path}
+    header blob_type blockblob
+    header container_name ${container_name}
+    header account_name ${STORAGE_ACCOUNT_NAME}
+    header_tag fluent_tag
 EOF
   else
     cat >> ./fluent-bit.conf << EOF
@@ -955,11 +961,16 @@ elif [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
 [OUTPUT]
     Name azure_blob
     Match_Regex orgs**
-    account_name ${STORAGE_ACCOUNT_NAME}
-    shared_key ${SHARED_KEY}
-    container_name runner
-    auto_create_container on
-    tls on
+    Host          ${PRIVATE_IP_ADDRESS}
+    Port          49153
+    URI           /fluentbit/log
+    Format        json
+    json_date_format iso8601
+    json_date_key @timestamp
+    header blob_type appendblob
+    header account_name ${STORAGE_ACCOUNT_NAME}
+    header container_name runner
+    header_tag fluent_tag
 EOF
   else
   cat >> ./fluent-bit.conf << EOF
@@ -1692,7 +1703,7 @@ EOF
   debug "writing sgrunner systemd file"
   cat > /etc/systemd/system/sgrunner.service << EOF
 [Unit]
-Description=My Go Application
+Description=Stackguardian Runner
 After=network.target
 
 [Service]
