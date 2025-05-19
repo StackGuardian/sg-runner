@@ -35,6 +35,7 @@ jobs:
           mkdir dist
           cp main.sh sgrunner ./dist/
           zip sgrunner.zip dist/*
+
       - name: Determine if prerelease
         id: check_prerelease
         run: |
