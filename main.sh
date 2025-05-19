@@ -126,6 +126,7 @@ log_date() { #{{{
 
 err() { #{{{
   printf "%s ${C_RED_BOLD}ERROR: ${C_RESET}%s${C_BOLD} %s${C_RESET} %s\n" "$(log_date)" "${1}" "${2}" "${@:3}" >&2
+  update_runner_group "${1} ${2} ${@:3}"
 }
 #}}}: err
 
@@ -135,6 +136,7 @@ log_err() { #{{{
   msg="$(tail -n1 "$LOG_FILE" | cut -d":" -f2-)"
   err="$(tail -n1 "$LOG_FILE" | cut -d":" -f1)"
   printf "%s ${C_RED_BOLD}ERROR: ${C_RESET}%s${C_BOLD} %s${C_RESET}\n" "$(log_date)" "$err" "$msg" >&2
+  update_runner_group "${err} ${msg}"
 }
 #}}}: log_err
 
@@ -491,18 +493,34 @@ cgroupsv2() { #{{{
 }
 #}}}: cgroupsv2
 
+update_runner_group(){
+  url="${SG_BASE_API}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/"
+  
+  err_msg=$(echo -n "$1" | tr -cd "[:print:]")
+
+  debug "Error message ${err_msg}"
+
+  payload="{ \"RunnerRegistrationErrors\": { \"$(ip route | grep default | cut -d" " -f9)\" :  { \"RunnerId\": \"${RUNNER_ID}\" , \"error\": \"${err_msg}\", \"timestamp\": \"$( date -u -Iseconds )\", \"command\": \"${0} ${@}\" } } }"
+  
+  if api_call "PATCH" "$payload"; then
+    debug "updated runner group with error msg"   
+  else
+    debug "failed to update runner group with error msg"
+  fi
+}
+
 api_call() { #{{{
   # TODO: Support draining of instance
-  if [[ -n "$1" ]]; then
+  if [[ -n "$2" ]]; then
     response=$(curl --max-time 10 -i -s \
-      -X POST \
+      -X "$1" \
       -H "Authorization: apikey ${SG_NODE_TOKEN}" \
       -H "Content-Type: application/json" \
-      -d "$1" \
+      -d "$2" \
       "${url}")
   else
     response=$(curl --max-time 10 -i -s \
-      -X POST \
+      -X "$1" \
       -H "Authorization: apikey ${SG_NODE_TOKEN}" \
       -H "Content-Type: application/json" \
       "${url}")
@@ -693,6 +711,8 @@ clean_local_setup() { #{{{
   [[ -e "${HOME}/original_docker_daemon.json" ]] && cp "${HOME}/original_docker_daemon.json" "/etc/docker/daemon.json"
 
   clean_cron
+
+  [[ -e "/tmp/env_variables.sh" ]] && source /tmp/env_variables.sh || :
 
   # Wait for AWS SSM Managed Instance to deregister on AWS side
   sleep 10s
@@ -998,7 +1018,7 @@ fetch_organization_info() { #{{{
 
   debug "Calling URL:" "${url}"
 
-  if api_call; then
+  if api_call "POST"; then
     spinner_msg "Trying to fetch registration data" 0
     spinner_wait "Preparing environment.."
     metadata="$(echo "${response}" | jq -r '.data.RegistrationMetadata[0]')"
@@ -1310,7 +1330,7 @@ deregister_instance() { #{{{
 
   spinner_wait "Trying to deregister instance.."
   if [[ "$LOG_DEBUG" =~ true|True ]]; then printf "\n"; fi
-  if api_call "$payload"; then
+  if api_call "POST" "$payload"; then
     spinner_msg "Trying to deregister instance" 0
     # if deregister_ssm_instance_response is [], remove /var/lib/amazon/ssm dir as the MI does not exist anymore, the below logic fails if the ssm deregister api does not return a response but the instance is still alive
     # echo $data
