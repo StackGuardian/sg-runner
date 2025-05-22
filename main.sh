@@ -343,7 +343,7 @@ check_fluentbit_status() { #{{{
     if ignore_fluentbit_errors; then
       debug "Ignoring Fluentbit error(s) $err_msg"
     else
-      err "Fluentbit encountered error(s)" "$err_msg"
+      err "Fluentbit encountered error(s)" "failed to start fluentbit"
       if ! no_clean_on_fail; then
         clean_local_setup & spinner "$!" "Starting cleanup"
         info "Use --no-clean-on-fail to not clean up after Fluentbit errors are encountered for debugging issues"
@@ -496,7 +496,7 @@ cgroupsv2() { #{{{
 #}}}: cgroupsv2
 
 update_runner_group(){
-  url="${SG_BASE_API}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/"
+  url="${SG_BASE_API}/orgs/${ORGANIZATION_NAME}/runnergroups/${RUNNER_GROUP_ID}/"
   
   err_msg=$(echo -n "$1" | tr -cd "[:print:]")
 
