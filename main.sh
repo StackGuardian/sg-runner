@@ -701,7 +701,6 @@ clean_local_setup() { #{{{
     "/etc/systemd/system/ecs.service.d/http-proxy.conf"
     "/etc/systemd/system/amazon-ssm-agent.service.d/http-proxy.conf"
     "/etc/systemd/system/snap.amazon-ssm-agent.amazon-ssm-agent.service.d/http-proxy.conf"
-    "/var/log/sgrunner"
     "/etc/systemd/system/sgrunner.service"
     "/opt/sgrunner"
   )
@@ -1647,7 +1646,7 @@ EOF
     # sets proxy configuration for containers
     # Required by fluentbit
     mkdir -p "${HOME}/.docker"
-    http_proxy_docker_config="{ \"proxies\": { \"default\": { \"httpProxy\": \"http://${HTTP_PROXY}\", \"httpsProxy\": \"http://${HTTP_PROXY}\", \"noProxy\": \"${NO_PROXY}\" } } }"
+    http_proxy_docker_config="{ \"proxies\": { \"default\": { \"httpProxy\": \"http://${HTTP_PROXY}\", \"httpsProxy\": \"http://${HTTP_PROXY}\", \"noProxy\": \"${PRIVATE_IP_ADDRESS},${NO_PROXY}\" } } }"
     [[ -e "$HOME/.docker/config.json" ]] && cp "$HOME/.docker/config.json" "$HOME/original_docker_config.json"
     patch_json "$HOME/.docker/config.json" "$http_proxy_docker_config"
 
@@ -1686,7 +1685,7 @@ configure_golang_service(){
 EOF
 
   mkdir -p /opt/sgrunner/
-  cp sgrunner /opt/sgrunner/sgrunner
+  cp sgrunner /opt/sgrunner/sgrunner 2>/dev/null
   
   mkdir -p /var/log/sgrunner/
   mkdir -p /etc/sgrunner
@@ -1695,9 +1694,12 @@ EOF
 sg_org: ${ORGANIZATION_NAME}
 sg_runner_group: ${RUNNER_GROUP_ID}
 sg_runner_group_token: ${SG_NODE_TOKEN}
-integration_id: ${AZURE_STORAGE_AUTH_INTEGRATION_ID}
-log_level: info
+sg_integration_id: ${AZURE_STORAGE_AUTH_INTEGRATION_ID}
+sg_log_level: info
 EOF
+  if [[ -n "${HTTP_PROXY}" ]]; then
+    echo "sg_proxy_address: ${HTTP_PROXY}" >> /etc/sgrunner/config.yaml
+  fi
   debug "generated configuration for golang service"
 
   debug "writing sgrunner systemd file"
@@ -1724,7 +1726,7 @@ EOF
 
   systemctl daemon-reload
   systemctl start sgrunner
-  if [[ $? != 0 ]]; then
+  if ! check_systemctl_status "sgrunner" ; then
     err "failed to start the sgrunner service"
     exit 1
   fi
