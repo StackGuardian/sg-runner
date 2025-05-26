@@ -958,7 +958,7 @@ elif [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
     cat >> ./fluent-bit.conf << EOF
 
 [OUTPUT]
-    Name azure_blob
+    Name http
     Match_Regex orgs**
     Host          ${PRIVATE_IP_ADDRESS}
     Port          49153
