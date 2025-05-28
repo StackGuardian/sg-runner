@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  download-asset:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Install GitHub CLI
+        run: sudo apt-get update && sudo apt-get install gh -y
+
+      - name: Download asset from latest release
+        env:
+          GH_TOKEN: ${{ secrets.TAHER_PAT }}
+        run: |
+          gh auth status
+          gh release download \
+            --repo StackGuardian/golang-runner-service \
+            --pattern 'golang-runner-service_Linux_x86_64.tar.gz' \
+            --dir ./downloaded-assets
+      
+      - name: combine files in a directory
+        run: |
+          tar -xvf downloaded-assets/golang-runner-service_Linux_x86_64.tar.gz
+          mkdir dist
+          cp main.sh sgrunner ./dist/
+          zip sgrunner.zip dist/*
+
+      - name: Determine if prerelease
+        id: check_prerelease
+        run: |
+          TAG_NAME="${GITHUB_REF##*/}"
+          if [[ "$TAG_NAME" == *-* ]]; then
+            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1  # change to your region
+
+      - name: Upload to S3
+        run: |
+          aws s3 cp ./sgrunner.tar.gz s3://sgrunner-bundle/ --content-type application/gzip
