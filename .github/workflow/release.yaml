@@ -46,10 +46,13 @@ jobs:
             echo "is_prerelease=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
         with:
-          prerelease: ${{ steps.check_prerelease.outputs.is_prerelease }}
-          files: sgrunner.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1  # change to your region
+
+      - name: Upload to S3
+        run: |
+          aws s3 cp ./sgrunner.tar.gz s3://sgrunner-bundle/ --content-type application/gzip
