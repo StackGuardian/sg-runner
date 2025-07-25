@@ -902,45 +902,11 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
   append_s3_output_block "fluentbit" "15s" "/system/fluentbit/fluentbit"
   append_s3_output_block "ecsagent" "5m" "/system/ecsagent/ecsagent"
   append_s3_output_block "registrationinfo" "2m" "/system/registrationinfo/registrationinfo"
-  cat >> ./fluent-bit.conf << EOF
-
-[OUTPUT]
-    Name s3
-    Match_Regex orgs**
-    region ${S3_AWS_REGION}
-    upload_timeout 3s
-    store_dir_limit_size 2G
-    total_file_size 250M
-    retry_limit 20
-    use_put_object On
-    compression gzip
-    bucket ${S3_BUCKET_NAME}
-    s3_key_format /\$TAG/logs/log
-EOF
-
-  if [[ -n "${S3_AWS_ROLE_ARN}" && -n "${S3_AWS_EXTERNAL_ID}" ]]; then
-    echo "    role_arn ${S3_AWS_ROLE_ARN}" >> ./fluent-bit.conf
-    echo "    external_id ${S3_AWS_EXTERNAL_ID}" >> ./fluent-bit.conf
-  fi
-
 elif [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
   append_common_service_and_input_blocks  
   append_azure_blob_output_block "fluentbit" "fluentbit/log"
   append_azure_blob_output_block "ecsagent" "ecsagent/log"
   append_azure_blob_output_block "registrationinfo" "registrationinfo/log"
-  cat >> ./fluent-bit.conf << EOF
-
-[OUTPUT]
-    Name azure_blob
-    Match_Regex orgs**
-    account_name ${STORAGE_ACCOUNT_NAME}
-    shared_key ${SHARED_KEY}
-    container_name runner
-    auto_create_container on
-    tls on
-EOF
-fi
-
   spinner_msg "Configuring local data" 0
 }
 #}}}: configure_local_data
