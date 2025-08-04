@@ -6,6 +6,8 @@ set -o pipefail
 
 #{{{ Environment variables
 
+readonly PRIVATE_IP_ADDRESS="$(ip route | grep default | cut -d" " -f9)"
+
 ## main
 CONTAINER_ORCHESTRATOR=
 LOG_DEBUG=${LOG_DEBUG:=false}
@@ -341,7 +343,7 @@ check_fluentbit_status() { #{{{
     if ignore_fluentbit_errors; then
       debug "Ignoring Fluentbit error(s) $err_msg"
     else
-      err "Fluentbit encountered error(s)" "$err_msg"
+      err "Fluentbit encountered error(s)" "failed to start fluentbit"
       if ! no_clean_on_fail; then
         clean_local_setup & spinner "$!" "Starting cleanup"
         info "Use --no-clean-on-fail to not clean up after Fluentbit errors are encountered for debugging issues"
@@ -494,7 +496,7 @@ cgroupsv2() { #{{{
 #}}}: cgroupsv2
 
 update_runner_group(){
-  url="${SG_BASE_API}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/"
+  url="${SG_BASE_API}/orgs/${ORGANIZATION_NAME}/runnergroups/${RUNNER_GROUP_ID}/"
   
   err_msg=$(echo -n "$1" | tr -cd "[:print:]")
 
@@ -673,6 +675,8 @@ spinner() { #{{{
 
 clean_local_setup() { #{{{
   debug "Stopping services.."
+  systemctl stop sgrunner 2>/dev/null
+  debug "Stopping sgrunner.."
   systemctl stop ecs 2>/dev/null
   debug "Stopping $CONTAINER_ORCHESTRATOR containers.."
   $CONTAINER_ORCHESTRATOR stop ecs-agent fluentbit-agent >&/dev/null
@@ -697,6 +701,8 @@ clean_local_setup() { #{{{
     "/etc/systemd/system/ecs.service.d/http-proxy.conf"
     "/etc/systemd/system/amazon-ssm-agent.service.d/http-proxy.conf"
     "/etc/systemd/system/snap.amazon-ssm-agent.amazon-ssm-agent.service.d/http-proxy.conf"
+    "/etc/systemd/system/sgrunner.service"
+    "/opt/sgrunner"
   )
 
   # Loop through the array and remove each item
@@ -802,7 +808,26 @@ append_azure_blob_output_block() {
   local path=$2
   local container_name=${3:-system} # Default to 'system' if not provided
 
-  cat >> ./fluent-bit.conf << EOF
+  if [[ -n "${AZURE_STORAGE_AUTH_INTEGRATION_ID}" ]]; then
+    cat >> ./fluent-bit.conf << EOF
+
+[OUTPUT]
+    Name          http
+    Match         ${match}
+    Host          ${PRIVATE_IP_ADDRESS}
+    Port          49153
+    URI           /fluentbit/log
+    Format        json
+    json_date_format iso8601
+    json_date_key @timestamp
+    header path ${path}
+    header blob_type blockblob
+    header container_name ${container_name}
+    header account_name ${STORAGE_ACCOUNT_NAME}
+    header_tag fluent_tag
+EOF
+  else
+    cat >> ./fluent-bit.conf << EOF
 
 [OUTPUT]
     Name azure_blob
@@ -815,6 +840,7 @@ append_azure_blob_output_block() {
     auto_create_container on
     tls on
 EOF
+  fi
 }
 #}}}: append_azure_blob_output_block
 
@@ -928,8 +954,25 @@ elif [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
   append_azure_blob_output_block "fluentbit" "fluentbit/log"
   append_azure_blob_output_block "ecsagent" "ecsagent/log"
   append_azure_blob_output_block "registrationinfo" "registrationinfo/log"
-  cat >> ./fluent-bit.conf << EOF
+  if [[ -n "${AZURE_STORAGE_AUTH_INTEGRATION_ID}" ]]; then
+    cat >> ./fluent-bit.conf << EOF
 
+[OUTPUT]
+    Name http
+    Match_Regex orgs**
+    Host          ${PRIVATE_IP_ADDRESS}
+    Port          49153
+    URI           /fluentbit/log
+    Format        json
+    json_date_format iso8601
+    json_date_key @timestamp
+    header blob_type appendblob
+    header account_name ${STORAGE_ACCOUNT_NAME}
+    header container_name runner
+    header_tag fluent_tag
+EOF
+  else
+  cat >> ./fluent-bit.conf << EOF
 [OUTPUT]
     Name azure_blob
     Match_Regex orgs**
@@ -939,6 +982,7 @@ elif [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
     auto_create_container on
     tls on
 EOF
+  fi
 fi
 
   spinner_msg "Configuring local data" 0
@@ -1059,6 +1103,7 @@ fetch_organization_info() { #{{{
   SG_RUNNER_GROUP_SIGNATURE="$(echo "${response}" | jq -r '.data.RunnerGroup.RunnerGroupSignature // empty')"
   # TAGS="$(echo "${response}" | jq -r '.data.Tags')"
   STORAGE_ACCOUNT_NAME="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.azureBlobStorageAccountName // empty')"
+  AZURE_STORAGE_AUTH_INTEGRATION_ID="$( echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.auth.integrationId // empty')"
   SHARED_KEY="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.azureBlobStorageAccessKey // empty')"
   STORAGE_BACKEND_TYPE="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.type // empty')"
   S3_BUCKET_NAME="$(echo "${response}" | jq -r '.data.RunnerGroup.StorageBackendConfig.s3BucketName // empty')"
@@ -1081,7 +1126,13 @@ fetch_organization_info() { #{{{
       exit 1
     fi
   elif [[ "$STORAGE_BACKEND_TYPE" == "azure_blob_storage" ]]; then
-    for var in SHARED_KEY STORAGE_ACCOUNT_NAME; do
+    keys=("STORAGE_ACCOUNT_NAME")
+    if [[ -n "${AZURE_STORAGE_AUTH_INTEGRATION_ID}" ]]; then
+      keys+=("AZURE_STORAGE_AUTH_INTEGRATION_ID")
+    else
+      keys+=("SHARED_KEY")
+    fi
+    for var in "${keys}"; do
       check_variable_value "$var"
     done
   else
@@ -1217,6 +1268,7 @@ register_instance() { #{{{
 
   fetch_organization_info
   configure_local_data
+  configure_golang_service
   configure_fluentbit
   configure_local_network
 
@@ -1594,7 +1646,7 @@ EOF
     # sets proxy configuration for containers
     # Required by fluentbit
     mkdir -p "${HOME}/.docker"
-    http_proxy_docker_config="{ \"proxies\": { \"default\": { \"httpProxy\": \"http://${HTTP_PROXY}\", \"httpsProxy\": \"http://${HTTP_PROXY}\", \"noProxy\": \"${NO_PROXY}\" } } }"
+    http_proxy_docker_config="{ \"proxies\": { \"default\": { \"httpProxy\": \"http://${HTTP_PROXY}\", \"httpsProxy\": \"http://${HTTP_PROXY}\", \"noProxy\": \"${PRIVATE_IP_ADDRESS},${NO_PROXY}\" } } }"
     [[ -e "$HOME/.docker/config.json" ]] && cp "$HOME/.docker/config.json" "$HOME/original_docker_config.json"
     patch_json "$HOME/.docker/config.json" "$http_proxy_docker_config"
 
@@ -1612,6 +1664,71 @@ EOF
     export http_proxy="http://${HTTP_PROXY}"
     export https_proxy="http://${HTTP_PROXY}"
 
+  fi
+}
+
+configure_golang_service(){
+  info "Configuring golang service"
+  
+  # Create logrotate file
+  cat > /etc/logrotate.d/sgrunner <<EOF
+  /var/log/sgrunner/sgrunner.log {
+    weekly
+    rotate 7
+    missingok
+    notifempty
+    create 0644 root root
+    postrotate
+        kill -HUP `cat /var/run/sgrunner.pid`
+    endscript
+}
+EOF
+
+  mkdir -p /opt/sgrunner/
+  cp sgrunner /opt/sgrunner/sgrunner 2>/dev/null
+  
+  mkdir -p /var/log/sgrunner/
+  mkdir -p /etc/sgrunner
+  debug "writing sgrunner config"
+  cat > /etc/sgrunner/config.yaml << EOF
+sg_org: ${ORGANIZATION_NAME}
+sg_runner_group: ${RUNNER_GROUP_ID}
+sg_runner_group_token: ${SG_NODE_TOKEN}
+sg_integration_id: ${AZURE_STORAGE_AUTH_INTEGRATION_ID}
+sg_log_level: info
+EOF
+  if [[ -n "${HTTP_PROXY}" ]]; then
+    echo "sg_proxy_address: ${HTTP_PROXY}" >> /etc/sgrunner/config.yaml
+  fi
+  debug "generated configuration for golang service"
+
+  debug "writing sgrunner systemd file"
+  cat > /etc/systemd/system/sgrunner.service << EOF
+[Unit]
+Description=Stackguardian Runner
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/sgrunner/sgrunner
+WorkingDirectory=/opt/sgrunner
+Restart=on-failure
+RestartSec=5s
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  debug "generated systemd file for sgrunner service"
+
+  systemctl daemon-reload
+  systemctl start sgrunner
+  if ! check_systemctl_status "sgrunner" ; then
+    err "failed to start the sgrunner service"
+    exit 1
   fi
 }
 
