@@ -97,7 +97,7 @@ Options:
 
   --http-proxy [hostname or IP address]:[port]
     The hostname (or IP address) and port of an HTTP and HTTPS proxy
-    
+
   --no-proxy
     Comma separated hostname (or IP address)
 
@@ -330,7 +330,7 @@ check_fluentbit_status() { #{{{
       sleep 2
     else
       debug "Error messages found."
-      found_error=1 
+      found_error=1
       break
     fi
   done & spinner "$!" "Checking for any errors in Fluentbit logs"
@@ -495,15 +495,15 @@ cgroupsv2() { #{{{
 
 update_runner_group(){
   url="${SG_BASE_API}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/"
-  
+
   err_msg=$(echo -n "$1" | tr -cd "[:print:]")
 
   debug "Error message ${err_msg}"
 
   payload="{ \"RunnerRegistrationErrors\": { \"$(ip route | grep default | cut -d" " -f9)\" :  { \"RunnerId\": \"${RUNNER_ID}\" , \"error\": \"${err_msg}\", \"timestamp\": \"$( date -u -Iseconds )\", \"command\": \"${0} ${@}\" } } }"
-  
+
   if api_call "PATCH" "$payload"; then
-    debug "updated runner group with error msg"   
+    debug "updated runner group with error msg"
   else
     debug "failed to update runner group with error msg"
   fi
@@ -549,7 +549,7 @@ api_call() { #{{{
   # msg from data
   message="$(echo "$response" \
     | jq -r '.msg // .message //  "Unknown error"')"
-  
+
   # data from data
   data="$(echo "$response" \
     | jq -r '.data //  "Unknown error"')"
@@ -559,7 +559,7 @@ api_call() { #{{{
     exit 1
   elif [ "$status_code" != "200" ] && [ "$status_code" != "201" ] && [ "$status_code" != "100" ]; then
     return 1
-  # TODO: Handle by retrying for 5 mins: ERROR: Could not fetch data from API. 504 Network error communicating with endpoint 
+  # TODO: Handle by retrying for 5 mins: ERROR: Could not fetch data from API. 504 Network error communicating with endpoint
   else
     return 0
   fi
@@ -681,7 +681,7 @@ clean_local_setup() { #{{{
   debug "Removing $CONTAINER_ORCHESTRATOR network: ${SG_DOCKER_NETWORK}.."
   $CONTAINER_ORCHESTRATOR network rm "${SG_DOCKER_NETWORK}" >&/dev/nul
   debug "Removing local configuration.."
-  
+
   files_and_dir_to_remove=(
     "/var/log/ecs"
     "/etc/ecs"
@@ -705,7 +705,7 @@ clean_local_setup() { #{{{
       rm -rf "$item" && debug "$item removed successfully." || debug "Failed to remove $item."
     fi
   done
-    
+
   # revert config to as it was earlier
   [[ -e "${HOME}/original_docker_config.json" ]] && cp "${HOME}/original_docker_config.json" "${HOME}/.docker/config.json"
   [[ -e "${HOME}/original_docker_daemon.json" ]] && cp "${HOME}/original_docker_daemon.json" "/etc/docker/daemon.json"
@@ -857,7 +857,7 @@ configure_local_data() { #{{{
 # ECS_ALTERNATE_CREDENTIAL_PROFILE=sg-runner
 # ECS_IMAGE_PULL_BEHAVIOR=prefer-cached # The behavior used to customize the pull image process. If default is specified, the image will be pulled remotely, if the pull fails then the cached image in the instance will be used. If always is specified, the image will be pulled remotely, if the pull fails then the task will fail. If once is specified, the image will be pulled remotely if it has not been pulled before or if the image was removed by image cleanup, otherwise the cached image in the instance will be used. If prefer-cached is specified, the image will be pulled remotely if there is no cached image, otherwise the cached image in the instance will be used.
 
-# ECS_ENGINE_AUTH_TYPE	"docker" | "dockercfg"	The type of auth data that is stored in the ECS_ENGINE_AUTH_DATA key.		
+# ECS_ENGINE_AUTH_TYPE	"docker" | "dockercfg"	The type of auth data that is stored in the ECS_ENGINE_AUTH_DATA key.
 # ECS_ENGINE_AUTH_DATA
 
 
@@ -924,7 +924,7 @@ EOF
   fi
 
 elif [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
-  append_common_service_and_input_blocks  
+  append_common_service_and_input_blocks
   append_azure_blob_output_block "fluentbit" "fluentbit/log"
   append_azure_blob_output_block "ecsagent" "ecsagent/log"
   append_azure_blob_output_block "registrationinfo" "registrationinfo/log"
@@ -1235,7 +1235,7 @@ register_instance() { #{{{
 
   check_systemctl_ecs_status
 
-  SSM_SERVICE_NAME="amazon-ssm-agent"
+  SSM_SERVICE_NAME="amazon-ssm-agent.service"
   SSM_BIN_NAME="amazon-ssm-agent"
   if systemctl is-enabled snap.amazon-ssm-agent.amazon-ssm-agent.service &>/dev/null; then
       echo "Detected SSM agent installed via snap" >> "$LOG_FILE" 2>&1
@@ -1305,7 +1305,7 @@ deregister_instance() { #{{{
     RUNNER_GROUP_ID_ECS_CONFIG="$(grep ECS_INSTANCE_ATTRIBUTES /etc/ecs/ecs.config \
       | cut -d "=" -f2 \
       | jq -r '.sg_runner_group_id')"
-    if [[ "$RUNNER_GROUP_ID_ECS_CONFIG" != "$RUNNER_GROUP_ID" ]]; then 
+    if [[ "$RUNNER_GROUP_ID_ECS_CONFIG" != "$RUNNER_GROUP_ID" ]]; then
       err "Different configured and provided --runner-group. Configured: $RUNNER_GROUP_ID_ECS_CONFIG, Provided: $RUNNER_GROUP_ID"
       exit 1
     fi
@@ -1655,7 +1655,7 @@ main() { #{{{
   done
   (( ${#cmds[@]}>0 )) && \
     err "Commands" "${cmds[*]}" "not installed" && exit 1
-  
+
   for container_orchestrator in "${CONTAINER_ORCHESTRATORS[@]}"; do
     if check_container_orchestrator "$container_orchestrator"; then
       info "Default container orchestrator" "$container_orchestrator"
@@ -1739,5 +1739,3 @@ trap cleanup SIGINT
 trap exit_help EXIT
 
 main "$@"
-
-
