@@ -908,6 +908,7 @@ elif [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
   append_azure_blob_output_block "ecsagent" "ecsagent/log"
   append_azure_blob_output_block "registrationinfo" "registrationinfo/log"
   spinner_msg "Configuring local data" 0
+fi
 }
 #}}}: configure_local_data
 
