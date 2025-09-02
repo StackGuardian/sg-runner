@@ -1048,7 +1048,7 @@ fetch_organization_info() { #{{{
       exit 1
     fi
   elif [[ "$STORAGE_BACKEND_TYPE" == "azure_blob_storage" ]]; then
-    for var in SHARED_KEY STORAGE_ACCOUNT_NAME; do
+    for var in STORAGE_ACCOUNT_NAME; do
       check_variable_value "$var"
     done
   else
@@ -1175,7 +1175,9 @@ register_instance() { #{{{
     # Setting the following variables to avoid cleanup or raise errors from fluentbit error if it has been running for a while. As these errors could be intermittent.
     NO_CLEAN_ON_FAIL=true
     IGNORE_FLUENTBIT_ERRORS=true
-    configure_fluentbit
+    if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" && -n "$SHARED_KEY" ]]; then
+      configure_fluentbit
+    fi
     configure_local_network
     print_details
     print_details | sed 's/\x1B\[[0-9;]*[JKmsu]//g' >> /var/log/registration/"registration_details_$(date +'%Y-%m-%dT%H-%M-%S%z').txt"
@@ -1184,7 +1186,9 @@ register_instance() { #{{{
 
   fetch_organization_info
   configure_local_data
-  configure_fluentbit
+  if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" && -n "$SHARED_KEY" ]]; then
+    configure_fluentbit
+  fi
   configure_local_network
 
   spinner_wait "Downloading support files.."
