@@ -1175,7 +1175,7 @@ register_instance() { #{{{
     # Setting the following variables to avoid cleanup or raise errors from fluentbit error if it has been running for a while. As these errors could be intermittent.
     NO_CLEAN_ON_FAIL=true
     IGNORE_FLUENTBIT_ERRORS=true
-    if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" && -n "$SHARED_KEY" ]]; then
+    if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" || -n "$SHARED_KEY" ]]; then
       configure_fluentbit
     fi
     configure_local_network
@@ -1186,7 +1186,7 @@ register_instance() { #{{{
 
   fetch_organization_info
   configure_local_data
-  if [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" && -n "$SHARED_KEY" ]]; then
+  if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" || -n "$SHARED_KEY" ]]; then
     configure_fluentbit
   fi
   configure_local_network
