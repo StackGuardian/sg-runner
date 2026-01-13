@@ -16,29 +16,39 @@ SG_BASE_API=${SG_BASE_API:="https://api.app.stackguardian.io/api/v1"}
 # User provided NO_PROXY will be appended to this variable.
 NO_PROXY="169.254.169.254,169.254.170.2,/var/run/docker.sock"
 
-readonly LOG_FILE="/tmp/sg_runner.log"
+readonly LOG_FILE="/var/log/sg_runner.log"
 
 # static
 readonly COMMANDS=( "jq" "crontab" )
 # readonly CONTAINER_ORCHESTRATORS=( "docker" "podman" )
 readonly CONTAINER_ORCHESTRATORS=( "docker" )
-readonly FLUENTBIT_IMAGE="fluent/fluent-bit:2.2.0"
+# readonly FLUENTBIT_IMAGE="fluent/fluent-bit:2.2.0"
+readonly FLUENTBIT_IMAGE="fluent/fluent-bit:4.2.2"
 
-# source .env if exists
-# overrides [main] environment variables
-[[ -f .env ]] && . .env
+# Environment variables can be overridden via command line:
+# LOG_DEBUG=true ./main.sh register ...
 
 ## other
 readonly SG_DOCKER_NETWORK="sg-net"
 
 # configure diagnostics environment
-readonly SG_DIAGNOSTIC_FILE="/tmp/diagnostic.json"
-readonly SG_DIAGNOSTIC_TMP_FILE="/tmp/diagnostic.json.tmp"
+readonly SG_DIAGNOSTIC_DIR="/var/lib/sg-runner"
+readonly SG_DIAGNOSTIC_FILE="${SG_DIAGNOSTIC_DIR}/diagnostic.json"
+readonly SG_DIAGNOSTIC_TMP_FILE="${SG_DIAGNOSTIC_DIR}/diagnostic.json.tmp"
 
-if [[ ! -e "$SG_DIAGNOSTIC_FILE" ]]; then
-  touch "$SG_DIAGNOSTIC_FILE"
-  echo "{}" > "$SG_DIAGNOSTIC_FILE"
-fi
+# Initialize diagnostic directory (only if running as root)
+init_diagnostic_dir() {
+  if [[ ! -d "$SG_DIAGNOSTIC_DIR" ]]; then
+    mkdir -p "$SG_DIAGNOSTIC_DIR"
+    chmod 700 "$SG_DIAGNOSTIC_DIR"
+  fi
+
+  if [[ ! -e "$SG_DIAGNOSTIC_FILE" ]]; then
+    touch "$SG_DIAGNOSTIC_FILE"
+    chmod 600 "$SG_DIAGNOSTIC_FILE"
+    echo "{}" > "$SG_DIAGNOSTIC_FILE"
+  fi
+}
 
 ## colors for printf
 readonly C_RED_BOLD="\033[1;31m"
@@ -97,7 +107,7 @@ Options:
 
   --http-proxy [hostname or IP address]:[port]
     The hostname (or IP address) and port of an HTTP and HTTPS proxy
-    
+
   --no-proxy
     Comma separated hostname (or IP address)
 
@@ -292,16 +302,31 @@ check_fluentbit_status() { #{{{
   spinner_wait "Starting backend storage check.."
   local container_id
   local log_file
+  local wait_timeout=60
+  local wait_count=0
 
-  until [[ -n "$container_id" ]]; do
+  until [[ -n "$container_id" ]] || (( wait_count >= wait_timeout )); do
     container_id="$($CONTAINER_ORCHESTRATOR ps -q --filter "name=fluentbit-agent")"
+    sleep 1
+    ((wait_count++))
   done
+  if [[ -z "$container_id" ]]; then
+    err "Fluentbit container failed to start within ${wait_timeout} seconds"
+    return 1
+  fi
   debug "Fluentbit container id:" "$container_id"
 
-  until [[ -n "$log_file" ]]; do
+  wait_count=0
+  until [[ -n "$log_file" ]] || (( wait_count >= wait_timeout )); do
     log_file="$(echo /var/lib/docker/containers/"$container_id"*/*.log)"
     [[ ! -e $log_file ]] && unset log_file
+    sleep 1
+    ((wait_count++))
   done
+  if [[ -z "$log_file" ]]; then
+    err "Fluentbit log file not found within ${wait_timeout} seconds"
+    return 1
+  fi
   debug "Fluentbit log file:" "$log_file"
 
   # spinner_msg "Starting backend storage check" 0
@@ -330,7 +355,7 @@ check_fluentbit_status() { #{{{
       sleep 2
     else
       debug "Error messages found."
-      found_error=1 
+      found_error=1
       break
     fi
   done & spinner "$!" "Checking for any errors in Fluentbit logs"
@@ -495,15 +520,24 @@ cgroupsv2() { #{{{
 
 update_runner_group(){
   url="${SG_BASE_API}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/"
-  
+
   err_msg=$(echo -n "$1" | tr -cd "[:print:]")
 
   debug "Error message ${err_msg}"
 
-  payload="{ \"RunnerRegistrationErrors\": { \"$(ip route | grep default | cut -d" " -f9)\" :  { \"RunnerId\": \"${RUNNER_ID}\" , \"error\": \"${err_msg}\", \"timestamp\": \"$( date -u -Iseconds )\", \"command\": \"${0} ${@}\" } } }"
-  
+  local ip_addr
+  ip_addr=$(ip route | grep default | cut -d" " -f9)
+
+  payload=$(jq -n \
+    --arg ip "$ip_addr" \
+    --arg runner_id "${RUNNER_ID}" \
+    --arg error "${err_msg}" \
+    --arg timestamp "$(date -u -Iseconds)" \
+    --arg command "${0} $*" \
+    '{RunnerRegistrationErrors: {($ip): {RunnerId: $runner_id, error: $error, timestamp: $timestamp, command: $command}}}')
+
   if api_call "PATCH" "$payload"; then
-    debug "updated runner group with error msg"   
+    debug "updated runner group with error msg"
   else
     debug "failed to update runner group with error msg"
   fi
@@ -511,22 +545,31 @@ update_runner_group(){
 
 api_call() { #{{{
   # TODO: Support draining of instance
+  # Use curl config file to hide token from process list
+  local curl_config
+  curl_config=$(mktemp)
+  chmod 600 "$curl_config"
+  cat > "$curl_config" << EOF
+header = "Authorization: apikey ${SG_NODE_TOKEN}"
+header = "Content-Type: application/json"
+EOF
+
   if [[ -n "$2" ]]; then
     response=$(curl --max-time 10 -i -s \
       -X "$1" \
-      -H "Authorization: apikey ${SG_NODE_TOKEN}" \
-      -H "Content-Type: application/json" \
+      -K "$curl_config" \
       -d "$2" \
       "${url}")
   else
     response=$(curl --max-time 10 -i -s \
       -X "$1" \
-      -H "Authorization: apikey ${SG_NODE_TOKEN}" \
-      -H "Content-Type: application/json" \
+      -K "$curl_config" \
       "${url}")
   fi
+  rm -f "$curl_config"
 
   if [[ -z "$response" ]]; then
+    err "API call failed" "Empty response received"
     exit 1
   else
     full_response="$response"
@@ -549,7 +592,7 @@ api_call() { #{{{
   # msg from data
   message="$(echo "$response" \
     | jq -r '.msg // .message //  "Unknown error"')"
-  
+
   # data from data
   data="$(echo "$response" \
     | jq -r '.data //  "Unknown error"')"
@@ -559,7 +602,7 @@ api_call() { #{{{
     exit 1
   elif [ "$status_code" != "200" ] && [ "$status_code" != "201" ] && [ "$status_code" != "100" ]; then
     return 1
-  # TODO: Handle by retrying for 5 mins: ERROR: Could not fetch data from API. 504 Network error communicating with endpoint 
+  # TODO: Handle by retrying for 5 mins: ERROR: Could not fetch data from API. 504 Network error communicating with endpoint
   else
     return 0
   fi
@@ -583,7 +626,7 @@ api_call() { #{{{
 setup_cron() { #{{{
   local temp_file
 
-  temp_file=$(mktemp -t crontab_XXX.bup)
+  temp_file=$(mktemp)
   crontab -l > "$temp_file" 2>/dev/null || echo "" > "$temp_file"
 
   if grep -qi -E "status|prune" "$temp_file"; then
@@ -600,7 +643,7 @@ setup_cron() { #{{{
 clean_cron() { #{{{
   local temp_file
 
-  temp_file=$(mktemp -t crontab_XXX.bup)
+  temp_file=$(mktemp)
   crontab -l > "$temp_file" 2>/dev/null
 
   if [[ -s "$temp_file" ]]; then
@@ -679,9 +722,9 @@ clean_local_setup() { #{{{
   debug "Removing $CONTAINER_ORCHESTRATOR containers.."
   $CONTAINER_ORCHESTRATOR rm ecs-agent fluentbit-agent >&/dev/null
   debug "Removing $CONTAINER_ORCHESTRATOR network: ${SG_DOCKER_NETWORK}.."
-  $CONTAINER_ORCHESTRATOR network rm "${SG_DOCKER_NETWORK}" >&/dev/nul
+  $CONTAINER_ORCHESTRATOR network rm "${SG_DOCKER_NETWORK}" >&/dev/null
   debug "Removing local configuration.."
-  
+
   files_and_dir_to_remove=(
     "/var/log/ecs"
     "/etc/ecs"
@@ -705,14 +748,12 @@ clean_local_setup() { #{{{
       rm -rf "$item" && debug "$item removed successfully." || debug "Failed to remove $item."
     fi
   done
-    
+
   # revert config to as it was earlier
   [[ -e "${HOME}/original_docker_config.json" ]] && cp "${HOME}/original_docker_config.json" "${HOME}/.docker/config.json"
   [[ -e "${HOME}/original_docker_daemon.json" ]] && cp "${HOME}/original_docker_daemon.json" "/etc/docker/daemon.json"
 
   clean_cron
-
-  [[ -e "/tmp/env_variables.sh" ]] && source /tmp/env_variables.sh || :
 
   # Wait for AWS SSM Managed Instance to deregister on AWS side
   sleep 10s
@@ -857,7 +898,7 @@ configure_local_data() { #{{{
 # ECS_ALTERNATE_CREDENTIAL_PROFILE=sg-runner
 # ECS_IMAGE_PULL_BEHAVIOR=prefer-cached # The behavior used to customize the pull image process. If default is specified, the image will be pulled remotely, if the pull fails then the cached image in the instance will be used. If always is specified, the image will be pulled remotely, if the pull fails then the task will fail. If once is specified, the image will be pulled remotely if it has not been pulled before or if the image was removed by image cleanup, otherwise the cached image in the instance will be used. If prefer-cached is specified, the image will be pulled remotely if there is no cached image, otherwise the cached image in the instance will be used.
 
-# ECS_ENGINE_AUTH_TYPE	"docker" | "dockercfg"	The type of auth data that is stored in the ECS_ENGINE_AUTH_DATA key.		
+# ECS_ENGINE_AUTH_TYPE	"docker" | "dockercfg"	The type of auth data that is stored in the ECS_ENGINE_AUTH_DATA key.
 # ECS_ENGINE_AUTH_DATA
 
 
@@ -902,8 +943,9 @@ if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
   append_s3_output_block "fluentbit" "15s" "/system/fluentbit/fluentbit"
   append_s3_output_block "ecsagent" "5m" "/system/ecsagent/ecsagent"
   append_s3_output_block "registrationinfo" "2m" "/system/registrationinfo/registrationinfo"
+  spinner_msg "Configuring local data" 0
 elif [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" ]]; then
-  append_common_service_and_input_blocks  
+  append_common_service_and_input_blocks
   append_azure_blob_output_block "fluentbit" "fluentbit/log"
   append_azure_blob_output_block "ecsagent" "ecsagent/log"
   append_azure_blob_output_block "registrationinfo" "registrationinfo/log"
@@ -1040,7 +1082,7 @@ fetch_organization_info() { #{{{
       check_variable_value "$var"
     done
     if [[ -n "${S3_AWS_ACCESS_KEY_ID}" || -n "${S3_AWS_SECRET_ACCESS_KEY}" ]]; then
-      info "AWS staic credentials are used for S3 Storage Backend auth"
+      info "AWS static credentials are used for S3 Storage Backend auth"
     elif [[ -n "${S3_AWS_ROLE_ARN}" || -n "${S3_AWS_EXTERNAL_ID}" ]]; then
       info "AWS role is used for S3 Storage Backend auth" "$S3_AWS_ROLE_ARN"
     else
@@ -1124,8 +1166,18 @@ configure_fluentbit() { #{{{
 
   if [[ -z "${exists}" ]]; then
     if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" && -n "${S3_AWS_ACCESS_KEY_ID}" && -n "${S3_AWS_SECRET_ACCESS_KEY}" && -n "${S3_AWS_REGION}" ]]; then
-      extra_options="-e AWS_ACCESS_KEY_ID=${S3_AWS_ACCESS_KEY_ID} \
-        -e AWS_SECRET_ACCESS_KEY=${S3_AWS_SECRET_ACCESS_KEY} \
+      # Create AWS credentials file (cleaned up during deregistration via clean_local_setup)
+      mkdir -p "$(pwd)/volumes/aws"
+      chmod 700 "$(pwd)/volumes/aws"
+      cat > "$(pwd)/volumes/aws/credentials" << EOF
+[default]
+aws_access_key_id = ${S3_AWS_ACCESS_KEY_ID}
+aws_secret_access_key = ${S3_AWS_SECRET_ACCESS_KEY}
+region = ${S3_AWS_REGION}
+EOF
+      chmod 600 "$(pwd)/volumes/aws/credentials"
+
+      extra_options="-v $(pwd)/volumes/aws/credentials:/root/.aws/credentials:ro \
         -e AWS_REGION=${S3_AWS_REGION} \
         $FLUENTBIT_IMAGE \
         /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf"
@@ -1192,14 +1244,22 @@ register_instance() { #{{{
   configure_local_network
 
   spinner_wait "Downloading support files.."
-  if ! curl --max-time 30 -fSsLk \
+  local ecs_install_script="/tmp/ecs-anywhere-install.sh"
+  if ! curl --max-time 30 -fSsL \
     --proto "https" \
-    -o "/tmp/ecs-anywhere-install.sh" \
+    -o "$ecs_install_script" \
     "https://amazon-ecs-agent.s3.amazonaws.com/ecs-anywhere-install-latest.sh" \
     >> "$LOG_FILE" 2>&1; then
     debug "Response:" "$(cat $LOG_FILE)"
     spinner_msg "Downloading support files" 1
     err "Unable to download" "ecs-anywhere-install.sh" "script"
+    exit 1
+  fi
+
+  # Basic integrity check - verify it's a valid bash script
+  if ! head -1 "$ecs_install_script" | grep -q '^#!/bin/bash'; then
+    err "Downloaded script appears invalid" "missing bash shebang"
+    rm -f "$ecs_install_script"
     exit 1
   fi
   spinner_msg "Downloading support files" 0
@@ -1276,13 +1336,14 @@ deregister_instance() { #{{{
     RUNNER_GROUP_ID_ECS_CONFIG="$(grep ECS_INSTANCE_ATTRIBUTES /etc/ecs/ecs.config \
       | cut -d "=" -f2 \
       | jq -r '.sg_runner_group_id')"
-    if [[ "$RUNNER_GROUP_ID_ECS_CONFIG" != "$RUNNER_GROUP_ID" ]]; then 
+    if [[ "$RUNNER_GROUP_ID_ECS_CONFIG" != "$RUNNER_GROUP_ID" ]]; then
       err "Different configured and provided --runner-group. Configured: $RUNNER_GROUP_ID_ECS_CONFIG, Provided: $RUNNER_GROUP_ID"
       exit 1
     fi
     RUNNER_ID="$(grep ECS_INSTANCE_ATTRIBUTES /etc/ecs/ecs.config \
       | cut -d "=" -f2 \
       | jq -r '.sg_runner_id')"
+    validate_runner_id "$RUNNER_ID"
   else
     if ! force_exec; then
       err "Instance probably deregistered"
@@ -1438,6 +1499,26 @@ check_arg_value() { #{{{
 }
 #}}}: check_arg_value
 
+validate_proxy_format() { #{{{
+  local proxy="$1"
+  # Allow hostname:port or IP:port format only (prevents command injection)
+  if [[ ! "$proxy" =~ ^[a-zA-Z0-9._-]+:[0-9]+$ ]]; then
+    err "Invalid proxy format" "$proxy" "(expected: hostname:port)"
+    exit 1
+  fi
+}
+#}}}: validate_proxy_format
+
+validate_runner_id() { #{{{
+  local runner_id="$1"
+  # Only allow alphanumeric, hyphens, underscores (prevents injection)
+  if [[ ! "$runner_id" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    err "Invalid RUNNER_ID format" "$runner_id"
+    exit 1
+  fi
+}
+#}}}: validate_runner_id
+
 is_root() { #{{{
   if (( $(id -u) != 0 )); then
     err "This script must be run as" "root"
@@ -1496,6 +1577,7 @@ parse_arguments() { #{{{
       ;;
     --http-proxy)
       check_arg_value "${1}" "${2}"
+      validate_proxy_format "${2}"
       HTTP_PROXY="${2}"
       shift 2
       ;;
@@ -1592,8 +1674,12 @@ main() { #{{{
 
   is_root && init_args_are_valid "$@"
 
+  # Initialize secure directories (requires root)
+  init_diagnostic_dir
+
   if [[ ! -e "$LOG_FILE" ]]; then
     touch "$LOG_FILE"
+    chmod 600 "$LOG_FILE"
   fi
 
   if [[ ! -d /run/systemd/system ]]; then
@@ -1626,7 +1712,7 @@ main() { #{{{
   done
   (( ${#cmds[@]}>0 )) && \
     err "Commands" "${cmds[*]}" "not installed" && exit 1
-  
+
   for container_orchestrator in "${CONTAINER_ORCHESTRATORS[@]}"; do
     if check_container_orchestrator "$container_orchestrator"; then
       info "Default container orchestrator" "$container_orchestrator"
@@ -1710,5 +1796,3 @@ trap cleanup SIGINT
 trap exit_help EXIT
 
 main "$@"
-
-
