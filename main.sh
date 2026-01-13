@@ -703,7 +703,8 @@ spinner() { #{{{
       tail -n0 -f "${log_file}" --pid "${spinner_pid}"
     fi
     wait "${spinner_pid}"
-    local exit_code=$?
+    local exit_code
+    exit_code=$?
     printf "      \b\b\b\b\b\r"
     debug "$msg (exit code):" "$exit_code"
     if [[ ! "${LOG_DEBUG}" =~ true|True ]]; then
@@ -1138,7 +1139,7 @@ configure_fluentbit() { #{{{
   local exists
   local image
 
-  image="$($CONTAINER_ORCHESTRATOR images -q -f reference="$FLUENTBIT_IMAGE")"
+  image=$($CONTAINER_ORCHESTRATOR images -q -f reference="$FLUENTBIT_IMAGE")
   if [[ -z "$image" ]]; then
     info "Fluentbit image:" "$FLUENTBIT_IMAGE"
     $CONTAINER_ORCHESTRATOR pull "$FLUENTBIT_IMAGE" >> "$LOG_FILE" 2>&1 &
@@ -1146,25 +1147,28 @@ configure_fluentbit() { #{{{
   fi
 
   spinner_wait "Configuring fluentbit agent for workflow log collection.."
-  # TODO: Identify --network host use-case
-  docker_run_command="$CONTAINER_ORCHESTRATOR run -d \
-      --name fluentbit-agent \
-      --restart=always \
-      -p 24224:24224 \
-      -p 2020:2020 \
-      --network bridge \
-      -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
-      -v $(pwd)/volumes/db-state/:/var/log/ \
-      -v $(pwd)/fluent-bit.conf:/fluent-bit/etc/fluentbit.conf \
-      -v /var/log/registration:/var/log/registration \
-      --log-driver=fluentd \
-      --log-opt fluentd-async=true \
-      --log-opt tag=fluentbit
-       "
+
   running=$($CONTAINER_ORCHESTRATOR ps -q --filter "name=fluentbit-agent")
   exists=$($CONTAINER_ORCHESTRATOR ps -aq --filter "name=fluentbit-agent")
 
   if [[ -z "${exists}" ]]; then
+    # Build docker command as array to prevent word splitting issues
+    local -a docker_cmd=(
+      "$CONTAINER_ORCHESTRATOR" run -d
+      --name fluentbit-agent
+      --restart=always
+      -p 24224:24224
+      -p 2020:2020
+      --network bridge
+      -v /var/lib/docker/containers:/var/lib/docker/containers:ro
+      -v "$(pwd)/volumes/db-state/:/var/log/"
+      -v "$(pwd)/fluent-bit.conf:/fluent-bit/etc/fluentbit.conf"
+      -v /var/log/registration:/var/log/registration
+      --log-driver=fluentd
+      --log-opt fluentd-async=true
+      --log-opt tag=fluentbit
+    )
+
     if [[ "${STORAGE_BACKEND_TYPE}" == "aws_s3" && -n "${S3_AWS_ACCESS_KEY_ID}" && -n "${S3_AWS_SECRET_ACCESS_KEY}" && -n "${S3_AWS_REGION}" ]]; then
       # Create AWS credentials file (cleaned up during deregistration via clean_local_setup)
       mkdir -p "$(pwd)/volumes/aws"
@@ -1177,16 +1181,14 @@ region = ${S3_AWS_REGION}
 EOF
       chmod 600 "$(pwd)/volumes/aws/credentials"
 
-      extra_options="-v $(pwd)/volumes/aws/credentials:/root/.aws/credentials:ro \
-        -e AWS_REGION=${S3_AWS_REGION} \
-        $FLUENTBIT_IMAGE \
-        /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf"
-      $docker_run_command $extra_options >> "$LOG_FILE" 2>&1
-    elif [[ "${STORAGE_BACKEND_TYPE}" == "azure_blob_storage" || "${STORAGE_BACKEND_TYPE}" == "aws_s3" ]]; then
-      extra_options="$FLUENTBIT_IMAGE \
-        /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf"
-      $docker_run_command $extra_options >> "$LOG_FILE" 2>&1
+      docker_cmd+=(-v "$(pwd)/volumes/aws/credentials:/root/.aws/credentials:ro")
+      docker_cmd+=(-e "AWS_REGION=${S3_AWS_REGION}")
     fi
+
+    docker_cmd+=("$FLUENTBIT_IMAGE")
+    docker_cmd+=(/fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluentbit.conf)
+
+    "${docker_cmd[@]}" >> "$LOG_FILE" 2>&1
   else
     if [[ -z "${running}" ]]; then
       $CONTAINER_ORCHESTRATOR start fluentbit-agent >&/dev/null
@@ -1387,11 +1389,27 @@ deregister_instance() { #{{{
 }
 #}}}: deregister_instance
 
+#######################################
+# Update diagnostic JSON file with key-value pair
+# Globals:
+#   SG_DIAGNOSTIC_FILE
+#   SG_DIAGNOSTIC_TMP_FILE
+# Arguments:
+#   $1 - JSON key path (e.g., "system.last_check")
+#   $2 - Value to set
+#######################################
+update_diagnostic() { #{{{
+  local key="$1"
+  local value="$2"
+  jq ".$key = \"$value\"" "$SG_DIAGNOSTIC_FILE" > "$SG_DIAGNOSTIC_TMP_FILE"
+  mv "$SG_DIAGNOSTIC_TMP_FILE" "$SG_DIAGNOSTIC_FILE"
+}
+#}}}: update_diagnostic
+
 doctor() { #{{{
   echo
 
-  jq ".system.last_check = \"$(date)\"" "$SG_DIAGNOSTIC_FILE" >> "$SG_DIAGNOSTIC_TMP_FILE"
-  mv "$SG_DIAGNOSTIC_TMP_FILE" "$SG_DIAGNOSTIC_FILE"
+  update_diagnostic "system.last_check" "$(date)"
 
   local status_list=""
   local service_status
@@ -1399,8 +1417,7 @@ doctor() { #{{{
 
   for service in "${service_list[@]}"; do
     service_status="$(systemctl is-active "${service}")"
-    jq ".health.service.${service} = \"$service_status\"" $SG_DIAGNOSTIC_FILE > $SG_DIAGNOSTIC_TMP_FILE
-    mv $SG_DIAGNOSTIC_TMP_FILE $SG_DIAGNOSTIC_FILE
+    update_diagnostic "health.service.${service}" "$service_status"
     if [[ -n ${service_status} && ${service_status} == "active" ]]; then
       status_list="$(printf "%s\n%s" \
         "${status_list}" \
@@ -1416,8 +1433,7 @@ doctor() { #{{{
   echo
   service_status="$(systemctl is-active "$CONTAINER_ORCHESTRATOR")"
   if [[ "${service_status}" != "active" ]]; then
-    jq ".health.service.$CONTAINER_ORCHESTRATOR = \"$service_status\"" "$SG_DIAGNOSTIC_FILE" > "$SG_DIAGNOSTIC_TMP_FILE"
-    mv "$SG_DIAGNOSTIC_TMP_FILE" "$SG_DIAGNOSTIC_FILE"
+    update_diagnostic "health.service.$CONTAINER_ORCHESTRATOR" "$service_status"
     printf " + Container Status (${C_BOLD}$CONTAINER_ORCHESTRATOR ${C_RESET}service: ${C_RED}%s${C_RESET})\n\n" "${service_status}"
     return
   fi
@@ -1432,14 +1448,12 @@ doctor() { #{{{
       --format '{{.Status}}'\
       )"
     if [[ -z ${container_status} ]]; then
-      jq ".health.container.$container = \"Not Running\"" $SG_DIAGNOSTIC_FILE > $SG_DIAGNOSTIC_TMP_FILE
-      mv $SG_DIAGNOSTIC_TMP_FILE $SG_DIAGNOSTIC_FILE
+      update_diagnostic "health.container.$container" "Not Running"
       status_list="$(printf "%s\n%s" \
         "${status_list}" \
         "$(printf " | * ${C_BOLD}%s${C_RESET} agent: ${C_RED}Not Running${C_RESET}\n" "${container}")")"
     else
-      jq ".health.container.$container = \"$container_status\"" $SG_DIAGNOSTIC_FILE > $SG_DIAGNOSTIC_TMP_FILE
-      mv $SG_DIAGNOSTIC_TMP_FILE $SG_DIAGNOSTIC_FILE
+      update_diagnostic "health.container.$container" "$container_status"
       status_list="$(printf "%s\n%s" \
         "${status_list}" \
         "$(printf " | * ${C_BOLD}%s${C_RESET} agent: ${C_GREEN}%s${C_RESET}\n" "${container}" "${container_status}")")"
@@ -1452,25 +1466,24 @@ doctor() { #{{{
 
 prune() { #{{{
   local reclaimed
-  prune_filter="until=4h"
+  local prune_filter="until=4h"
+  local curr_time
   curr_time=$(date)
 
   spinner_wait "Cleaning up system.."
+  local reclaimed_containers_images
   reclaimed_containers_images=$($CONTAINER_ORCHESTRATOR system prune -f \
-    --filter $prune_filter \
+    --filter "$prune_filter" \
     | cut -d: -f2 | tr -d ' ')
 
-  jq ".system.docker.last_prune = \"$curr_time\"" "$SG_DIAGNOSTIC_FILE" >> "$SG_DIAGNOSTIC_TMP_FILE"
-  mv "$SG_DIAGNOSTIC_TMP_FILE" "$SG_DIAGNOSTIC_FILE"
-  jq ".system.docker.reclaimed_containers_images = \"$reclaimed_containers_images\"" "$SG_DIAGNOSTIC_FILE" >> "$SG_DIAGNOSTIC_TMP_FILE"
-  mv "$SG_DIAGNOSTIC_TMP_FILE" "$SG_DIAGNOSTIC_FILE"
-  jq ".system.docker.prune_filter = \"$prune_filter\"" "$SG_DIAGNOSTIC_FILE" >> "$SG_DIAGNOSTIC_TMP_FILE"
-  mv "$SG_DIAGNOSTIC_TMP_FILE" "$SG_DIAGNOSTIC_FILE"
+  update_diagnostic "system.docker.last_prune" "$curr_time"
+  update_diagnostic "system.docker.reclaimed_containers_images" "$reclaimed_containers_images"
+  update_diagnostic "system.docker.prune_filter" "$prune_filter"
 
+  local reclaimed_volumes
   reclaimed_volumes=$($CONTAINER_ORCHESTRATOR system prune --volumes -f \
     | cut -d: -f2 | tr -d ' ')
-  jq ".system.docker.reclaimed_volumes = \"$reclaimed_volumes\"" "$SG_DIAGNOSTIC_FILE" >> "$SG_DIAGNOSTIC_TMP_FILE"
-  mv "$SG_DIAGNOSTIC_TMP_FILE" "$SG_DIAGNOSTIC_FILE"
+  update_diagnostic "system.docker.reclaimed_volumes" "$reclaimed_volumes"
 
   # # Already taken care by ECS agent: Remove all unused images not just dangling, older than 10 days, check if the image created date is used.
   # reclaimed=$($CONTAINER_ORCHESTRATOR system prune -a \
