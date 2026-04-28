@@ -9,33 +9,39 @@ set -o pipefail
 ## main
 CONTAINER_ORCHESTRATOR=
 LOG_DEBUG=${LOG_DEBUG:=false}
+LOG_DEBUG=$(printf '%s' "$LOG_DEBUG" | tr '[:upper:]' '[:lower:]')
 CGROUPSV2_PREVIEW=${CGROUPSV2_PREVIEW:=false}
 SG_BASE_API=${SG_BASE_API:="https://api.app.stackguardian.io/api/v1"}
-# NO_PROXY variable is set to bypass proxy for specific addresses and paths.
-# This is added as it is used by AWS ECS and SSM services running locally.
-# User provided NO_PROXY will be appended to this variable.
+# NO_PROXY bypasses proxy for AWS ECS/SSM addresses; user-supplied values are appended.
 NO_PROXY="169.254.169.254,169.254.170.2,/var/run/docker.sock"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 readonly LOG_FILE="/var/log/sg_runner.log"
 
 # static
 readonly COMMANDS=("jq" "crontab")
-# readonly CONTAINER_ORCHESTRATORS=( "docker" "podman" )
 readonly CONTAINER_ORCHESTRATORS=("docker")
-
-# Environment variables can be overridden via command line:
-# LOG_DEBUG=true ./main.sh register ...
-
-## other
 readonly SG_DOCKER_NETWORK="sg-net"
 
-# configure diagnostics environment
+# diagnostics
 readonly SG_DIAGNOSTIC_DIR="/var/lib/sg-runner"
 readonly SG_DIAGNOSTIC_FILE="${SG_DIAGNOSTIC_DIR}/diagnostic.json"
 readonly SG_DIAGNOSTIC_TMP_FILE="${SG_DIAGNOSTIC_DIR}/diagnostic.json.tmp"
 
-# Initialize diagnostic directory (only if running as root)
-init_diagnostic_dir() {
+# Environment variables can be overridden via command line:
+# LOG_DEBUG=true ./main.sh register ...
+
+## colors
+readonly C_RED_BOLD="\033[1;31m"
+readonly C_RED="\033[0;31m"
+readonly C_GREEN_BOLD="\033[1;32m"
+readonly C_GREEN="\033[0;32m"
+readonly C_MAGENTA_BOLD="\033[1;35m"
+readonly C_RESET="\033[0m"
+readonly C_BOLD="\033[1m"
+
+init_diagnostic_dir() { #{{{
   if [[ ! -d "$SG_DIAGNOSTIC_DIR" ]]; then
     mkdir -p "$SG_DIAGNOSTIC_DIR"
     chmod 700 "$SG_DIAGNOSTIC_DIR"
@@ -47,26 +53,13 @@ init_diagnostic_dir() {
     echo "{}" >"$SG_DIAGNOSTIC_FILE"
   fi
 }
-
-## colors for printf
-readonly C_RED_BOLD="\033[1;31m"
-readonly C_RED="\033[0;31m"
-readonly C_GREEN_BOLD="\033[1;32m"
-readonly C_GREEN="\033[0;32m"
-# readonly C_YELLOW_BOLD="\033[1;33m"
-# readonly C_YELLOW="\033[0;33m"
-# readonly C_BLUE_BOLD="\033[1;34m"
-readonly C_BLUE="\033[0;34m"
-readonly C_MAGENTA_BOLD="\033[1;35m"
-# readonly C_MAGENTA="\033[0;35m"
-# readonly C_CYAN_BOLD="\033[1;36m"
-# readonly C_CYAN="\033[0;36m"
-readonly C_RESET="\033[0m"
-readonly C_BOLD="\033[1m"
+#}}}: init_diagnostic_dir
 
 #}}}: Environment variables
 
 #{{{ Printing
+
+is_debug() { [[ "$LOG_DEBUG" == "true" ]]; }
 
 show_help() { #{{{
   cat <<EOF
@@ -82,15 +75,13 @@ Examples:
   # De-Register new runner
   ./$(basename "$0") deregister --sg-node-token "some-token" --organization "demo-org" --runner-group "private-runner-group"
 
-  # Disable cgroups2
-  # ./$(basename "$0") cgropusv2 disable
-
 Available commands:
   register [options]            Register new Private Runner
   deregister [options]          Deregister existing Private Runner
   status                        Show health status of used services/containers
   info                          Show information about instance/registration
   prune                         Prune container system older than 10 days
+  clean [options]               Clean local setup (no API calls)
   cgroupsv2 [enable|disable]    Manage cgroups versions (deprecated)
 
 Options:
@@ -124,76 +115,83 @@ EOF
 }
 #}}}: show_help
 
-log_date() { #{{{
-  printf "${C_BLUE}[%s]${C_RESET}" "$(date +'%Y-%m-%dT%H:%M:%S')"
-}
-#}}}: log_date
-
 err() { #{{{
-  printf "%s ${C_RED_BOLD}ERROR: ${C_RESET}%s${C_BOLD} %s${C_RESET} %s\n" "$(log_date)" "${1}" "${2}" "${@:3}" >&2
-  update_runner_group "${1} ${2} ${@:3}"
+  printf "${C_RED_BOLD}ERROR:${C_RESET} %s${C_BOLD} %s${C_RESET} %s\n" "${1}" "${2:-}" "${@:3}" >&2
+  if [[ -n "${ORGANIZATION_ID:-}" && -n "${RUNNER_GROUP_ID:-}" && -n "${SG_NODE_TOKEN:-}" ]]; then
+    update_runner_group "${1} ${2:-} ${*:3}"
+  fi
 }
 #}}}: err
 
+die() {
+  err "$@"
+  exit 1
+}
+
 log_err() { #{{{
-  local msg
-  local err
-  msg="$(tail -n1 "$LOG_FILE" | cut -d":" -f2-)"
-  err="$(tail -n1 "$LOG_FILE" | cut -d":" -f1)"
-  printf "%s ${C_RED_BOLD}ERROR: ${C_RESET}%s${C_BOLD} %s${C_RESET}\n" "$(log_date)" "$err" "$msg" >&2
-  update_runner_group "${err} ${msg}"
+  local line err_part msg_part
+  if [[ -r "$LOG_FILE" ]]; then
+    line="$(tail -n1 "$LOG_FILE")"
+    err_part="$(printf '%s' "$line" | cut -d':' -f1)"
+    msg_part="$(printf '%s' "$line" | cut -d':' -f2-)"
+  else
+    err_part="Unknown error"
+    msg_part=""
+  fi
+  printf "${C_RED_BOLD}ERROR:${C_RESET} %s${C_BOLD} %s${C_RESET}\n" "$err_part" "$msg_part" >&2
+  if [[ -n "${ORGANIZATION_ID:-}" && -n "${RUNNER_GROUP_ID:-}" && -n "${SG_NODE_TOKEN:-}" ]]; then
+    update_runner_group "${err_part} ${msg_part}"
+  fi
 }
 #}}}: log_err
 
 info() { #{{{
-  printf "%s %s${C_BOLD} %s${C_RESET} %s\n" "$(log_date)" "${1}" "${2}" "${@:3}"
+  printf "%s${C_BOLD} %s${C_RESET} %s\n" "${1}" "${2:-}" "${@:3}"
 }
 #}}}: info
 
 spinner_wait() { #{{{
-  printf "%s %s${C_BOLD} %s${C_RESET}\r" "$(log_date)" "${1}" "${2}"
+  printf "%s${C_BOLD} %s${C_RESET}\r" "${1}" "${2:-}"
 }
 #}}}: spinner_wait
 
 spinner_msg() { #{{{
-  local status="$2"
-  local msg="$3"
+  local status="${2:-}"
+  local msg="${3:-}"
   if [[ -z "$status" ]]; then
-    printf "%s %s.. ${C_BOLD}%s${C_RESET}" "$(log_date)" "${1}" "${msg}"
-    if [[ "$LOG_DEBUG" =~ true|True ]]; then printf "\n"; fi
+    printf "%s.. ${C_BOLD}%s${C_RESET}" "${1}" "${msg}"
+    is_debug && printf "\n"
   elif ((status == 0)); then
-    printf "%s %s.. ${C_GREEN_BOLD}%s${C_RESET}\n" "$(log_date)" "${1}" "${msg:="Done"}"
-  elif ((status > 0 || status < 0)); then
-    printf "%s %s.. ${C_RED_BOLD}%s${C_RESET}\n" "$(log_date)" "${1}" "${msg:="Failed"}"
+    printf "%s.. ${C_GREEN_BOLD}%s${C_RESET}\n" "${1}" "${msg:="Done"}"
+  else
+    printf "%s.. ${C_RED_BOLD}%s${C_RESET}\n" "${1}" "${msg:="Failed"}"
   fi
 }
 #}}}: spinner_msg
 
 debug() { #{{{
-  [[ "$LOG_DEBUG" =~ true|True ]] &&
-    printf "%s ${C_MAGENTA_BOLD}DEBUG:${C_RESET} %s${C_BOLD} %s${C_RESET} %s\n" "$(log_date)" "${1}" "${2}" "${@:3}"
+  is_debug &&
+    printf "${C_MAGENTA_BOLD}DEBUG:${C_RESET} %s${C_BOLD} %s${C_RESET} %s\n" "${1}" "${2:-}" "${@:3}"
 }
 #}}}: debug
 
 debug_variable() { #{{{
-  [[ "$LOG_DEBUG" =~ true|True ]] &&
-    [[ -n "${!1}" ]] &&
-    [[ "${!1}" != "null" ]] &&
-    printf "%s ${C_MAGENTA_BOLD}DEBUG:${C_RESET} %s${C_BOLD} %s${C_RESET}\n" "$(log_date)" "${1}" "${!1}"
+  is_debug &&
+    [[ -n "${!1}" ]] && [[ "${!1}" != "null" ]] &&
+    printf "${C_MAGENTA_BOLD}DEBUG:${C_RESET} %s${C_BOLD} %s${C_RESET}\n" "${1}" "${!1}"
 }
-#}}}: debug
+#}}}: debug_variable
 
 debug_secret() { #{{{
-  [[ "$LOG_DEBUG" =~ true|True ]] &&
-    [[ -n "${!1}" ]] &&
-    [[ "${!1}" != "null" ]] &&
-    printf "%s ${C_MAGENTA_BOLD}DEBUG:${C_RESET} %s${C_BOLD} %s${C_RESET}\n" "$(log_date)" "${1}" "${!1:0:5}*****"
+  is_debug &&
+    [[ -n "${!1}" ]] && [[ "${!1}" != "null" ]] &&
+    printf "${C_MAGENTA_BOLD}DEBUG:${C_RESET} %s${C_BOLD} %s${C_RESET}\n" "${1}" "${!1:0:5}*****"
 }
-#}}}: debug
+#}}}: debug_secret
 
 cmd_example() { #{{{
   echo
-  printf "%s${C_BOLD} %s${C_RESET} %s\n" "${1}" "${2}" "${@:3}"
+  printf "${C_BOLD}%s${C_RESET} %s %s\n" "${1}" "${2}" "${@:3}"
 }
 #}}}: cmd_example
 
@@ -204,39 +202,14 @@ exit_help() { #{{{
 }
 #}}}: exit_help
 
-#######################################
-# Print frame for doctor check.
-# Globals:
-#   None
-# Arguments:
-#   Title
-#   Contents of frame
-# Returns:
-#   None
-# Outputs:
-#   Write to STDOUT frame with contents
-#######################################
 doctor_frame() { #{{{
   printf " + %s " "${1}"
   printf "\n |"
   printf "%s" "$2"
-  # printf "\n |\n"
   printf "\n"
 }
 #}}}: doctor_frame
 
-#######################################
-# Print details at the end of registration
-# Globals:
-#   ORGANIZATION_NAME
-#   RUNNER_GROUP_ID
-#   RUNNER_ID
-#   HTTP_PROXY
-# Arguments:
-#   None
-# Outputs:
-#   Write to STDOUT
-#######################################
 details_frame() { #{{{
   printf " + ${C_BOLD}%s${C_RESET} " "${1}"
   printf "\n |\n"
@@ -251,16 +224,13 @@ details_item() { #{{{
 print_details() { #{{{
   echo
   details_frame "Registration Details"
-  # details_item "Registration Date" "$(date +'%Y-%m-%d %H:%M:%S (GMT%z)')"
   details_item "Organization" "${ORGANIZATION_ID}"
   details_item "Runner Group" "${RUNNER_GROUP_ID}"
-  # details_item "Link" "https://app.stackguardian.io/orchestrator/orgs/${ORGANIZATION_NAME}/runnergroups/${RUNNER_GROUP_ID}"
   echo
   details_frame "Host Information"
   details_item "Hostname" "$HOSTNAME"
   details_item "Private IP Address" "$(ip route | grep default | cut -d" " -f9)"
   details_item "Public IP Address" "$(curl -fSs ifconfig.me)"
-  # TODO: Print only when HTTP_PROXY is set
   details_item "HTTP PROXY" "$HTTP_PROXY"
   echo
   details_frame "System Information"
@@ -276,23 +246,116 @@ print_details() { #{{{
 }
 #}}}: print_details
 
+save_registration_details() { #{{{
+  mkdir -p /var/log/registration
+  print_details
+  print_details | sed 's/\x1B\[[0-9;]*[JKmsu]//g' \
+    >>/var/log/registration/"registration_details_$(date +'%Y-%m-%dT%H-%M-%S%z').txt"
+}
+#}}}: save_registration_details
+
 #}}}: Printing
+
+#{{{ HTTP / API
+
+api_call() { #{{{
+  # Usage: api_call <method> <url> [payload]
+  # Side effects: sets globals `response`, `status_code`, `message`, `data`
+  local method="$1" call_url="$2" payload="${3:-}"
+  local curl_config full_response
+
+  curl_config=$(mktemp)
+  chmod 600 "$curl_config"
+  cat >"$curl_config" <<EOF
+header = "Authorization: apikey ${SG_NODE_TOKEN}"
+header = "Content-Type: application/json"
+EOF
+
+  if [[ -n "$payload" ]]; then
+    response=$(curl --max-time 10 -i -s \
+      -X "$method" \
+      -K "$curl_config" \
+      -d "$payload" \
+      "${call_url}")
+  else
+    response=$(curl --max-time 10 -i -s \
+      -X "$method" \
+      -K "$curl_config" \
+      "${call_url}")
+  fi
+  rm -f "$curl_config"
+
+  if [[ -z "$response" ]]; then
+    err "API call failed" "Empty response received"
+    exit 1
+  fi
+  full_response="$response"
+
+  debug "Response:" &&
+    echo "-----" &&
+    echo "${response}" &&
+    echo "-----"
+
+  # Last status code wins (a proxy may add its own 200 before the real one)
+  status_code=$(echo "$response" | awk '/^HTTP\/[12]/ {code=$2} END {print code}')
+
+  response="$(echo "$response" | awk '/^Response/ {print $2}')"
+  [[ -z "$response" ]] &&
+    response="$(echo "$full_response" | sed -n '/^{.*/,$p' | tr '\n' ' ')"
+
+  message="$(echo "$response" | jq -r '.msg // .message //  "Unknown error"')"
+  data="$(echo "$response" | jq -r '.data //  "Unknown error"')"
+
+  if [[ -z "$status_code" ]]; then
+    err "Unknown status code."
+    exit 1
+  elif [ "$status_code" != "200" ] && [ "$status_code" != "201" ] && [ "$status_code" != "100" ]; then
+    return 1
+  else
+    return 0
+  fi
+}
+#}}}: api_call
+
+update_runner_group() { #{{{
+  local err_msg ip_addr payload url
+  url="${SG_BASE_API}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/"
+
+  err_msg=$(printf '%s' "$1" | tr -cd "[:print:]")
+  debug "Error message ${err_msg}"
+
+  ip_addr=$(ip route | grep default | cut -d" " -f9)
+
+  payload=$(jq -n \
+    --arg ip "$ip_addr" \
+    --arg runner_id "${RUNNER_ID:-}" \
+    --arg error "${err_msg}" \
+    --arg timestamp "$(date -u -Iseconds)" \
+    --arg command "${0} $*" \
+    '{RunnerRegistrationErrors: {($ip): {RunnerId: $runner_id, error: $error, timestamp: $timestamp, command: $command}}}')
+
+  if api_call "PATCH" "$url" "$payload"; then
+    debug "updated runner group with error msg"
+  else
+    debug "failed to update runner group with error msg"
+  fi
+}
+#}}}: update_runner_group
+
+patch_json() { #{{{
+  local file="$1"
+  local patch="$2"
+  local org_json
+  debug "editing $file"
+  [[ -f "${file}" && -s "${file}" ]] && org_json=$(cat "$file") || org_json='{}'
+  jq -s '.[0] * .[1]' <(echo "$org_json") <(echo "$patch") >"$file"
+}
+#}}}: patch_json
+
+#}}}: HTTP / API
 
 #{{{ Services
 
-#######################################
-# Check if specific service.$1 is running.
-# If not try reload or restart.
-# Globals:
-#   None
-# Arguments:
-#   systemctl service
-# Returns:
-#   None
-# Outputs:
-#   Write to STDOUT/STDERR
-#   if successful/error.
-#######################################
 check_systemctl_status() { #{{{
   if ! systemctl is-active "$1" >&/dev/null; then
     debug "Reloading/Restarting necessary services.."
@@ -306,19 +369,6 @@ check_systemctl_status() { #{{{
 }
 #}}}: check_systemctl_status
 
-#######################################
-# Check if ecs.service exists
-# and if it is healthy and running.
-# Globals:
-#   None
-# Arguments:
-#   None
-# Returns:
-#   0 if ecs.service does not exists
-# Outputs:
-#   Write to STDOUT/STDERR
-#   if successful/error.
-#######################################
 check_systemctl_ecs_status() { #{{{
   systemctl status ecs --no-pager >&/dev/null
   if [[ "$?" =~ 4|0 ]]; then
@@ -327,21 +377,8 @@ check_systemctl_ecs_status() { #{{{
     check_systemctl_status "ecs"
   fi
 }
-#}}}: check_systemctl_status
+#}}}: check_systemctl_ecs_status
 
-#######################################
-# Check if container orchestrator exists
-# and if it is healthy and running.
-# Globals:
-#   None
-# Arguments:
-#   Container Orchestrator Command
-# Returns:
-#   None
-# Outputs:
-#   Write to STDOUT/STDERR
-#   if successful/error.
-#######################################
 check_container_orchestrator() { #{{{
   if type "$1" >&/dev/null; then
     check_systemctl_status "$1"
@@ -352,18 +389,18 @@ check_container_orchestrator() { #{{{
 }
 #}}}: check_container_orchestrator
 
-#######################################
-# Enable/Disable cgroupsv2 (Preview)
-# Globals:
-#   None
-# Arguments:
-#   enable/disable
-# Returns:
-#   None
-# Outputs:
-#   Write to STDOUT/STDERR
-#   if successful/error.
-#######################################
+detect_ssm_service() { #{{{
+  # Sets SSM_SERVICE_NAME and SSM_BIN_NAME globals.
+  if systemctl is-enabled snap.amazon-ssm-agent.amazon-ssm-agent.service &>/dev/null; then
+    SSM_SERVICE_NAME="snap.amazon-ssm-agent.amazon-ssm-agent.service"
+    SSM_BIN_NAME="/snap/amazon-ssm-agent/current/amazon-ssm-agent"
+  else
+    SSM_SERVICE_NAME="amazon-ssm-agent"
+    SSM_BIN_NAME="amazon-ssm-agent"
+  fi
+}
+#}}}: detect_ssm_service
+
 cgroupsv2() { #{{{
   local cgroup_toggle
   [[ "$1" == "enable" ]] &&
@@ -377,7 +414,7 @@ cgroupsv2() { #{{{
 
   info "Reboot required!"
   while :; do
-    read -r -p "$(log_date) Continue.. [Y/n]: " choice
+    read -r -p "Continue.. [Y/n]: " choice
     if [[ "${choice:="Y"}" =~ y|Y ]]; then
       break
     elif [[ "$choice" =~ n|N ]]; then
@@ -415,110 +452,18 @@ cgroupsv2() { #{{{
 }
 #}}}: cgroupsv2
 
-update_runner_group() {
-  url="${SG_BASE_API}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/"
-
-  err_msg=$(echo -n "$1" | tr -cd "[:print:]")
-
-  debug "Error message ${err_msg}"
-
-  local ip_addr
-  ip_addr=$(ip route | grep default | cut -d" " -f9)
-
-  payload=$(jq -n \
-    --arg ip "$ip_addr" \
-    --arg runner_id "${RUNNER_ID}" \
-    --arg error "${err_msg}" \
-    --arg timestamp "$(date -u -Iseconds)" \
-    --arg command "${0} $*" \
-    '{RunnerRegistrationErrors: {($ip): {RunnerId: $runner_id, error: $error, timestamp: $timestamp, command: $command}}}')
-
-  if api_call "PATCH" "$payload"; then
-    debug "updated runner group with error msg"
-  else
-    debug "failed to update runner group with error msg"
-  fi
-}
-
-api_call() { #{{{
-  # TODO: Support draining of instance
-  # Use curl config file to hide token from process list
-  local curl_config
-  curl_config=$(mktemp)
-  chmod 600 "$curl_config"
-  cat >"$curl_config" <<EOF
-header = "Authorization: apikey ${SG_NODE_TOKEN}"
-header = "Content-Type: application/json"
-EOF
-
-  if [[ -n "$2" ]]; then
-    response=$(curl --max-time 10 -i -s \
-      -X "$1" \
-      -K "$curl_config" \
-      -d "$2" \
-      "${url}")
-  else
-    response=$(curl --max-time 10 -i -s \
-      -X "$1" \
-      -K "$curl_config" \
-      "${url}")
-  fi
-  rm -f "$curl_config"
-
-  if [[ -z "$response" ]]; then
-    err "API call failed" "Empty response received"
-    exit 1
-  else
-    full_response="$response"
-  fi
-
-  debug "Response:" &&
-    echo "-----" &&
-    echo "${response}" &&
-    echo "-----"
-
-  # get the last status code from response as the first one could be about a proxy connection
-  status_code=$(echo "$response" | awk '/^HTTP\/[12]/ {code=$2} END {print code}')
-
-  # actual response data
-  response="$(echo "$response" |
-    awk '/^Response/ {print $2}')"
-  [[ -z "$response" ]] &&
-    response="$(echo "$full_response" | sed -n '/^{.*/,$p' | tr '\n' ' ')"
-
-  # msg from data
-  message="$(echo "$response" |
-    jq -r '.msg // .message //  "Unknown error"')"
-
-  # data from data
-  data="$(echo "$response" |
-    jq -r '.data //  "Unknown error"')"
-
-  if [[ -z "$status_code" ]]; then
-    err "Unknown status code."
-    exit 1
-  elif [ "$status_code" != "200" ] && [ "$status_code" != "201" ] && [ "$status_code" != "100" ]; then
-    return 1
-  # TODO: Handle by retrying for 5 mins: ERROR: Could not fetch data from API. 504 Network error communicating with endpoint
-  else
-    return 0
-  fi
-}
-#}}}: api_call
-
 setup_cron() { #{{{
   local temp_file
-
   temp_file=$(mktemp)
   crontab -l >"$temp_file" 2>/dev/null || echo "" >"$temp_file"
 
-  if grep -qi -E "status|prune" "$temp_file"; then
+  if grep -qE "main\.sh (status|prune)" "$temp_file"; then
     clean_cron
     crontab -l >"$temp_file" 2>/dev/null || echo "" >"$temp_file"
   fi
   {
-    echo "* * * * * /bin/bash $PWD/main.sh status"
-    echo "0 */4 * * * /bin/bash $PWD/main.sh prune"
+    echo "* * * * * /bin/bash $SCRIPT_DIR/main.sh status"
+    echo "0 */4 * * * /bin/bash $SCRIPT_DIR/main.sh prune"
   } >>"$temp_file"
   /usr/bin/crontab "$temp_file"
 }
@@ -526,13 +471,13 @@ setup_cron() { #{{{
 
 clean_cron() { #{{{
   local temp_file
-
   temp_file=$(mktemp)
   crontab -l >"$temp_file" 2>/dev/null
 
   if [[ -s "$temp_file" ]]; then
-    sed -i "\|* * * * * /bin/bash $PWD/main.sh status|d" "$temp_file"
-    sed -i "\|0 \*\/4 \* \* \* /bin/bash $PWD/main.sh prune|d" "$temp_file"
+    # Match by command tail so old crontab entries with $PWD paths are also cleaned up.
+    sed -i '\|main\.sh status$|d' "$temp_file"
+    sed -i '\|main\.sh prune$|d' "$temp_file"
     /usr/bin/crontab "$temp_file"
   fi
 }
@@ -569,7 +514,7 @@ spinner() { #{{{
   local delay=0.15
   local spinstr='|/-\'
   spinner_msg "$msg"
-  if [[ "${LOG_DEBUG}" =~ false|False ]]; then
+  if ! is_debug; then
     while ps a | awk '{print $1}' | grep "${spinner_pid}" >&/dev/null; do
       local temp=${spinstr#?}
       printf "${C_BOLD}[%c]${C_RESET}" "$spinstr"
@@ -585,7 +530,7 @@ spinner() { #{{{
   exit_code=$?
   printf "      \b\b\b\b\b\r"
   debug "$msg (exit code):" "$exit_code"
-  if [[ ! "${LOG_DEBUG}" =~ true|True ]]; then
+  if is_debug; then :; else
     spinner_msg "$msg" "$exit_code"
   fi
   ((exit_code != 0)) && log_err && exit $exit_code
@@ -620,7 +565,6 @@ clean_local_setup() { #{{{
     "/etc/systemd/system/snap.amazon-ssm-agent.amazon-ssm-agent.service.d/http-proxy.conf"
   )
 
-  # Loop through the array and remove each item
   for item in "${files_and_dir_to_remove[@]}"; do
     if [[ -e "${item}" ]]; then
       rm -rf "$item" && debug "$item removed successfully." || debug "Failed to remove $item."
@@ -643,52 +587,38 @@ clean_local_setup() { #{{{
 check_variable_value() { #{{{
   local variable_name=$1
   [[ -z "${!variable_name}" ]] &&
-    err "Variable can't be empty" "$variable_name" && exit 1
+    die "Variable can't be empty" "$variable_name"
   return 0
 }
-#}}}
+#}}}: check_variable_value
 
 #}}}: Other
 
 #{{{ Local configuration
 
-#######################################
-# Configure local directories and files.
-# Globals:
-#   ECS_CLUSTER
-#   LOCAL_AWS_DEFAULT_REGION
-#   ORGANIZATION_ID
-#   RUNNER_ID
-#   RUNNER_GROUP_ID
-#   HTTP_PROXY
-# Arguments:
-#   None
-# Outputs:
-#   Writes STDOUT on success.
-#######################################
+iptables_ensure() { #{{{
+  # Idempotent iptables rule insert/append.
+  # Usage: iptables_ensure -A|-I [-t TABLE] CHAIN args...
+  local op="$1"
+  shift
+  local table_args=()
+  if [[ "$1" == "-t" ]]; then
+    table_args=(-t "$2")
+    shift 2
+  fi
+  if ! iptables "${table_args[@]}" -C "$@" 2>/dev/null; then
+    iptables "${table_args[@]}" "$op" "$@"
+  fi
+}
+#}}}: iptables_ensure
+
 configure_local_data() { #{{{
   mkdir -p /var/log/ecs /etc/ecs /var/lib/ecs/data /var/log/registration/
   rm -rf /etc/ecs/ecs.config >/dev/null
 
   spinner_wait "Configuring local data.."
 
-  # ECS_LOG_DRIVER
-  # ECS_LOG_OPTS
-
-  # ECS_DISABLE_IMAGE_CLEANUP	true	Whether to disable automated image cleanup for the ECS Agent.	false	false
-  # ECS_IMAGE_CLEANUP_INTERVAL	30m	The time interval between automated image cleanup cycles. If set to less than 10 minutes, the value is ignored.	30m	30m
-  # ECS_IMAGE_MINIMUM_CLEANUP_AGE	30m	The minimum time interval between when an image is pulled and when it can be considered for automated image cleanup.	1h	1h
-  # NON_ECS_IMAGE_MINIMUM_CLEANUP_AGE
-  # ECS_NUM_IMAGES_DELETE_PER_CYCLE
-  # ECS_IMAGE_PULL_BEHAVIOR
-  # AWS_ACCESS_KEY_ID
-  # AWS_SECRET_ACCESS_KEY
-  # AWS_SESSION_TOKEN
-  # ECS_ALTERNATE_CREDENTIAL_PROFILE=sg-runner
-  # ECS_IMAGE_PULL_BEHAVIOR=prefer-cached # The behavior used to customize the pull image process. If default is specified, the image will be pulled remotely, if the pull fails then the cached image in the instance will be used. If always is specified, the image will be pulled remotely, if the pull fails then the task will fail. If once is specified, the image will be pulled remotely if it has not been pulled before or if the image was removed by image cleanup, otherwise the cached image in the instance will be used. If prefer-cached is specified, the image will be pulled remotely if there is no cached image, otherwise the cached image in the instance will be used.
-
-  # ECS_ENGINE_AUTH_TYPE	"docker" | "dockercfg"	The type of auth data that is stored in the ECS_ENGINE_AUTH_DATA key.
-  # ECS_ENGINE_AUTH_DATA
+  # See https://github.com/aws/amazon-ecs-agent/blob/master/README.md for the full set of agent env vars.
 
   if [[ $RUNNER_GROUP_DOC_VERSION == "V4" ]]; then
     ECS_INSTANCE_ATTRIBUTES="{\"sg_organization\": \"${ORGANIZATION_NAME}\",\"sg_runner_id\": \"${RUNNER_ID}\", \"sg_runner_group_id\": \"${RUNNER_GROUP_ID}\", \"sg_runner_group_signature\": \"${SG_RUNNER_GROUP_SIGNATURE}\"}"
@@ -728,96 +658,99 @@ EOF
 }
 #}}}: configure_local_data
 
-#######################################
-# Configure local network.
-# Globals:
-#   SG_DOCKER_NETWORK; not used
-# Arguments:
-#   None
-# Outputs:
-#   Writes STDOUT on success.
-#######################################
 configure_local_network() { #{{{
   spinner_wait "Configuring local network.."
 
-  # Create SG_DOCKER_NETWORK $CONTAINER_ORCHESTRATOR network; not used
   $CONTAINER_ORCHESTRATOR network create --driver bridge "${SG_DOCKER_NETWORK}" >&/dev/null
   bridge_id="br-$($CONTAINER_ORCHESTRATOR network ls -q --filter "name=${SG_DOCKER_NETWORK}")"
-  iptables \
-    -I DOCKER-USER \
-    -i "${bridge_id}" \
-    -d 169.254.169.254,10.0.0.0/24 \
-    -j DROP
+  iptables_ensure -I DOCKER-USER -i "${bridge_id}" -d 169.254.169.254,10.0.0.0/24 -j DROP
 
   debug "$CONTAINER_ORCHESTRATOR network ${SG_DOCKER_NETWORK} created."
 
-  # Set up necessary rules to enable IAM roles for tasks
+  # Enable IAM roles for tasks
   sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null
   sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
-  iptables \
-    -t nat \
-    -A PREROUTING \
-    -p tcp \
-    -d 169.254.170.2 \
-    --dport 80 \
-    -j DNAT \
-    --to-destination 127.0.0.1:51679
-
-  iptables \
-    -t nat \
-    -A OUTPUT \
-    -d 169.254.170.2 \
-    -p tcp \
-    -m tcp \
-    --dport 80 \
-    -j REDIRECT \
-    --to-ports 51679
+  iptables_ensure -A -t nat PREROUTING -p tcp -d 169.254.170.2 --dport 80 -j DNAT --to-destination 127.0.0.1:51679
+  iptables_ensure -A -t nat OUTPUT -d 169.254.170.2 -p tcp -m tcp --dport 80 -j REDIRECT --to-ports 51679
 
   spinner_msg "Configuring local network" 0
 }
 #}}}: configure_local_network
 
-#}}}: Local data functions
+export_proxy_env() { #{{{
+  if [[ -n "${HTTP_PROXY}" ]]; then
+    export HTTP_PROXY=${HTTP_PROXY}
+    export HTTPS_PROXY=${HTTP_PROXY}
+    export http_proxy="http://${HTTP_PROXY}"
+    export https_proxy="http://${HTTP_PROXY}"
+  fi
+}
+#}}}: export_proxy_env
 
-#######################################
-# Fetch necessary info from API.
-# Globals:
-#   SG_NODE_TOKEN
-#   ORGANIZATION_ID
-#   RUNNER_GROUP_ID
-# Arguments:
-#   None
-# Outputs:
-#   Write to STDERR if error and exit.
-#   Set all necessary environment variables.
-#######################################
+configure_http_proxy() { #{{{
+  [[ -z "${HTTP_PROXY}" ]] && return 0
+
+  info "Setting up Proxy configuration for the registration process."
+  info "Docker should be setup to use the same proxy. For more info see: https://docs.docker.com/engine/cli/proxy/"
+  debug "Setting up HTTP PROXY to ${HTTP_PROXY} for the ECS agent."
+
+  detect_ssm_service
+  mkdir -p "/etc/systemd/system/${SSM_SERVICE_NAME}.d"
+  cat <<EOF >"/etc/systemd/system/${SSM_SERVICE_NAME}.d/http-proxy.conf"
+[Service]
+Environment="http_proxy=http://${HTTP_PROXY}"
+Environment="https_proxy=http://${HTTP_PROXY}"
+Environment="no_proxy=${NO_PROXY}"
+EOF
+  debug "Generated http configuration for service ${SSM_SERVICE_NAME}"
+
+  # Docker client config — used for fetching images / interacting with the internet
+  mkdir -p "${HOME}/.docker"
+  local http_proxy_docker_config
+  http_proxy_docker_config="{ \"proxies\": { \"default\": { \"httpProxy\": \"http://${HTTP_PROXY}\", \"httpsProxy\": \"http://${HTTP_PROXY}\", \"noProxy\": \"${NO_PROXY}\" } } }"
+  [[ -e "$HOME/.docker/config.json" ]] && cp "$HOME/.docker/config.json" "$HOME/original_docker_config.json"
+  patch_json "$HOME/.docker/config.json" "$http_proxy_docker_config"
+
+  # Docker daemon config — used for authenticating to the registry
+  local http_proxy_docker_daemon_config
+  http_proxy_docker_daemon_config="{ \"proxies\": { \"http-proxy\": \"http://${HTTP_PROXY}\", \"https-proxy\": \"http://${HTTP_PROXY}\", \"no-proxy\": \"${NO_PROXY}\" } }"
+  [[ -e "/etc/docker/daemon.json" ]] && cp "/etc/docker/daemon.json" "$HOME/original_docker_daemon.json"
+  patch_json "/etc/docker/daemon.json" "$http_proxy_docker_daemon_config"
+
+  systemctl daemon-reload
+  systemctl restart docker
+
+  export_proxy_env
+}
+#}}}: configure_http_proxy
+
+#}}}: Local configuration
+
+#{{{ Registration / deregistration
+
 fetch_organization_info() { #{{{
-  local url
-  local metadata
+  local url metadata
 
   spinner_wait "Trying to fetch registration data.."
   url="${SG_BASE_API}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/register/"
 
   debug "Calling URL:" "${url}"
 
-  if api_call "POST"; then
+  if api_call "POST" "$url"; then
     spinner_msg "Trying to fetch registration data" 0
     spinner_wait "Preparing environment.."
     metadata="$(echo "${response}" | jq -r '.data.RegistrationMetadata[0]')"
     if [[ "$metadata" == "null" || -z "$metadata" ]]; then
       spinner_msg "Preparing environment.." 1
-      err "API data missing registration metadata."
-      exit 1
+      die "API data missing registration metadata."
     fi
   else
     spinner_msg "Trying to fetch registration data" 1
-    err "Could not fetch data from API." "$status_code" "$message"
-    exit 1
+    die "Could not fetch data from API." "$status_code" "$message"
   fi
   spinner_msg "Preparing environment" 0
 
-  ## API response values (Registration Metadata)
   ECS_CLUSTER="$(echo "${metadata}" | jq -r '.ECSCluster')"
   LOCAL_AWS_DEFAULT_REGION="$(echo "${metadata}" | jq -r '.AWSDefaultRegion')"
   SSM_ACTIVATION_ID="$(echo "${metadata}" | jq -r '.SSMActivationId')"
@@ -832,7 +765,6 @@ fetch_organization_info() { #{{{
   debug_secret "SSM_ACTIVATION_ID"
   debug_secret "SSM_ACTIVATION_CODE"
 
-  ## Everything else
   ORGANIZATION_NAME="$(echo "${response}" | jq -r '.data.OrgName')"
   ORGANIZATION_ID="$(echo "${response}" | jq -r '.data.OrgId')"
   RUNNER_ID="$(echo "${response}" | jq -r '.data.RunnerId')"
@@ -840,7 +772,6 @@ fetch_organization_info() { #{{{
   RUNNER_GROUP_ID="${RUNNER_GROUP_ID##*/}"
   RUNNER_GROUP_DOC_VERSION="$(echo "${response}" | jq -r '.data.RunnerGroup.DocVersion // empty')"
   SG_RUNNER_GROUP_SIGNATURE="$(echo "${response}" | jq -r '.data.RunnerGroup.RunnerGroupSignature // empty')"
-  # TAGS="$(echo "${response}" | jq -r '.data.Tags')"
 
   for var in ORGANIZATION_NAME ORGANIZATION_ID RUNNER_ID RUNNER_GROUP_ID; do
     check_variable_value "$var"
@@ -854,26 +785,8 @@ fetch_organization_info() { #{{{
 }
 #}}}: fetch_organization_info
 
-#######################################
-# Register instance to AWS ECS.
-# Globals:
-#   LOCAL_AWS_DEFAULT_REGION
-#   ECS_CLUSTER
-#   SSM_ACTIVATION_ID
-#   SSM_ACTIVATION_CODE
-# Arguments:
-#   None
-# Outputs:
-#   Write to STDOUT/STDERR
-#   if successful/error.
-#######################################
 register_instance() { #{{{
-
-  # [[ ! -e "$LOG_FILE" ]] \
-  #   && touch "$LOG_FILE"
-
-  local container_id
-  local container_health
+  local container_id container_health
 
   container_id=$($CONTAINER_ORCHESTRATOR ps -q -f "name=ecs-agent")
   container_health=$($CONTAINER_ORCHESTRATOR inspect ecs-agent --type container --format '{{.State.Health.Status}}' 2>/dev/null)
@@ -883,8 +796,7 @@ register_instance() { #{{{
     info "Instance agent already registered and running."
     NO_CLEAN_ON_FAIL=true
     configure_local_network
-    print_details
-    print_details | sed 's/\x1B\[[0-9;]*[JKmsu]//g' >>/var/log/registration/"registration_details_$(date +'%Y-%m-%dT%H-%M-%S%z').txt"
+    save_registration_details
     exit 0
   fi
 
@@ -901,37 +813,24 @@ register_instance() { #{{{
     >>"$LOG_FILE" 2>&1; then
     debug "Response:" "$(cat $LOG_FILE)"
     spinner_msg "Downloading support files" 1
-    err "Unable to download" "ecs-anywhere-install.sh" "script"
-    exit 1
+    die "Unable to download" "ecs-anywhere-install.sh" "script"
   fi
 
-  # Basic integrity check - verify it's a valid bash script
+  # Sanity check: must be a bash script
   if ! head -1 "$ecs_install_script" | grep -q '^#!/bin/bash'; then
-    err "Downloaded script appears invalid" "missing bash shebang"
     rm -f "$ecs_install_script"
-    exit 1
+    die "Downloaded script appears invalid" "missing bash shebang"
   fi
   spinner_msg "Downloading support files" 0
 
   check_systemctl_ecs_status
 
-  SSM_SERVICE_NAME="amazon-ssm-agent"
-  SSM_BIN_NAME="amazon-ssm-agent"
-  if systemctl is-enabled snap.amazon-ssm-agent.amazon-ssm-agent.service &>/dev/null; then
-    echo "Detected SSM agent installed via snap" >>"$LOG_FILE" 2>&1
-    SSM_SERVICE_NAME="snap.amazon-ssm-agent.amazon-ssm-agent.service"
-    SSM_BIN_NAME="/snap/amazon-ssm-agent/current/amazon-ssm-agent"
-  fi
+  detect_ssm_service
 
-  # Restart SSM agent to ensure the creds are refreshed before the installation starts
+  # Restart SSM agent so creds are refreshed before installation starts
   echo "Restarting SSM agent.." >>"$LOG_FILE" 2>&1
   systemctl restart "$SSM_SERVICE_NAME" >>"$LOG_FILE" 2>&1
   systemctl status "$SSM_SERVICE_NAME" >>"$LOG_FILE" 2>&1
-
-  ## TODO: Add the seelog.xml file. Change the value of minlevel to info.
-  # <seelog type="adaptive" mininterval="2000000" maxinterval="100000000" critmsgcount="500" minlevel="info">
-  # level=info time=2024-02-15T11:52:25Z msg="Unable to get Docker client for version 1.44: Error response from daemon: client version 1.44 is too new. Maximum supported API version is 1.43" module=sdkclientfactory.go
-  # Use --no-start with /tmp/ecs-anywhere-install.sh
 
   /bin/bash /tmp/ecs-anywhere-install.sh \
     --region "${LOCAL_AWS_DEFAULT_REGION}" \
@@ -953,7 +852,6 @@ register_instance() { #{{{
       debug "Full Error:" "$full_err_msg"
       err=$(echo "$full_err_msg" | grep -io -P '(?<=msg=\\\").*?(?=\\\")')
       msg=$(echo "$full_err_msg" | grep -io -P '(?<=error=\\\").*?(?=\\)')
-      # err "$err" "$msg"
       kill "$ecs_anywhere_pid" >&/dev/null
       sleep 2
       echo "${err}:${msg}" >>"$LOG_FILE"
@@ -963,36 +861,26 @@ register_instance() { #{{{
   spinner "$!" "Verifying registration of this runner"
 
   setup_cron
-  print_details
-  print_details | sed 's/\x1B\[[0-9;]*[JKmsu]//g' >>/var/log/registration/"registration_details_$(date +'%Y-%m-%dT%H-%M-%S%z').txt"
+  save_registration_details
 }
 #}}}: register_instance
 
-#######################################
-# Make API call for de-registering.
-# Globals:
-#   SG_BASE_API
-#   SG_NODE_TOKEN
-# Arguments:
-#   None
-# Outputs:
-#   Writes to STDOUT/STDERR
-#   if de-registration is successful.
-#######################################
 deregister_instance() { #{{{
   local url
 
   if [[ -e /etc/ecs/ecs.config ]]; then
-    RUNNER_GROUP_ID_ECS_CONFIG="$(grep ECS_INSTANCE_ATTRIBUTES /etc/ecs/ecs.config |
-      cut -d "=" -f2 |
-      jq -r '.sg_runner_group_id')"
-    if [[ "$RUNNER_GROUP_ID_ECS_CONFIG" != "$RUNNER_GROUP_ID" ]]; then
-      err "Different configured and provided --runner-group. Configured: $RUNNER_GROUP_ID_ECS_CONFIG, Provided: $RUNNER_GROUP_ID"
-      exit 1
+    local instance_attrs runner_group_id_cfg org_name_cfg
+    instance_attrs="$(grep ECS_INSTANCE_ATTRIBUTES /etc/ecs/ecs.config | cut -d "=" -f2-)"
+    runner_group_id_cfg="$(echo "$instance_attrs" | jq -r '.sg_runner_group_id')"
+    org_name_cfg="$(echo "$instance_attrs" | jq -r '.sg_organization')"
+
+    if [[ "$runner_group_id_cfg" != "$RUNNER_GROUP_ID" ]]; then
+      die "Different configured and provided --runner-group. Configured: $runner_group_id_cfg, Provided: $RUNNER_GROUP_ID"
     fi
-    RUNNER_ID="$(grep ECS_INSTANCE_ATTRIBUTES /etc/ecs/ecs.config |
-      cut -d "=" -f2 |
-      jq -r '.sg_runner_id')"
+    if [[ -n "$org_name_cfg" && "$org_name_cfg" != "null" && "$org_name_cfg" != "$ORGANIZATION_ID" ]]; then
+      die "Different configured and provided --organization. Configured: $org_name_cfg, Provided: $ORGANIZATION_ID"
+    fi
+    RUNNER_ID="$(echo "$instance_attrs" | jq -r '.sg_runner_id')"
     validate_runner_id "$RUNNER_ID"
   else
     if ! force_exec; then
@@ -1005,29 +893,18 @@ deregister_instance() { #{{{
   url="${SG_BASE_API}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/deregister/"
 
   debug "Calling URL:" "${url}"
-  # TODO: Handle when RunnerId is blank. ERROR: Could not fetch data from API. 400 {'RunnerId': [ErrorDetail(string='This field may not be blank.', code='blank')]}
   payload="{ \"RunnerId\": \"${RUNNER_ID}\" }"
-
   debug "Payload:" "${payload}"
 
   spinner_wait "Trying to deregister instance.."
-  if [[ "$LOG_DEBUG" =~ true|True ]]; then printf "\n"; fi
-  if api_call "POST" "$payload"; then
+  if is_debug; then printf "\n"; fi
+  if api_call "POST" "$url" "$payload"; then
     spinner_msg "Trying to deregister instance" 0
-    # if deregister_ssm_instance_response is [], remove /var/lib/amazon/ssm dir as the MI does not exist anymore, the below logic fails if the ssm deregister api does not return a response but the instance is still alive
-    # echo $data
-    # deregister_ssm_instance_response="$(echo "$data" \
-    #   | jq -r '.deregister_ssm_instance_response')"
-    # echo "dd: " ${#deregister_ssm_instance_response[@]}
-    # if [[ ${#deregister_ssm_instance_response[@]} -eq 0 ]]; then
-    #   rm -rf /var/lib/amazon/ssm
-    # fi
     clean_local_setup &
     spinner "$!" "Starting cleanup"
   else
     spinner_msg "Trying to deregister instance" 1
     err "Could not fetch data from API." "$status_code" "$message"
-    # info "Deregister with -f/--force to force local cleanup. Needed if you are going to register this machine again."
     if force_exec; then
       clean_local_setup &
       spinner "$!" "Starting cleanup"
@@ -1039,19 +916,13 @@ deregister_instance() { #{{{
 }
 #}}}: deregister_instance
 
-#######################################
-# Update diagnostic JSON file with key-value pair
-# Globals:
-#   SG_DIAGNOSTIC_FILE
-#   SG_DIAGNOSTIC_TMP_FILE
-# Arguments:
-#   $1 - JSON key path (e.g., "system.last_check")
-#   $2 - Value to set
-#######################################
+#}}}: Registration / deregistration
+
+#{{{ Diagnostics
+
 update_diagnostic() { #{{{
-  local key="$1"
-  local value="$2"
-  jq ".$key = \"$value\"" "$SG_DIAGNOSTIC_FILE" >"$SG_DIAGNOSTIC_TMP_FILE"
+  local key="$1" value="$2"
+  jq --arg v "$value" ".$key = \$v" "$SG_DIAGNOSTIC_FILE" >"$SG_DIAGNOSTIC_TMP_FILE"
   mv "$SG_DIAGNOSTIC_TMP_FILE" "$SG_DIAGNOSTIC_FILE"
 }
 #}}}: update_diagnostic
@@ -1116,7 +987,6 @@ doctor() { #{{{
 #}}}: doctor
 
 prune() { #{{{
-  local reclaimed
   local prune_filter="until=4h"
   local curr_time
   curr_time=$(date)
@@ -1136,11 +1006,6 @@ prune() { #{{{
     cut -d: -f2 | tr -d ' ')
   update_diagnostic "system.docker.reclaimed_volumes" "$reclaimed_volumes"
 
-  # # Already taken care by ECS agent: Remove all unused images not just dangling, older than 10 days, check if the image created date is used.
-  # reclaimed=$($CONTAINER_ORCHESTRATOR system prune -a \
-  # --filter "until=240h" \
-  # | cut -d: -f2 | tr -d ' ')
-
   spinner_msg "Cleaning up system" 0
   info "Reclaimed at:" "$curr_time"
   info "Reclaimed from containers and images:" "$reclaimed_containers_images"
@@ -1148,16 +1013,15 @@ prune() { #{{{
 }
 #}}}: prune
 
+#}}}: Diagnostics
+
 #{{{ Argument/init checks
 
 check_arg_value() { #{{{
-  ## TODO: make sure to validate double parameter input
   if [[ "${2:0:2}" == "--" ]]; then
-    err "Argument" "${1}" "has invalid value: $2"
-    exit 1
+    die "Argument" "${1}" "has invalid value: $2"
   elif [[ -z "${2}" ]]; then
-    err "Argument" "${1}" "can't be empty"
-    exit 1
+    die "Argument" "${1}" "can't be empty"
   fi
   return 0
 }
@@ -1167,8 +1031,7 @@ validate_proxy_format() { #{{{
   local proxy="$1"
   # Allow hostname:port or IP:port format only (prevents command injection)
   if [[ ! "$proxy" =~ ^[a-zA-Z0-9._-]+:[0-9]+$ ]]; then
-    err "Invalid proxy format" "$proxy" "(expected: hostname:port)"
-    exit 1
+    die "Invalid proxy format" "$proxy" "(expected: hostname:port)"
   fi
 }
 #}}}: validate_proxy_format
@@ -1177,34 +1040,29 @@ validate_runner_id() { #{{{
   local runner_id="$1"
   # Only allow alphanumeric, hyphens, underscores (prevents injection)
   if [[ ! "$runner_id" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-    err "Invalid RUNNER_ID format" "$runner_id"
-    exit 1
+    die "Invalid RUNNER_ID format" "$runner_id"
   fi
 }
 #}}}: validate_runner_id
 
 is_root() { #{{{
   if (($(id -u) != 0)); then
-    err "This script must be run as" "root"
-    exit 1
+    die "This script must be run as" "root"
   fi
   return 0
 }
 #}}}: is_root
 
 init_args_are_valid() { #{{{
-  if [[ ! "$1" =~ ^register$|^deregister$|^status$|^info$|^prune$|^cgroupsv2|^clean$ ]]; then
-    err "Provided option" "${1}" "is invalid"
-    exit 1
+  if [[ ! "$1" =~ ^register$|^deregister$|^status$|^info$|^prune$|^cgroupsv2$|^clean$ ]]; then
+    die "Provided option" "${1}" "is invalid"
   elif [[ "$1" == "cgroupsv2" && ! "$2" =~ ^enable$|^disable$ ]]; then
-    err "Arguments:" "enable, disable" "are required."
-    exit 1
+    die "Arguments:" "enable, disable" "are required."
   elif [[ "$1" =~ register|deregister &&
     (! "$*" =~ --sg-node-token ||
     ! "$*" =~ --organization ||
     ! "$*" =~ --runner-group) ]]; then
-    err "Arguments:" "--sg-node-token, --organization, --runner-group" "are required"
-    exit 1
+    die "Arguments:" "--sg-node-token, --organization, --runner-group" "are required"
   fi
   return 0
 }
@@ -1214,8 +1072,7 @@ check_sg_args() { #{{{
   if [[ -z "${SG_NODE_TOKEN}" ||
     -z "${ORGANIZATION_ID}" ||
     -z "${RUNNER_GROUP_ID}" ]]; then
-    err "Arguments: " "--sg-node-token, --organization, --runner-group" "are required"
-    exit 1
+    die "Arguments: " "--sg-node-token, --organization, --runner-group" "are required"
   fi
   return 0
 }
@@ -1264,8 +1121,7 @@ parse_arguments() { #{{{
       ;;
     *)
       [[ -z "${1}" ]] && break
-      err "Invalid argument:" "${1}"
-      exit 1
+      die "Invalid argument:" "${1}"
       ;;
     esac
   done
@@ -1274,66 +1130,65 @@ parse_arguments() { #{{{
 
 #}}}: Argument/init checks
 
-patch_json() {
-  debug "editing $1"
-  file="$1"
-  patch_json="$2"
-  [[ -f "${file}" && -s "${file}" ]] && org_json=$(cat "$file") || org_json='{}'
-  jq -s '.[0] * .[1]' <(echo "$org_json") <(echo "$patch_json") >$file
-}
+#{{{ Preflight + main
 
-configure_http_proxy() {
-  if [[ -n "${HTTP_PROXY}" ]]; then
-    info "Setting up Proxy configuration for the registration process."
-    info "Docker should be setup to use the same proxy. For more info see: https://docs.docker.com/engine/cli/proxy/"
-    debug "Setting up HTTP PROXY to ${HTTP_PROXY} for the ECS agent."
+preflight() { #{{{
+  if [[ ! -d /run/systemd/system ]]; then
+    die "Private runner is only available for" "systemd-based" "systems"
+  fi
 
-    # SSM HTTP proxy configuration
-    SSM_SERVICE_NAME="amazon-ssm-agent"
-    if systemctl is-enabled snap.amazon-ssm-agent.amazon-ssm-agent.service &>/dev/null; then
-      SSM_SERVICE_NAME="snap.amazon-ssm-agent.amazon-ssm-agent.service"
+  info "Running on" "$(cat /etc/*release | grep -oP '(?<=PRETTY_NAME=").*?(?=")')"
+
+  if [[ -e /sys/fs/cgroup/cgroup.controllers ]]; then
+    if [[ "$(grep "^GRUB_CMDLINE_LINUX=\".*systemd.unified_cgroup_hierarchy=0\"" /etc/default/grub)" == "" ]]; then
+      info "Private runner is running on" "cgroupsv2"
     fi
-    mkdir -p "/etc/systemd/system/${SSM_SERVICE_NAME}.d"
-    cat <<EOF >"/etc/systemd/system/${SSM_SERVICE_NAME}.d/http-proxy.conf"
-[Service]
-Environment="http_proxy=http://${HTTP_PROXY}"
-Environment="https_proxy=http://${HTTP_PROXY}"
-Environment="no_proxy=${NO_PROXY}"
-EOF
-    debug "Generated http configuration for service ${SSM_SERVICE_NAME}"
+  fi
 
-    # Docker config
-    # Required for the docker client interacting with the internet
-    # sets proxy configuration for containers
-    mkdir -p "${HOME}/.docker"
-    http_proxy_docker_config="{ \"proxies\": { \"default\": { \"httpProxy\": \"http://${HTTP_PROXY}\", \"httpsProxy\": \"http://${HTTP_PROXY}\", \"noProxy\": \"${NO_PROXY}\" } } }"
-    [[ -e "$HOME/.docker/config.json" ]] && cp "$HOME/.docker/config.json" "$HOME/original_docker_config.json"
-    patch_json "$HOME/.docker/config.json" "$http_proxy_docker_config"
+  local missing=()
+  for cmd in "${COMMANDS[@]}"; do
+    type "$cmd" >&/dev/null || missing+=("$cmd")
+  done
+  ((${#missing[@]} > 0)) && die "Commands" "${missing[*]}" "not installed"
 
-    # Required for authenticating to the registry and fetching images
-    # Docker Daemon config
-    http_proxy_docker_daemon_config="{ \"proxies\": { \"http-proxy\": \"http://${HTTP_PROXY}\", \"https-proxy\": \"http://${HTTP_PROXY}\", \"no-proxy\": \"${NO_PROXY}\" } }"
-    [[ -e "/etc/docker/daemon.json" ]] && cp "/etc/docker/daemon.json" "$HOME/original_docker_daemon.json"
-    patch_json "/etc/docker/daemon.json" "$http_proxy_docker_daemon_config"
+  for orchestrator in "${CONTAINER_ORCHESTRATORS[@]}"; do
+    if check_container_orchestrator "$orchestrator"; then
+      info "Default container orchestrator" "$orchestrator"
+      if [[ "$orchestrator" == "podman" ]]; then
+        info "Container orchestrator not supported. Aborting.."
+        exit 0
+      fi
+      CONTAINER_ORCHESTRATOR="$orchestrator"
+      break
+    else
+      info "Container orchestrator" "$orchestrator" "not found. Trying next.."
+    fi
+  done
 
-    systemctl daemon-reload
-    systemctl restart docker
+  if [[ -z $CONTAINER_ORCHESTRATOR ]]; then
+    die "One of following container orchestrators required:" "${CONTAINER_ORCHESTRATORS[*]}"
+  fi
 
-    export HTTP_PROXY=${HTTP_PROXY}
-    export HTTPS_PROXY=${HTTP_PROXY}
-    export http_proxy="http://${HTTP_PROXY}"
-    export https_proxy="http://${HTTP_PROXY}"
-
+  # Probe IMDSv2 (AWS); silently no-ops elsewhere.
+  local imdsv2_token attached_iam_role
+  imdsv2_token=$(curl --max-time 5 -fSsLkX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 120" 2>/dev/null)
+  if [ -n "$imdsv2_token" ]; then
+    attached_iam_role=$(curl --max-time 10 -fSsLk --proto "https" -H "X-aws-ec2-metadata-token: $imdsv2_token" "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null)
+  else
+    attached_iam_role=$(curl --max-time 10 -fSsLk "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null)
+  fi
+  if [ -n "$attached_iam_role" ]; then
+    debug "Response:" "$attached_iam_role"
+    info "Found an IAM role attached to the instance" "$attached_iam_role"
   fi
 }
+#}}}: preflight
 
 main() { #{{{
-
   [[ "${*}" =~ --help || $# -lt 1 ]] && show_help && exit 0
 
   is_root && init_args_are_valid "$@"
 
-  # Initialize secure directories (requires root)
   init_diagnostic_dir
 
   if [[ ! -e "$LOG_FILE" ]]; then
@@ -1341,70 +1196,7 @@ main() { #{{{
     chmod 600 "$LOG_FILE"
   fi
 
-  if [[ ! -d /run/systemd/system ]]; then
-    err "Private runner is only available for" "systemd-based" "systems"
-    exit 1
-  fi
-
-  info "Running on" "$(cat /etc/*release | grep -oP '(?<=PRETTY_NAME=").*?(?=")')"
-
-  if [[ -e /sys/fs/cgroup/cgroup.controllers ]]; then
-    if [[ "$1" == "cgroupsv2" && "$2" =~ enable|disable ]]; then
-      if [[ "$CGROUPSV2_PREVIEW" != true ]]; then
-        info "Private runner is running on" "cgroupsv2"
-        # cmd_example "Exec" "export CGROUPSV2_PREVIEW=true" "to enable cgroupsv2 edit (deprecated)"
-      elif [[ "$CGROUPSV2_PREVIEW" == true ]]; then
-        parse_arguments "${@:3}"
-        cgroupsv2 "$2"
-      fi
-    elif [[ "$(grep "^GRUB_CMDLINE_LINUX=\".*systemd.unified_cgroup_hierarchy=0\"" /etc/default/grub)" == "" ]]; then
-      info "Private runner is running on" "cgroupsv2"
-      # cmd_example "Exec" "./main.sh cgroupsv2 disable" "to switch to cgroupsv1 (deprecated)"
-    fi
-  fi
-
-  cmds=()
-  for cmd in "${COMMANDS[@]}"; do
-    if ! type "$cmd" >&/dev/null; then
-      cmds+=("$cmd")
-    fi
-  done
-  ((${#cmds[@]} > 0)) &&
-    err "Commands" "${cmds[*]}" "not installed" && exit 1
-
-  for container_orchestrator in "${CONTAINER_ORCHESTRATORS[@]}"; do
-    if check_container_orchestrator "$container_orchestrator"; then
-      info "Default container orchestrator" "$container_orchestrator"
-      if [[ "$container_orchestrator" == "podman" ]]; then
-        info "Container orchestrator not supported. Aborting.."
-        exit 0
-      fi
-      CONTAINER_ORCHESTRATOR="$container_orchestrator"
-      break
-    else
-      info "Container orchestrator" "$container_orchestrator" "not found. Trying next.."
-    fi
-  done
-
-  if [[ -z $CONTAINER_ORCHESTRATOR ]]; then
-    err "One of following container orchestrators required:" "${CONTAINER_ORCHESTRATORS[*]}"
-    exit 1
-  fi
-
-  # Attempt to get token for IMDSv2 on AWS, will fail silently for IMDSv1, This will fail for non-AWS instances but is handled gracefully
-  imdsv2_token=$(curl --max-time 5 -fSsLkX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 120" 2>/dev/null)
-
-  # Use the token if available; otherwise, proceed without it for IMDSv1 compatibility
-  if [ -n "$imdsv2_token" ]; then
-    attached_iam_role=$(curl --max-time 10 -fSsLk --proto "https" -H "X-aws-ec2-metadata-token: $imdsv2_token" "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null)
-  else
-    attached_iam_role=$(curl --max-time 10 -fSsLk "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null)
-  fi
-
-  if [ -n "$attached_iam_role" ]; then
-    debug "Response:" "$attached_iam_role"
-    info "Found an IAM role attached to the instance" "$attached_iam_role"
-  fi
+  preflight
 
   case "${1}" in
   register)
@@ -1418,7 +1210,9 @@ main() { #{{{
     shift
     parse_arguments "$@"
     check_sg_args
-    configure_http_proxy
+    # Proxy env vars are needed for the deregister API call, but the docker /
+    # SSM proxy config is wiped seconds later by clean_local_setup, so we skip it.
+    export_proxy_env
     deregister_instance
     ;;
   prune)
@@ -1433,11 +1227,14 @@ main() { #{{{
     print_details
     exit 0
     ;;
-  disable-cgroupsv2)
-    cgroupsv2 0
-    ;;
-  enable-cgroupsv2)
-    cgroupsv2 1
+  cgroupsv2)
+    if [[ "$CGROUPSV2_PREVIEW" == true ]]; then
+      parse_arguments "${@:3}"
+      cgroupsv2 "$2"
+    else
+      info "cgroupsv2 toggle is gated behind" "CGROUPSV2_PREVIEW=true"
+      exit 0
+    fi
     ;;
   clean)
     shift
@@ -1446,11 +1243,10 @@ main() { #{{{
     spinner "$!" "Starting cleanup"
     ;;
   esac
-
-  # TODO: API call to ping the node
-
 }
 #}}}: main
+
+#}}}: Preflight + main
 
 trap cleanup SIGINT
 trap exit_help EXIT
