@@ -20,7 +20,8 @@ readonly SCRIPT_DIR
 readonly LOG_FILE="/var/log/sg_runner.log"
 
 # static
-readonly COMMANDS=("jq" "crontab")
+# readonly COMMANDS=("jq" "crontab")
+readonly COMMANDS=("jq")
 readonly CONTAINER_ORCHESTRATORS=("docker")
 readonly SG_DOCKER_NETWORK="sg-net"
 
@@ -575,7 +576,7 @@ clean_local_setup() { #{{{
   [[ -e "${HOME}/original_docker_config.json" ]] && cp "${HOME}/original_docker_config.json" "${HOME}/.docker/config.json"
   [[ -e "${HOME}/original_docker_daemon.json" ]] && cp "${HOME}/original_docker_daemon.json" "/etc/docker/daemon.json"
 
-  clean_cron
+  # clean_cron
 
   # Wait for AWS SSM Managed Instance to deregister on AWS side
   sleep 10s
@@ -860,7 +861,7 @@ register_instance() { #{{{
   done &
   spinner "$!" "Verifying registration of this runner"
 
-  setup_cron
+  # setup_cron
   save_registration_details
 }
 #}}}: register_instance
