@@ -130,7 +130,7 @@ Besides `register` and `deregister`, script offers easy health checking:
 ```
 
 This command will print status of `ecs` and `docker` services.
-Also, including all related Docker containers (`ecs-agent`, `fluentbit-agent`).
+Also, including the related Docker container (`ecs-agent`).
 
 ### System prune
 
