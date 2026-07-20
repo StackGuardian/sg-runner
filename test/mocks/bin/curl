@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Mock: curl
+# Records the call, then emits canned output. main.sh uses curl for:
+#   - public IP (ifconfig.me)
+#   - the StackGuardian register/deregister API (returns an HTTP response blob)
+#   - downloading the ECS install script
+#   - IMDSv2 token + IAM role lookups
+# One knob covers stdout; tests that need to distinguish callers can set it per
+# phase with reset_mocks between calls.
+#   $MOCK_CURL_OUTPUT  (default: empty)
+#   $MOCK_CURL_EXIT    (default: 0)
+printf '%s\n' "curl $*" >>"${MOCK_CALL_LOG}"
+
+printf '%s' "${MOCK_CURL_OUTPUT:-}"
+[ -n "${MOCK_CURL_OUTPUT:-}" ] && echo
+
+exit "${MOCK_CURL_EXIT:-0}"

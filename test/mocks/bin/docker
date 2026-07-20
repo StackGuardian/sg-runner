@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Mock: docker (also used via $CONTAINER_ORCHESTRATOR)
+# Records the call, then answers the subcommands main.sh uses:
+#   ps        -> $MOCK_DOCKER_PS_OUTPUT       (default: empty)
+#   inspect   -> $MOCK_DOCKER_INSPECT_OUTPUT  (default: healthy)
+#   system    -> $MOCK_DOCKER_SYSTEM_OUTPUT   (default: "Total reclaimed space: 0B")
+# Exit code override: $MOCK_DOCKER_EXIT (default: 0).
+printf '%s\n' "docker $*" >>"${MOCK_CALL_LOG}"
+
+case "$1" in
+  ps)
+    printf '%s' "${MOCK_DOCKER_PS_OUTPUT:-}"
+    [ -n "${MOCK_DOCKER_PS_OUTPUT:-}" ] && echo
+    ;;
+  inspect)
+    echo "${MOCK_DOCKER_INSPECT_OUTPUT:-healthy}"
+    ;;
+  system)
+    echo "${MOCK_DOCKER_SYSTEM_OUTPUT:-Total reclaimed space: 0B}"
+    ;;
+esac
+
+exit "${MOCK_DOCKER_EXIT:-0}"

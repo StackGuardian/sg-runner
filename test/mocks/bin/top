@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Mock: top
+# Records the call. main.sh runs `top -bn1 | grep "Cpu(s)" | awk ...`, so the
+# default output carries a Linux-style Cpu(s) line the pipeline can parse.
+#   $MOCK_TOP_OUTPUT (default: a single Cpu(s) summary line)
+#   $MOCK_TOP_EXIT   (default: 0)
+printf '%s\n' "top $*" >>"${MOCK_CALL_LOG}"
+echo "${MOCK_TOP_OUTPUT:-%Cpu(s):  3.0 us,  1.0 sy,  0.0 ni, 95.0 id,  0.5 wa,  0.0 hi,  0.5 si,  0.0 st}"
+exit "${MOCK_TOP_EXIT:-0}"

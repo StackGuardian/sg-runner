@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Mock: uptime
+# Records the call. main.sh parses both the leading uptime fields and the
+# trailing "load average:" segment, so the default output carries both.
+#   $MOCK_UPTIME_OUTPUT (default: a typical `uptime` line)
+#   $MOCK_UPTIME_EXIT   (default: 0)
+printf '%s\n' "uptime $*" >>"${MOCK_CALL_LOG}"
+echo "${MOCK_UPTIME_OUTPUT:- 12:00:00 up 3 days,  4:05,  1 user,  load average: 0.10, 0.20, 0.30}"
+exit "${MOCK_UPTIME_EXIT:-0}"

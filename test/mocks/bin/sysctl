@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Mock: sysctl
+# Records the call. main.sh only writes values (`sysctl -w ...`); just succeed.
+#   $MOCK_SYSCTL_EXIT (default: 0)
+printf '%s\n' "sysctl $*" >>"${MOCK_CALL_LOG}"
+exit "${MOCK_SYSCTL_EXIT:-0}"

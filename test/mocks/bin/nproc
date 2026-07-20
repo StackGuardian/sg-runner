@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Mock: nproc
+# Records the call, prints a CPU count.
+#   $MOCK_NPROC_OUTPUT (default: 4)
+#   $MOCK_NPROC_EXIT   (default: 0)
+printf '%s\n' "nproc $*" >>"${MOCK_CALL_LOG}"
+echo "${MOCK_NPROC_OUTPUT:-4}"
+exit "${MOCK_NPROC_EXIT:-0}"

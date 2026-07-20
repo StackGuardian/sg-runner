@@ -1,0 +1,5 @@
+HTTP/1.1 200 OK
+Content-Type: application/json
+Date: Thu, 18 Jun 2026 00:00:00 GMT
+
+{"msg":"deregistration successful","data":{"RunnerId":"runner-abc123","Deregistered":true}}
