@@ -7,11 +7,14 @@
 - [3.0 Setup](#30-setup)
   - [3.1 Environment](#31-environment)
   - [3.2 Registration](#32-registration)
-    - [3.2.1 Get credentials from StackGuardian](#331-get-credentials-from-stackguardian)
-    - [3.2.2 Run the script for registration](#332-run-the-script-for-registration)
-  - [3.3 De-registration](#34-de-registration)
+    - [3.2.1 Get credentials from StackGuardian](#321-get-credentials-from-stackguardian)
+    - [3.2.2 Run the script for registration](#322-run-the-script-for-registration)
+  - [3.3 De-registration](#33-de-registration)
   - [3.4 Restart](#34-restart)
-- [Other options](#other-options)
+- [System diagnostics](#system-diagnostics)
+- [Managing `cgroupsv2`](#managing-cgroupsv2)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
 
 ## 1.0 Introduction
 
@@ -20,7 +23,7 @@ registering external (self-hosted) instances to the StackGuardian platform.
 Configuration is very simple, get credentials from StackGuardian platform,
 and run `main.sh` script with credentials.
 
-Check [Setup](#setup) for more details.
+Check [Setup](#30-setup) for more details.
 
 ## 2.0 How it works
 
@@ -41,7 +44,7 @@ Only, _task definition_ will live on _AWS ECS_.
 
 Setup is very simple. We tried to make it as automated as possible.
 All you have to do is run `main.sh` with wanted option that you want to execute:
-[Registration](#registration) or [De-registration](#de-registration), and
+[Registration](#32-registration) or [De-registration](#33-de-registration), and
 provided credentials from _StackGuardian_ platform.
 
 > For more details the `main.sh` script has integrated _help_ menu:
@@ -114,12 +117,12 @@ But, to achieve similar experience it is enough to [`deregister`](#33-de-registr
 We included 2 commands for easier system diagnostics and management.
 These should help you keep your system clean and debug in case of errors.
 
-> INFO: Any of following actions keep state in a file at `/tmp/diagnostic.json`.
+> INFO: Any of following actions keep state in a file at `/var/lib/sg-runner/diagnostic.json`.
 
 With any command you can provide `--debug` flag.
 With this, you will get more output while running commands.
 
-> INFO: All logs are being kept at `/tmp/sg_runner.log`.
+> INFO: All logs are being kept at `/var/log/sg_runner.log`.
 
 ### Health check
 
@@ -158,7 +161,7 @@ export CGROUPSV2_PREVIEW=true
 and then
 
 ```
-./main.sh cgropusv2 disable
+./main.sh cgroupsv2 disable
 ```
 
 > Reboot is required after such action.
@@ -174,7 +177,23 @@ To revert you can just run:
 - StackGuardian uses AWS SSM to setup connection between SG control plane and runners, you can diagnose SSM client using `ssm-cli get-diagnostics --output table`
 
 - If the registration was successful but you can't see Ping Status and IP Address for the Runner on StackGuardian Platform inside the Runner Group's -> Runner Instances tab please re-register runner using the following command:
-    ```bash
-    ./main.sh deregister --sg-node-token "TOKEN" --organization "ORG" --runner-group "RUNNER_GROUP" && \
-    ./main.sh register --sg-node-token "TOKEN" --organization "ORG" --runner-group "RUNNER_GROUP"
-    ```
+  ```bash
+  ./main.sh deregister --sg-node-token "TOKEN" --organization "ORG" --runner-group "RUNNER_GROUP" && \
+  ./main.sh register --sg-node-token "TOKEN" --organization "ORG" --runner-group "RUNNER_GROUP"
+  ```
+
+## Development
+
+`main.sh` has an automated test suite (unit + smoke) built with
+[bats-core](https://github.com/bats-core/bats-core), vendored under `test/lib/`
+as git submodules — nothing is downloaded at runtime.
+
+```sh
+git submodule update --init --recursive   # once, after a fresh clone
+make test                                  # run the unit + smoke tiers
+make lint                                  # shellcheck: correctness + modern-idiom gate
+```
+
+See [`test/README.md`](test/README.md) for the test harness contract, the mock
+framework, and how to add tests. Every pull request against `main` runs `lint`
+and the test suite in CI.
