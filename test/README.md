@@ -53,7 +53,7 @@ The `Makefile` at the repo root wraps the canonical commands:
 make test              # every tier (unit + smoke)
 make test-unit         # one tier
 make test-smoke
-make lint              # shellcheck main.sh + mocks + helpers
+make lint              # shellcheck: correctness + modern-idiom gate
 ```
 
 Or invoke the vendored runner directly from the repo root:
@@ -77,6 +77,20 @@ libraries' own bats suites under `test/lib/` and errors out.
 
 Requires GNU bash 5+ first on `PATH` (Homebrew `/opt/homebrew/bin/bash` on
 macOS). The vendored `bats` runs under `/usr/bin/env bash`.
+
+## Linting & conventions
+
+`make lint` (also a CI job) runs `shellcheck` two ways over `main.sh`, the mock
+stubs, and the bash helpers:
+
+1. **Correctness** — the default warning-and-up checks.
+2. **Modern-idiom gate** — enforces current Bash conventions regardless of
+   severity: `[[ ]]` over `[ ]` (SC2292) and `$(...)` over backticks (SC2006).
+
+Rules live in `.shellcheckrc` at the repo root (`enable=require-double-brackets`,
+`enable=deprecate-which`, and `disable=SC2034` for the intentionally-exported
+globals), so editors and CI apply the same conventions. `.bats` files are not
+shellchecked — their `@test` syntax isn't valid standalone Bash.
 
 ## Writing a test
 

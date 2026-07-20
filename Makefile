@@ -23,7 +23,13 @@ test-unit: ## Run the unit tier (pure functions, no I/O)
 test-smoke: ## Run the smoke tier (subprocess CLI-contract)
 	$(BATS) --recursive test/smoke
 
-lint: ## shellcheck main.sh, the mock stubs, and the bash helpers
-	shellcheck --severity=warning -e SC2034 main.sh
+SHELL_SOURCES := main.sh test/mocks/bin/* test/helpers/*.bash
+
+lint: ## shellcheck correctness + modern-idiom gate (config in .shellcheckrc)
+	# General correctness (warnings and up); SC2034 is disabled in .shellcheckrc.
+	shellcheck --severity=warning main.sh
 	shellcheck test/mocks/bin/*
 	shellcheck test/helpers/*.bash
+	# Idiom gate: enforce [[ ]] over [ ] (SC2292) and command substitution over
+	# backticks (SC2006) across every shell source, regardless of severity.
+	shellcheck --include=SC2292,SC2006 $(SHELL_SOURCES)

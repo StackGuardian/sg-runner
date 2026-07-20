@@ -8,7 +8,7 @@
 #   $MOCK_IP_EXIT         (default: 0)
 printf '%s\n' "ip $*" >>"${MOCK_CALL_LOG}"
 
-if [ "$1" = "route" ]; then
+if [[ "$1" == "route" ]]; then
   echo "${MOCK_IP_ROUTE_OUTPUT:-default via 10.0.0.254 dev eth0 proto dhcp src 10.0.0.1 metric 100}"
 fi
 

@@ -7,7 +7,7 @@
 printf '%s\n' "iptables $*" >>"${MOCK_CALL_LOG}"
 
 for arg in "$@"; do
-  if [ "${arg}" = "-C" ]; then
+  if [[ "${arg}" == "-C" ]]; then
     exit "${MOCK_IPTABLES_CHECK_EXIT:-1}"
   fi
 done

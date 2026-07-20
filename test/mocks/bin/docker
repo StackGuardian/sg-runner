@@ -10,7 +10,7 @@ printf '%s\n' "docker $*" >>"${MOCK_CALL_LOG}"
 case "$1" in
   ps)
     printf '%s' "${MOCK_DOCKER_PS_OUTPUT:-}"
-    [ -n "${MOCK_DOCKER_PS_OUTPUT:-}" ] && echo
+    [[ -n "${MOCK_DOCKER_PS_OUTPUT:-}" ]] && echo
     ;;
   inspect)
     echo "${MOCK_DOCKER_INSPECT_OUTPUT:-healthy}"

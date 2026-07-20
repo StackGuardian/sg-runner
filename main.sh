@@ -318,7 +318,7 @@ EOF
   if [[ -z "$status_code" ]]; then
     err "Unknown status code."
     exit 1
-  elif [ "$status_code" != "200" ] && [ "$status_code" != "201" ] && [ "$status_code" != "100" ]; then
+  elif [[ "$status_code" != "200" && "$status_code" != "201" && "$status_code" != "100" ]]; then
     return 1
   else
     return 0
@@ -1183,12 +1183,12 @@ preflight() { #{{{
   # Probe IMDSv2 (AWS); silently no-ops elsewhere.
   local imdsv2_token attached_iam_role
   imdsv2_token=$(curl --max-time 5 -fSsLkX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 120" 2>/dev/null)
-  if [ -n "$imdsv2_token" ]; then
+  if [[ -n "$imdsv2_token" ]]; then
     attached_iam_role=$(curl --max-time 10 -fSsLk --proto "https" -H "X-aws-ec2-metadata-token: $imdsv2_token" "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null)
   else
     attached_iam_role=$(curl --max-time 10 -fSsLk "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null)
   fi
-  if [ -n "$attached_iam_role" ]; then
+  if [[ -n "$attached_iam_role" ]]; then
     debug "Response:" "$attached_iam_role"
     info "Found an IAM role attached to the instance" "$attached_iam_role"
   fi

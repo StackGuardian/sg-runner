@@ -12,6 +12,6 @@
 printf '%s\n' "curl $*" >>"${MOCK_CALL_LOG}"
 
 printf '%s' "${MOCK_CURL_OUTPUT:-}"
-[ -n "${MOCK_CURL_OUTPUT:-}" ] && echo
+[[ -n "${MOCK_CURL_OUTPUT:-}" ]] && echo
 
 exit "${MOCK_CURL_EXIT:-0}"

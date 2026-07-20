@@ -6,7 +6,7 @@
 #   $MOCK_DF_EXIT   (default: 0)
 printf '%s\n' "df $*" >>"${MOCK_CALL_LOG}"
 
-if [ -n "${MOCK_DF_OUTPUT:-}" ]; then
+if [[ -n "${MOCK_DF_OUTPUT:-}" ]]; then
   printf '%s\n' "${MOCK_DF_OUTPUT}"
 else
   cat <<'EOF'

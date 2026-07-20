@@ -6,7 +6,7 @@
 #   $MOCK_FREE_EXIT   (default: 0)
 printf '%s\n' "free $*" >>"${MOCK_CALL_LOG}"
 
-if [ -n "${MOCK_FREE_OUTPUT:-}" ]; then
+if [[ -n "${MOCK_FREE_OUTPUT:-}" ]]; then
   printf '%s\n' "${MOCK_FREE_OUTPUT}"
 else
   cat <<'EOF'
