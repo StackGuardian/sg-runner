@@ -25,20 +25,26 @@ FROM debian:stable-slim
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     bash \
-    jq \
-    coreutils \
     ca-certificates \
-  && rm -rf /var/lib/apt/lists/*
+    coreutils \
+    jq \
+  && rm -rf /var/lib/apt/lists/* \
+  && useradd --create-home --uid 1000 runner
 
 WORKDIR /sg-runner
 
-# Copy the whole repo so main.sh, the mocks, the vendored bats, and these
-# integration files all land in the image at their real relative paths.
-COPY . /sg-runner
+# Copy only what the tier needs — main.sh under test plus the test tree (mocks,
+# vendored bats, fixtures) — rather than the whole build context.
+COPY main.sh ./
+COPY test/ ./test/
 
 # Satisfy preflight()'s only environment probe (see header). The container has
-# no real systemd; this empty directory is all preflight inspects.
-RUN mkdir -p /run/systemd/system
+# no real systemd; this empty directory is all preflight inspects. Hand the repo
+# to an unprivileged user so the tier runs without root.
+RUN mkdir -p /run/systemd/system \
+  && chown -R runner:runner /sg-runner
+
+USER runner
 
 # Put the mock stubs first on PATH so systemctl/docker/curl/iptables/... resolve
 # to the recording stubs, exactly as load.bash does for the host-run tiers.

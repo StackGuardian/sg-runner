@@ -16,7 +16,7 @@
 # Resolve the directory holding THIS file, following symlinks, without relying
 # on CWD. BASH_SOURCE[0] is the path to load.bash itself.
 _load_self="${BASH_SOURCE[0]}"
-while [ -h "${_load_self}" ]; do
+while [[ -h "${_load_self}" ]]; do
   _dir="$(cd -P "$(dirname "${_load_self}")" >/dev/null 2>&1 && pwd)"
   _load_self="$(readlink "${_load_self}")"
   [[ "${_load_self}" != /* ]] && _load_self="${_dir}/${_load_self}"
@@ -32,7 +32,7 @@ unset _load_self _dir
 
 # Per-test scratch dir. bats sets BATS_TEST_TMPDIR per test; fall back to a
 # fresh mktemp dir when sourced outside a running test.
-if [ -n "${BATS_TEST_TMPDIR:-}" ]; then
+if [[ -n "${BATS_TEST_TMPDIR:-}" ]]; then
   SG_TEST_TMPDIR="${BATS_TEST_TMPDIR}"
 else
   SG_TEST_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/sg-runner-test.XXXXXX")"

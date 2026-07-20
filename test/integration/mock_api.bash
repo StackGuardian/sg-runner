@@ -31,6 +31,7 @@
 # integration_fixtures_dir - absolute path to test/integration/fixtures.
 integration_fixtures_dir() {
   echo "${BATS_TEST_DIRNAME}/fixtures"
+  return 0
 }
 
 # mock_api_response <fixture.http> - load a canned HTTP response blob into the
@@ -40,10 +41,12 @@ mock_api_response() {
   local fixture="$1"
   export MOCK_CURL_OUTPUT
   MOCK_CURL_OUTPUT="$(cat "$(integration_fixtures_dir)/${fixture}")"
+  return 0
 }
 
 # mock_api_status <code> - force the curl exit code (0 = transport ok). The HTTP
 # status itself comes from the fixture's status line, not this.
 mock_api_status() {
   export MOCK_CURL_EXIT="${1:-0}"
+  return 0
 }
