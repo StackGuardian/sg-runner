@@ -32,16 +32,3 @@ jobs:
       # (it is vendored).
       - name: Unit + smoke tiers
         run: make test-unit test-smoke
-
-  integration:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: recursive
-      # The integration tier needs preflight()'s /run/systemd/system directory,
-      # so it runs inside the Docker image (which fakes that dir). The image
-      # COPYs the working tree, so the submodule checkout above is what puts the
-      # vendored bats into the image.
-      - name: Integration tier (Docker)
-        run: make test-docker

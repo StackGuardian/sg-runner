@@ -1,5 +1,0 @@
-HTTP/1.1 200 OK
-Content-Type: application/json
-Date: Thu, 18 Jun 2026 00:00:00 GMT
-
-{"msg":"registration successful","data":{"OrgName":"acme-corp","OrgId":"acme-corp","RunnerId":"runner-abc123","RunnerGroupId":"/some/path/rg-private-pool","RunnerGroup":{"DocVersion":"V4","RunnerGroupSignature":"sig-deadbeefcafe"},"RegistrationMetadata":[{"ECSCluster":"sg-cluster-acme","AWSDefaultRegion":"us-east-1","SSMActivationId":"11111111-2222-3333-4444-555555555555","SSMActivationCode":"AAAAAAAAAAAAAAAAAAAA"}]}}

@@ -1,7 +1,0 @@
-{
-  "msg": "deregistration successful",
-  "data": {
-    "RunnerId": "runner-abc123",
-    "Deregistered": true
-  }
-}

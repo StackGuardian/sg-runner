@@ -34,11 +34,11 @@ setup() {
   refute_output --partial "systemd-based"
 }
 
-@test "DOCUMENTING: fully-valid subcommands reach preflight (integration tier)" {
+@test "DOCUMENTING: fully-valid subcommands reach preflight (not covered here)" {
   # A register with all required flags passes init_args_are_valid and proceeds
   # to preflight, which hard-dies on any non-systemd host ([[ ! -d
-  # /run/systemd/system ]]). On macOS that always fires, so exercising a valid
-  # subcommand end to end belongs to the integration/Docker tier, not here.
+  # /run/systemd/system ]]). On macOS that always fires, so a fully-valid
+  # subcommand cannot be exercised end to end by this host-only suite.
   # Likewise status/prune/info/clean pass validation and reach preflight.
-  skip "valid subcommands reach preflight; covered by the integration tier"
+  skip "valid subcommands reach preflight; not exercised by the host-only suite"
 }

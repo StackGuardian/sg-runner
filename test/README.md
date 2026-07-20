@@ -14,8 +14,7 @@ test/
     mocks.bash         assertions over the mock call log
   mocks/bin/           stub executables shadowing every external command
   unit/                pure-function tests (one function, no I/O)
-  smoke/               whole-subcommand tests under full mocking
-  integration/         multi-step / cross-function flows under full mocking
+  smoke/               CLI-contract tests (main.sh run as a subprocess)
   fixtures/            canned input files
 ```
 
@@ -51,11 +50,9 @@ git submodule update --init --recursive
 The `Makefile` at the repo root wraps the canonical commands:
 
 ```sh
-make test              # every tier (unit + smoke + integration)
+make test              # every tier (unit + smoke)
 make test-unit         # one tier
 make test-smoke
-make test-integration  # scaffold; heavy flows skip off-container
-make test-docker       # integration tier inside the Docker image
 make lint              # shellcheck main.sh + mocks + helpers
 ```
 
@@ -70,10 +67,9 @@ $BATS test/unit/harness.bats
 # a whole tier
 $BATS --recursive test/unit
 $BATS --recursive test/smoke
-$BATS --recursive test/integration
 
-# everything — scope to the three tier dirs, NOT `--recursive test/`
-$BATS --recursive test/unit test/smoke test/integration
+# everything — scope to the tier dirs, NOT `--recursive test/`
+$BATS --recursive test/unit test/smoke
 ```
 
 Scope to the tier dirs. `--recursive test/` descends into the vendored
@@ -153,11 +149,9 @@ bats-support / bats-assert are also loaded, so `assert_success`,
 
 - **unit/** — one pure function, no orchestration. Source `main.sh`, call the
   function, assert on return/output. `harness.bats` lives here as the canary.
-- **smoke/** — drive a whole subcommand (`register`, `status`, `prune`, ...)
-  end to end with all externals mocked; assert the right commands were called
-  and the right files written under the temp dir.
-- **integration/** — multi-function flows and ordering (e.g. register then
-  deregister), still fully mocked. No real network, services, or host changes.
+- **smoke/** — run `main.sh` as a subprocess and assert its CLI contract (help,
+  command validation, required-argument enforcement) — the surface that exits
+  before `preflight()`, so it needs no systemd, docker, or root.
 
 ## Caveats / known limitations
 
