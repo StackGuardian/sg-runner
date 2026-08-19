@@ -47,6 +47,7 @@ export SG_DIAGNOSTIC_DIR="${SG_TEST_TMPDIR}/sg-runner"
 export ECS_CONFIG_DIR="${SG_TEST_TMPDIR}/etc-ecs"
 export ECS_LOG_DIR="${SG_TEST_TMPDIR}/var-log-ecs"
 export ECS_DATA_DIR="${SG_TEST_TMPDIR}/var-lib-ecs-data"
+export ECS_EXEC_DEPS_DIR="${SG_TEST_TMPDIR}/var-lib-ecs-deps/execute-command"
 export REGISTRATION_DIR="${SG_TEST_TMPDIR}/registration"
 
 # Bypass the root requirement.

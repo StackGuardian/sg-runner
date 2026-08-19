@@ -4,6 +4,7 @@
 
 - [1.0 Introduction](#10-introduction)
 - [2.0 How it works](#20-how-it-works)
+  - [2.1 ECS Exec is not used](#21-ecs-exec-is-not-used)
 - [3.0 Setup](#30-setup)
   - [3.1 Environment](#31-environment)
   - [3.2 Registration](#32-registration)
@@ -33,6 +34,20 @@ _AWS Elastic Cluster Service (ECS)_, and it represents customer **Node**.
 Each requested _task run_ is placed on the **Node**.
 Which means, anything described inside that task will be running on **Node** (self-hosted/external instance).
 Only, _task definition_ will live on _AWS ECS_.
+
+### 2.1 ECS Exec is not used
+
+Workflow tasks are never launched with `enableExecuteCommand`, so ECS Exec is
+unused on a runner. AWS's `ecs-anywhere-install.sh` nevertheless stages the SSM
+session binaries into `/var/lib/ecs/deps/execute-command` on every install — the
+call is unconditional and the script offers no flag to skip it — which leaves
+unused binaries on disk for vulnerability scanners to flag.
+
+Registration therefore skips that step and removes the directory if anything was
+staged anyway. This is not configurable: there is no supported setup in which the
+runner needs those binaries. The ECS agent treats them as optional and simply
+stops advertising the `ecs.capability.execute-command` attribute when they are
+absent.
 
 ## 3.0 Setup
 

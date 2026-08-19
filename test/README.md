@@ -28,8 +28,10 @@ test/
 - **Path overrides via env.** Every path it writes to is overridable:
   `LOG_FILE`, `SG_DIAGNOSTIC_DIR` (`SG_DIAGNOSTIC_FILE` /
   `SG_DIAGNOSTIC_TMP_FILE` derive from it), `ECS_CONFIG_DIR`, `ECS_LOG_DIR`,
-  `ECS_DATA_DIR`, `REGISTRATION_DIR`. `load.bash` points all of these at a
-  per-test temp dir, so a test never touches real system paths.
+  `ECS_DATA_DIR`, `ECS_EXEC_DEPS_DIR`, `REGISTRATION_DIR`. `load.bash` points
+  all of these at a per-test temp dir, so a test never touches real system
+  paths. This matters most for `ECS_EXEC_DEPS_DIR`: `remove_ecs_exec_deps`
+  runs `rm -rf` on it.
 - **Root bypass.** `SG_SKIP_ROOT_CHECK=true` makes `is_root()` succeed without
   root. `load.bash` sets it.
 - **API + debug.** `SG_BASE_API` overrides the API base; `LOG_DEBUG=true`
