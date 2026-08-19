@@ -772,8 +772,30 @@ disable_ecs_exec_setup() { #{{{
 }
 #}}}: disable_ecs_exec_setup
 
+is_ecs_exec_deps_path() { #{{{
+  # Guard for the root-run `rm -rf` in remove_ecs_exec_deps. ECS_EXEC_DEPS_DIR
+  # is overridable for testing, which makes it the one place in this script
+  # where an env var supplies a whole deletion path rather than a fixed literal.
+  # Accept only an absolute path that actually names a deps directory, so a
+  # stray "/" or "/etc" in the environment can never reach rm.
+  #
+  # Kept as a pure predicate so the dangerous inputs are unit-testable without
+  # any test ever pointing rm at them. A trailing slash is rejected too: the
+  # refusal is logged and harmless, unlike the alternative.
+  case "${1:-}" in
+  /*/execute-command) return 0 ;;
+  *) return 1 ;;
+  esac
+}
+#}}}: is_ecs_exec_deps_path
+
 remove_ecs_exec_deps() { #{{{
   # Authoritative cleanup: drop whatever exec-setup managed to stage.
+  if ! is_ecs_exec_deps_path "$ECS_EXEC_DEPS_DIR"; then
+    debug "Refusing to remove unexpected ECS_EXEC_DEPS_DIR:" "$ECS_EXEC_DEPS_DIR"
+    return 0
+  fi
+
   [[ -d "$ECS_EXEC_DEPS_DIR" ]] || return 0
 
   if rm -rf "$ECS_EXEC_DEPS_DIR"; then

@@ -176,6 +176,79 @@ setup() {
 
 #}}}: remove_ecs_exec_deps
 
+#{{{ is_ecs_exec_deps_path (rm -rf guard)
+
+# ECS_EXEC_DEPS_DIR is overridable, so remove_ecs_exec_deps is the one place a
+# stray env var could hand `rm -rf` a whole path while running as root. The
+# guard is a pure predicate precisely so the catastrophic inputs below can be
+# asserted without any test pointing rm at them.
+
+@test "guard accepts the production default path" {
+  load_main
+  run is_ecs_exec_deps_path "/var/lib/ecs/deps/execute-command"
+  assert_success
+}
+
+@test "guard accepts the redirected test path" {
+  load_main
+  run is_ecs_exec_deps_path "$ECS_EXEC_DEPS_DIR"
+  assert_success
+}
+
+@test "guard rejects root" {
+  load_main
+  run is_ecs_exec_deps_path "/"
+  assert_failure
+}
+
+@test "guard rejects a bare system directory" {
+  load_main
+  for bad in /etc /var /usr /var/lib /var/lib/ecs; do
+    run is_ecs_exec_deps_path "$bad"
+    assert_failure
+  done
+}
+
+@test "guard rejects empty and unset" {
+  load_main
+  run is_ecs_exec_deps_path ""
+  assert_failure
+  run is_ecs_exec_deps_path
+  assert_failure
+}
+
+@test "guard rejects a relative path" {
+  load_main
+  run is_ecs_exec_deps_path "execute-command"
+  assert_failure
+  run is_ecs_exec_deps_path "./execute-command"
+  assert_failure
+}
+
+@test "guard rejects a path merely containing the name" {
+  load_main
+  run is_ecs_exec_deps_path "/var/lib/ecs/deps/execute-command-backup"
+  assert_failure
+  run is_ecs_exec_deps_path "/execute-command/etc"
+  assert_failure
+}
+
+@test "remove_ecs_exec_deps refuses a wrongly-shaped dir and leaves it intact" {
+  # Absolute but not a deps dir. Kept inside the test tmpdir so that a
+  # regression here destroys a sentinel, never anything real.
+  export ECS_EXEC_DEPS_DIR="${SG_TEST_TMPDIR}/not-a-deps-dir"
+  load_main
+  mkdir -p "$ECS_EXEC_DEPS_DIR"
+  touch "${ECS_EXEC_DEPS_DIR}/canary"
+
+  run remove_ecs_exec_deps
+  assert_success
+
+  assert [ -e "${ECS_EXEC_DEPS_DIR}/canary" ]
+}
+
+#}}}: is_ecs_exec_deps_path
+
 #{{{ wiring
 
 @test "ECS_EXEC_DEPS_DIR defaults to the production path" {
