@@ -1,0 +1,50 @@
+#!/bin/bash
+# Trimmed stand-in for AWS's ecs-anywhere-install-latest.sh, preserving the
+# parts disable_ecs_exec_setup cares about: the exec-setup function definition,
+# its helper functions, and the unconditional top-level `exec-setup` call in the
+# script's main flow. Sourced facts (function names, the hardcoded
+# BINARY_VERSION, the call order) mirror the upstream script.
+
+set -e
+
+SKIP_REGISTRATION=false
+DOCKER_SOURCE=""
+
+ok() { echo "ok"; }
+
+install-ssm-agent() { echo "install-ssm-agent"; }
+
+install-docker() { echo "install-docker $1"; }
+
+exec-setup() {
+    find-copy-certs-exec
+    download-ssm-binaries-exec
+}
+
+find-copy-certs-exec() {
+    CERTS_PATH="/var/lib/ecs/deps/execute-command/certs"
+    echo "Copying certs for exec feature to ${CERTS_PATH}"
+    ok
+}
+
+download-ssm-binaries-exec() {
+    BINARY_VERSION="3.3.4624.0"
+    BINARY_PATH="/var/lib/ecs/deps/execute-command/bin/${BINARY_VERSION}"
+    echo "Downloading SSM binaries for exec feature to ${BINARY_PATH}"
+    ok
+}
+
+install-ecs-agent() { echo "install-ecs-agent"; }
+
+wait-agent-start() { echo "wait-agent-start"; }
+
+show-license() { echo "show-license"; }
+
+if ! $SKIP_REGISTRATION; then
+    install-ssm-agent
+fi
+install-docker "$DOCKER_SOURCE"
+exec-setup
+install-ecs-agent
+wait-agent-start
+show-license

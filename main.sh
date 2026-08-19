@@ -29,8 +29,9 @@ readonly SG_DOCKER_NETWORK="sg-net"
 ECS_CONFIG_DIR="${ECS_CONFIG_DIR:=/etc/ecs}"
 ECS_LOG_DIR="${ECS_LOG_DIR:=/var/log/ecs}"
 ECS_DATA_DIR="${ECS_DATA_DIR:=/var/lib/ecs/data}"
+ECS_EXEC_DEPS_DIR="${ECS_EXEC_DEPS_DIR:=/var/lib/ecs/deps/execute-command}"
 REGISTRATION_DIR="${REGISTRATION_DIR:=/var/log/registration}"
-readonly ECS_CONFIG_DIR ECS_LOG_DIR ECS_DATA_DIR REGISTRATION_DIR
+readonly ECS_CONFIG_DIR ECS_LOG_DIR ECS_DATA_DIR ECS_EXEC_DEPS_DIR REGISTRATION_DIR
 
 # diagnostics
 SG_DIAGNOSTIC_DIR="${SG_DIAGNOSTIC_DIR:=/var/lib/sg-runner}"
@@ -734,6 +735,80 @@ EOF
 }
 #}}}: configure_http_proxy
 
+# StackGuardian never launches ECS tasks with enableExecuteCommand, so ECS Exec
+# is unused on runners. AWS's ecs-anywhere-install.sh stages the SSM session
+# binaries under ECS_EXEC_DEPS_DIR regardless: its exec-setup call is
+# unconditional and the script exposes no flag to skip it. That leaves unused
+# binaries on disk which trip vulnerability scanners, e.g. CVE-2026-71556 in the
+# go-git version vendored by amazon-ssm-agent 3.3.4624.0.
+#
+# The ECS agent treats these dependencies as optional: when the directory is
+# absent it starts normally and simply stops advertising the
+# ecs.capability.execute-command attribute (see appendExecCapabilities in
+# amazon-ecs-agent), which we never rely on.
+
+disable_ecs_exec_setup() { #{{{
+  # Best effort: neuter the installer's `exec-setup` call so the SSM binaries
+  # are never downloaded. remove_ecs_exec_deps is the backstop if this misses.
+  local script="$1"
+
+  if ! grep -qx 'exec-setup' "$script"; then
+    debug "No exec-setup call found in" "$(basename "$script")" "- skipping patch."
+    return 0
+  fi
+
+  # Write-and-move rather than `sed -i`: the in-place flag is not portable.
+  if sed 's/^exec-setup$/: # exec-setup disabled: ECS Exec is unused/' \
+    "$script" >"${script}.patched" && mv "${script}.patched" "$script"; then
+    debug "Disabled ECS Exec dependency staging in" "$(basename "$script")"
+  else
+    rm -f "${script}.patched"
+    debug "Could not patch" "$(basename "$script")" "- relying on cleanup."
+  fi
+
+  # debug() is a no-op returning non-zero unless --debug is set; never let that
+  # become this function's exit status.
+  return 0
+}
+#}}}: disable_ecs_exec_setup
+
+is_ecs_exec_deps_path() { #{{{
+  # Guard for the root-run `rm -rf` in remove_ecs_exec_deps. ECS_EXEC_DEPS_DIR
+  # is overridable for testing, which makes it the one place in this script
+  # where an env var supplies a whole deletion path rather than a fixed literal.
+  # Accept only an absolute path that actually names a deps directory, so a
+  # stray "/" or "/etc" in the environment can never reach rm.
+  #
+  # Kept as a pure predicate so the dangerous inputs are unit-testable without
+  # any test ever pointing rm at them. A trailing slash is rejected too: the
+  # refusal is logged and harmless, unlike the alternative.
+  case "${1:-}" in
+  /*/execute-command) return 0 ;;
+  *) return 1 ;;
+  esac
+}
+#}}}: is_ecs_exec_deps_path
+
+remove_ecs_exec_deps() { #{{{
+  # Authoritative cleanup: drop whatever exec-setup managed to stage.
+  if ! is_ecs_exec_deps_path "$ECS_EXEC_DEPS_DIR"; then
+    debug "Refusing to remove unexpected ECS_EXEC_DEPS_DIR:" "$ECS_EXEC_DEPS_DIR"
+    return 0
+  fi
+
+  [[ -d "$ECS_EXEC_DEPS_DIR" ]] || return 0
+
+  if rm -rf "$ECS_EXEC_DEPS_DIR"; then
+    debug "Removed unused ECS Exec dependencies:" "$ECS_EXEC_DEPS_DIR"
+  else
+    debug "Failed to remove ECS Exec dependencies:" "$ECS_EXEC_DEPS_DIR"
+  fi
+
+  # Hardening only: a failure here must not fail an otherwise good registration.
+  return 0
+}
+#}}}: remove_ecs_exec_deps
+
 #}}}: Local configuration
 
 #{{{ Registration / deregistration
@@ -830,6 +905,9 @@ register_instance() { #{{{
     rm -f "$ecs_install_script"
     die "Downloaded script appears invalid" "missing bash shebang"
   fi
+
+  disable_ecs_exec_setup "$ecs_install_script"
+
   spinner_msg "Downloading support files" 0
 
   check_systemctl_ecs_status
@@ -868,6 +946,8 @@ register_instance() { #{{{
     fi
   done &
   spinner "$!" "Verifying registration of this runner"
+
+  remove_ecs_exec_deps
 
   # setup_cron
   save_registration_details
