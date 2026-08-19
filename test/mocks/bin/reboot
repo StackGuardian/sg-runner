@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Mock: reboot
+# Records the call and returns immediately. Never actually reboots, so the
+# cgroupsv2 path is safe to exercise under test.
+#   $MOCK_REBOOT_EXIT (default: 0)
+printf '%s\n' "reboot $*" >>"${MOCK_CALL_LOG}"
+exit "${MOCK_REBOOT_EXIT:-0}"

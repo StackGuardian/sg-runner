@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Mock: df
+# Records the call. main.sh runs `df -h --total /var | awk '/^total/ ...'`, so
+# the default output carries a `total` line with a size + use% the awk parses.
+#   $MOCK_DF_OUTPUT (default: a df table ending in a `total` line)
+#   $MOCK_DF_EXIT   (default: 0)
+printf '%s\n' "df $*" >>"${MOCK_CALL_LOG}"
+
+if [[ -n "${MOCK_DF_OUTPUT:-}" ]]; then
+  printf '%s\n' "${MOCK_DF_OUTPUT}"
+else
+  cat <<'EOF'
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/root       194G   20G  174G  11% /
+total           194G   20G  174G  11%
+EOF
+fi
+
+exit "${MOCK_DF_EXIT:-0}"

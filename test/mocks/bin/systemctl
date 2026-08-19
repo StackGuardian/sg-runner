@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Mock: systemctl
+# Records the call, then answers the read-only subcommands main.sh queries.
+#   is-active     -> $MOCK_SYSTEMCTL_IS_ACTIVE   (default: active)
+#   is-enabled    -> $MOCK_SYSTEMCTL_IS_ENABLED  (default: enabled)
+# All other subcommands (status, restart, reload-or-restart, stop, daemon-reload)
+# just succeed. Exit code override: $MOCK_SYSTEMCTL_EXIT (default: 0).
+printf '%s\n' "systemctl $*" >>"${MOCK_CALL_LOG}"
+
+case "$1" in
+  is-active)
+    echo "${MOCK_SYSTEMCTL_IS_ACTIVE:-active}"
+    ;;
+  is-enabled)
+    echo "${MOCK_SYSTEMCTL_IS_ENABLED:-enabled}"
+    ;;
+esac
+
+exit "${MOCK_SYSTEMCTL_EXIT:-0}"

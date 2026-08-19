@@ -1,0 +1,10 @@
+# Shared shellcheck config for main.sh and the test suite.
+# Picked up automatically by `make lint`, CI, and editor integrations.
+
+# Modern Bash idioms — keep the codebase on the current conventions:
+enable=require-double-brackets   # prefer [[ ]] over [ ] (SC2292)
+enable=deprecate-which           # prefer `command -v` over `which`
+
+# `data` (api_call) and `SSM_BIN_NAME` (detect_ssm_service) are globals set for
+# other functions / external readers, not unused assignments.
+disable=SC2034

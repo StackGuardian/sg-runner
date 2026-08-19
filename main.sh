@@ -16,7 +16,8 @@ NO_PROXY="169.254.169.254,169.254.170.2,/var/run/docker.sock"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
-readonly LOG_FILE="/var/log/sg_runner.log"
+LOG_FILE="${LOG_FILE:=/var/log/sg_runner.log}"
+readonly LOG_FILE
 
 # static
 # readonly COMMANDS=("jq" "crontab")
@@ -24,8 +25,16 @@ readonly COMMANDS=("jq")
 readonly CONTAINER_ORCHESTRATORS=("docker")
 readonly SG_DOCKER_NETWORK="sg-net"
 
+# Filesystem locations (overridable for testing; default to production paths)
+ECS_CONFIG_DIR="${ECS_CONFIG_DIR:=/etc/ecs}"
+ECS_LOG_DIR="${ECS_LOG_DIR:=/var/log/ecs}"
+ECS_DATA_DIR="${ECS_DATA_DIR:=/var/lib/ecs/data}"
+REGISTRATION_DIR="${REGISTRATION_DIR:=/var/log/registration}"
+readonly ECS_CONFIG_DIR ECS_LOG_DIR ECS_DATA_DIR REGISTRATION_DIR
+
 # diagnostics
-readonly SG_DIAGNOSTIC_DIR="/var/lib/sg-runner"
+SG_DIAGNOSTIC_DIR="${SG_DIAGNOSTIC_DIR:=/var/lib/sg-runner}"
+readonly SG_DIAGNOSTIC_DIR
 readonly SG_DIAGNOSTIC_FILE="${SG_DIAGNOSTIC_DIR}/diagnostic.json"
 readonly SG_DIAGNOSTIC_TMP_FILE="${SG_DIAGNOSTIC_DIR}/diagnostic.json.tmp"
 
@@ -247,10 +256,10 @@ print_details() { #{{{
 #}}}: print_details
 
 save_registration_details() { #{{{
-  mkdir -p /var/log/registration
+  mkdir -p "$REGISTRATION_DIR"
   print_details
   print_details | sed 's/\x1B\[[0-9;]*[JKmsu]//g' \
-    >>/var/log/registration/"registration_details_$(date +'%Y-%m-%dT%H-%M-%S%z').txt"
+    >>"$REGISTRATION_DIR/registration_details_$(date +'%Y-%m-%dT%H-%M-%S%z').txt"
 }
 #}}}: save_registration_details
 
@@ -309,7 +318,7 @@ EOF
   if [[ -z "$status_code" ]]; then
     err "Unknown status code."
     exit 1
-  elif [ "$status_code" != "200" ] && [ "$status_code" != "201" ] && [ "$status_code" != "100" ]; then
+  elif [[ "$status_code" != "200" && "$status_code" != "201" && "$status_code" != "100" ]]; then
     return 1
   else
     return 0
@@ -613,8 +622,8 @@ iptables_ensure() { #{{{
 #}}}: iptables_ensure
 
 configure_local_data() { #{{{
-  mkdir -p /var/log/ecs /etc/ecs /var/lib/ecs/data /var/log/registration/
-  rm -rf /etc/ecs/ecs.config >/dev/null
+  mkdir -p "$ECS_LOG_DIR" "$ECS_CONFIG_DIR" "$ECS_DATA_DIR" "$REGISTRATION_DIR"
+  rm -rf "$ECS_CONFIG_DIR/ecs.config" >/dev/null
 
   spinner_wait "Configuring local data.."
 
@@ -626,7 +635,7 @@ configure_local_data() { #{{{
     ECS_INSTANCE_ATTRIBUTES="{\"sg_organization\": \"${ORGANIZATION_NAME}\",\"sg_runner_id\": \"${RUNNER_ID}\", \"sg_runner_group_id\": \"${RUNNER_GROUP_ID}\"}"
   fi
 
-  cat >/etc/ecs/ecs.config <<EOF
+  cat >"$ECS_CONFIG_DIR/ecs.config" <<EOF
 ECS_CLUSTER=${ECS_CLUSTER}
 AWS_DEFAULT_REGION=${LOCAL_AWS_DEFAULT_REGION}
 ECS_INSTANCE_ATTRIBUTES=${ECS_INSTANCE_ATTRIBUTES}
@@ -647,7 +656,7 @@ ECS_EXTERNAL=true
 EOF
 
   if [[ -n "${HTTP_PROXY}" ]]; then
-    cat >>/etc/ecs/ecs.config <<EOF
+    cat >>"$ECS_CONFIG_DIR/ecs.config" <<EOF
 HTTP_PROXY=${HTTP_PROXY}
 HTTPS_PROXY=${HTTP_PROXY}
 NO_PROXY=${NO_PROXY}
@@ -868,9 +877,9 @@ register_instance() { #{{{
 deregister_instance() { #{{{
   local url
 
-  if [[ -e /etc/ecs/ecs.config ]]; then
+  if [[ -e "$ECS_CONFIG_DIR/ecs.config" ]]; then
     local instance_attrs runner_group_id_cfg org_name_cfg
-    instance_attrs="$(grep ECS_INSTANCE_ATTRIBUTES /etc/ecs/ecs.config | cut -d "=" -f2-)"
+    instance_attrs="$(grep ECS_INSTANCE_ATTRIBUTES "$ECS_CONFIG_DIR/ecs.config" | cut -d "=" -f2-)"
     runner_group_id_cfg="$(echo "$instance_attrs" | jq -r '.sg_runner_group_id')"
     org_name_cfg="$(echo "$instance_attrs" | jq -r '.sg_organization')"
 
@@ -1046,6 +1055,8 @@ validate_runner_id() { #{{{
 #}}}: validate_runner_id
 
 is_root() { #{{{
+  # SG_SKIP_ROOT_CHECK bypasses the root requirement (for testing only).
+  [[ "${SG_SKIP_ROOT_CHECK:-}" == "true" ]] && return 0
   if (($(id -u) != 0)); then
     die "This script must be run as" "root"
   fi
@@ -1172,12 +1183,12 @@ preflight() { #{{{
   # Probe IMDSv2 (AWS); silently no-ops elsewhere.
   local imdsv2_token attached_iam_role
   imdsv2_token=$(curl --max-time 5 -fSsLkX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 120" 2>/dev/null)
-  if [ -n "$imdsv2_token" ]; then
+  if [[ -n "$imdsv2_token" ]]; then
     attached_iam_role=$(curl --max-time 10 -fSsLk --proto "https" -H "X-aws-ec2-metadata-token: $imdsv2_token" "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null)
   else
     attached_iam_role=$(curl --max-time 10 -fSsLk "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null)
   fi
-  if [ -n "$attached_iam_role" ]; then
+  if [[ -n "$attached_iam_role" ]]; then
     debug "Response:" "$attached_iam_role"
     info "Found an IAM role attached to the instance" "$attached_iam_role"
   fi
@@ -1248,7 +1259,11 @@ main() { #{{{
 
 #}}}: Preflight + main
 
-trap cleanup SIGINT
-trap exit_help EXIT
+# Only wire traps and run main when executed directly. When sourced (e.g. by a
+# test harness), expose the functions without side effects.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  trap cleanup SIGINT
+  trap exit_help EXIT
 
-main "$@"
+  main "$@"
+fi

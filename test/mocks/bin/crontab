@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Mock: crontab
+# Records the call. `crontab -l` lists the current table; everything else
+# (installing a new table from a file argument) just succeeds.
+#   $MOCK_CRONTAB_LIST  (default: empty)  -> stdout for `crontab -l`
+#   $MOCK_CRONTAB_EXIT  (default: 0)
+printf '%s\n' "crontab $*" >>"${MOCK_CALL_LOG}"
+
+if [[ "$1" == "-l" ]]; then
+  printf '%s' "${MOCK_CRONTAB_LIST:-}"
+  [[ -n "${MOCK_CRONTAB_LIST:-}" ]] && echo
+fi
+
+exit "${MOCK_CRONTAB_EXIT:-0}"

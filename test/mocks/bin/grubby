@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Mock: grubby
+# Records the call. main.sh probes for grubby via `type grubby` and, when
+# present, calls it to update the kernel cmdline; just succeed.
+#   $MOCK_GRUBBY_EXIT (default: 0)
+printf '%s\n' "grubby $*" >>"${MOCK_CALL_LOG}"
+exit "${MOCK_GRUBBY_EXIT:-0}"

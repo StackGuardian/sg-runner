@@ -19,6 +19,8 @@ eggs/
 .eggs/
 lib/
 lib64/
+# but not the vendored bats-core test framework (submodules)
+!test/lib/
 parts/
 sdist/
 var/

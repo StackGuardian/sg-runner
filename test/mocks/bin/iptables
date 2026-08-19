@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Mock: iptables
+# Records the call. main.sh uses `-C` (check) to test for a rule, then inserts.
+# The check exit code is controllable so tests can drive both branches:
+#   $MOCK_IPTABLES_CHECK_EXIT (default: 1 -> "rule absent", so an insert follows)
+# Non-check invocations exit with $MOCK_IPTABLES_EXIT (default: 0).
+printf '%s\n' "iptables $*" >>"${MOCK_CALL_LOG}"
+
+for arg in "$@"; do
+  if [[ "${arg}" == "-C" ]]; then
+    exit "${MOCK_IPTABLES_CHECK_EXIT:-1}"
+  fi
+done
+
+exit "${MOCK_IPTABLES_EXIT:-0}"

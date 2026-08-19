@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Mock: ip
+# Records the call. main.sh extracts the node IP with:
+#   ip route | grep default | cut -d" " -f9
+# so the default route line below is shaped to put 10.0.0.1 in field 9
+# (default via <gw> dev <if> proto <p> src 10.0.0.1 metric <m>).
+#   $MOCK_IP_ROUTE_OUTPUT (default: a default route whose field 9 is 10.0.0.1)
+#   $MOCK_IP_EXIT         (default: 0)
+printf '%s\n' "ip $*" >>"${MOCK_CALL_LOG}"
+
+if [[ "$1" == "route" ]]; then
+  echo "${MOCK_IP_ROUTE_OUTPUT:-default via 10.0.0.254 dev eth0 proto dhcp src 10.0.0.1 metric 100}"
+fi
+
+exit "${MOCK_IP_EXIT:-0}"

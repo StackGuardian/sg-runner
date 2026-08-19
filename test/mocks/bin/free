@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Mock: free
+# Records the call. main.sh runs `free -h | awk '/^Mem:/ ...'`. Default output
+# carries a Mem: line so the pipeline produces a value.
+#   $MOCK_FREE_OUTPUT (default: a minimal `free -h` table)
+#   $MOCK_FREE_EXIT   (default: 0)
+printf '%s\n' "free $*" >>"${MOCK_CALL_LOG}"
+
+if [[ -n "${MOCK_FREE_OUTPUT:-}" ]]; then
+  printf '%s\n' "${MOCK_FREE_OUTPUT}"
+else
+  cat <<'EOF'
+               total        used        free      shared  buff/cache   available
+Mem:           7.7Gi       1.2Gi       5.0Gi        10Mi       1.5Gi       6.2Gi
+Swap:             0B          0B          0B
+EOF
+fi
+
+exit "${MOCK_FREE_EXIT:-0}"
