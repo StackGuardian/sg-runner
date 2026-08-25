@@ -1090,8 +1090,11 @@ prune() { #{{{
   update_diagnostic "system.docker.reclaimed_containers_images" "$reclaimed_containers_images"
   update_diagnostic "system.docker.prune_filter" "$prune_filter"
 
+  # Volumes only. `system prune --volumes` also sweeps every non-running
+  # container regardless of age, deleting freshly created ECS task containers
+  # before the agent can start them.
   local reclaimed_volumes
-  reclaimed_volumes=$($CONTAINER_ORCHESTRATOR system prune --volumes -f |
+  reclaimed_volumes=$($CONTAINER_ORCHESTRATOR volume prune -f |
     cut -d: -f2 | tr -d ' ')
   update_diagnostic "system.docker.reclaimed_volumes" "$reclaimed_volumes"
 
