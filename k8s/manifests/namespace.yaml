@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sg-runner
+  labels:
+    # dockerd needs a privileged container.
+    pod-security.kubernetes.io/enforce: privileged

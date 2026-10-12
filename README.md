@@ -14,6 +14,7 @@
   - [3.4 Restart](#34-restart)
 - [System diagnostics](#system-diagnostics)
 - [Managing `cgroupsv2`](#managing-cgroupsv2)
+- [Kubernetes (prototype)](#kubernetes-prototype)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
 
@@ -186,6 +187,33 @@ To revert you can just run:
 ```
 ./main.sh cgroupsv2 enable
 ```
+
+## Kubernetes (prototype)
+
+> **Prototype only.** Not supported for customer use.
+
+[`k8s/`](k8s/README.md) runs a Private Runner as a Kubernetes pod: each
+StatefulSet replica is one registered runner, with nested Docker, the SSM agent
+and the ECS agent as containers, and `main.sh` sourced for registration and
+network setup. Tested end to end on OrbStack Kubernetes against QA. See
+[`k8s/README.md`](k8s/README.md) for usage.
+
+### Known gaps
+
+- **Privileged pod.** Nested Docker needs it; clusters enforcing restricted Pod
+  Security reject it.
+- **No workflow network isolation.** Workflow containers can reach cluster DNS
+  and the Kubernetes API. Needs an egress NetworkPolicy (see
+  [`docs/TODO.md`](docs/TODO.md)).
+- **Workspaces in the container layer.** `/var/tmp/workspace` isn't on a volume
+  yet (see [`docs/TODO.md`](docs/TODO.md)).
+- **No task CPU/memory limits.** The agent can't create task cgroups from its
+  container; the pod's resources are the only cap.
+- **No proxy support.** `--http-proxy` isn't wired up.
+- **Scale-down doesn't deregister.** Removing a replica orphans its runner;
+  use `make nuke` (deregisters first).
+- **`ecs-init` is bypassed.** Agent defaults are copied into `k8s/runner.sh` and
+  may drift with new ECS agent releases.
 
 ## Troubleshooting
 
