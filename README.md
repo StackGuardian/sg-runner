@@ -200,8 +200,8 @@ network setup. Tested end to end on OrbStack Kubernetes against QA. See
 
 ### Known gaps
 
-- **Privileged pod.** Nested Docker needs it; clusters enforcing restricted Pod
-  Security reject it.
+- **Privileged pod.** Nested Docker needs it, or an equivalent set of
+  capabilities; clusters enforcing restricted Pod Security reject either.
 - **No workflow network isolation.** Workflow containers can reach cluster DNS
   and the Kubernetes API. Needs an egress NetworkPolicy (see
   [`docs/TODO.md`](docs/TODO.md)).
@@ -210,8 +210,11 @@ network setup. Tested end to end on OrbStack Kubernetes against QA. See
 - **No task CPU/memory limits.** The agent can't create task cgroups from its
   container; the pod's resources are the only cap.
 - **No proxy support.** `--http-proxy` isn't wired up.
-- **Scale-down doesn't deregister.** Removing a replica orphans its runner;
-  use `make nuke` (deregisters first).
+- **Shutdowns can't stop new placements.** Pods wait for running workflows
+  (and deregister on scale-down), but the runner role isn't allowed to set its
+  ECS container instance `DRAINING`, so a busy runner can hold its pod for the
+  full grace period (see [`docs/TODO.md`](docs/TODO.md)).
+- **SG token in the pod.** Needed to deregister on scale-down.
 - **`ecs-init` is bypassed.** Agent defaults are copied into `k8s/runner.sh` and
   may drift with new ECS agent releases.
 
