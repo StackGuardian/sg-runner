@@ -33,3 +33,41 @@ runner pod covers workflow containers and the agents alike:
   targets).
 - Needs a CNI that enforces NetworkPolicy (Calico, Cilium, ...). Check what
   OrbStack's CNI does before testing there.
+
+### Allow the runner to drain itself (platform IAM)
+
+On every shutdown the drain hook sets the runner's ECS container instance to
+`DRAINING`, so no new task lands while running ones finish, and sets it `ACTIVE`
+again when a restarted runner comes back. On QA both calls fail:
+
+```
+AccessDeniedException: User: arn:aws:sts::<account-id>:assumed-role/ECSAnywhereRole/...
+is not authorized to perform: ecs:UpdateContainerInstancesState on resource:
+arn:aws:ecs:eu-central-1:<account-id>:container-instance/admin-workflow-qa/...
+because no identity-based policy allows the ecs:UpdateContainerInstancesState action
+```
+
+`ECSAnywherePolicy` grants the action on `cluster/admin-workflow-qa` only, while
+ECS authorizes it against the container-instance ARN. Without it, a busy runner
+keeps receiving work while it drains and can hold its pod for the whole grace
+period (1h), one pod at a time during a rollout. Prod's policy isn't checked.
+
+- Add `arn:aws:ecs:<region>:<account>:container-instance/<cluster>/*` to that
+  statement (or use the `ecs:cluster` condition key). Platform change, not
+  something this repo controls.
+- Until then the hook logs the failure and only waits for running workflows.
+
+### Drop privileged mode
+
+Spike results on OrbStack (k8s 1.36, cri-dockerd, arm64):
+
+| Option | Result |
+|---|---|
+| `hostUsers: false` (user namespaces) | Not testable: cri-dockerd doesn't support user namespaces |
+| Capabilities only | Works with `SYS_ADMIN`, `NET_ADMIN`, `SYS_RESOURCE`, seccomp/AppArmor `Unconfined` and `mount -o remount,rw` of `/sys/fs/cgroup` and `/proc/sys`. Not a real gain: `CAP_SYS_ADMIN` in the host user namespace with seccomp off is close to privileged |
+| Rootless dind | Containers fail to mount `/proc` without `procMount: Unmasked` (needs user namespaces); task-credential DNAT would target the wrong loopback |
+| Sysbox | Not tried (needs a node install) |
+
+Next: test `hostUsers: false` (with `procMount: Unmasked`) on containerd 2.x
+or CRI-O, kernel 6.3+, and Sysbox on a cluster where it can be installed.
+Both keep root inside the pod unprivileged on the node.

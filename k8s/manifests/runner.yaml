@@ -1,5 +1,38 @@
 # sg-runner Kubernetes prototype: each replica is one registered runner.
 # Namespace and the SG credentials Secret come from `make secret`.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sg-runner
+  namespace: sg-runner
+automountServiceAccountToken: false
+---
+# The drain hook reads its own StatefulSet to tell a scale-down from a restart.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sg-runner
+  namespace: sg-runner
+rules:
+  - apiGroups: ['apps']
+    resources: ['statefulsets']
+    resourceNames: ['sg-runner']
+    verbs: ['get']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sg-runner
+  namespace: sg-runner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sg-runner
+subjects:
+  - kind: ServiceAccount
+    name: sg-runner
+    namespace: sg-runner
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -16,29 +49,46 @@ spec:
       labels:
         app: sg-runner
     spec:
-      terminationGracePeriodSeconds: 60
+      serviceAccountName: sg-runner
+      automountServiceAccountToken: false
+      # Upper bound on how long a terminating runner waits for running
+      # workflows (the ecs-agent preStop hook) before it is killed.
+      terminationGracePeriodSeconds: 3600
       initContainers:
         - name: register
           image: sg-runner-k8s:dev
           imagePullPolicy: IfNotPresent
-          args: ["register"]
+          args: ['register']
           envFrom:
             - secretRef:
                 name: sg-runner-credentials
           volumeMounts:
             - { name: state, mountPath: /etc/ecs, subPath: ecs-config }
             - { name: state, mountPath: /var/lib/amazon/ssm, subPath: ssm }
-            - { name: state, mountPath: /var/log/registration, subPath: registration }
+            - {
+                name: state,
+                mountPath: /var/log/registration,
+                subPath: registration,
+              }
       containers:
         - name: dockerd
           image: sg-runner-k8s:dev
           imagePullPolicy: IfNotPresent
-          args: ["dockerd"]
+          args: ['dockerd']
           securityContext:
             privileged: true
+          # Workflow containers run inside this container, so its limits are
+          # what the ECS agent advertises (see SG_TASK_* on ecs-agent).
+          resources:
+            requests: { cpu: '1', memory: 2Gi }
+            limits: { cpu: '2', memory: 4Gi }
+          lifecycle:
+            preStop:
+              exec:
+                command: ['/opt/sg-runner/runner.sh', 'wait-drained']
           readinessProbe:
             exec:
-              command: ["docker", "network", "inspect", "sg-net"]
+              command: ['docker', 'network', 'inspect', 'sg-net']
             periodSeconds: 10
           volumeMounts:
             - { name: docker-run, mountPath: /var/run }
@@ -48,7 +98,12 @@ spec:
         - name: ssm-agent
           image: sg-runner-k8s:dev
           imagePullPolicy: IfNotPresent
-          args: ["ssm-agent"]
+          args: ['ssm-agent']
+          # Keeps rotating the agent's credentials while a drain runs.
+          lifecycle:
+            preStop:
+              exec:
+                command: ['/opt/sg-runner/runner.sh', 'wait-drained']
           volumeMounts:
             - { name: state, mountPath: /var/lib/amazon/ssm, subPath: ssm }
             - { name: aws-creds, mountPath: /root/.aws }
@@ -56,10 +111,30 @@ spec:
         - name: ecs-agent
           image: sg-runner-k8s:dev
           imagePullPolicy: IfNotPresent
-          args: ["ecs-agent"]
+          args: ['ecs-agent']
+          env:
+            - name: SG_STATEFULSET
+              value: sg-runner
+            # Rounded up to whole CPUs.
+            - name: SG_TASK_CPU_LIMIT
+              valueFrom:
+                resourceFieldRef:
+                  { containerName: dockerd, resource: limits.cpu, divisor: '1' }
+            - name: SG_TASK_MEMORY_LIMIT_MIB
+              valueFrom:
+                resourceFieldRef:
+                  {
+                    containerName: dockerd,
+                    resource: limits.memory,
+                    divisor: 1Mi,
+                  }
+          lifecycle:
+            preStop:
+              exec:
+                command: ['/opt/sg-runner/runner.sh', 'drain']
           livenessProbe:
             exec:
-              command: ["ecs-agent", "--healthcheck"]
+              command: ['ecs-agent', '--healthcheck']
             initialDelaySeconds: 120
             periodSeconds: 30
           volumeMounts:
@@ -70,26 +145,53 @@ spec:
             - { name: state, mountPath: /var/lib/amazon/ssm, subPath: ssm }
             - { name: aws-creds, mountPath: /rotatingcreds, readOnly: true }
             - { name: docker-run, mountPath: /var/run }
+            # Deregistration on scale-down needs the SG credentials.
+            - {
+                name: sg-credentials,
+                mountPath: /etc/sg-runner/credentials,
+                readOnly: true,
+              }
+            - { name: kube-api, mountPath: /etc/sg-runner/kube, readOnly: true }
       volumes:
         - name: docker-run
           emptyDir: {}
         - name: aws-creds
           emptyDir:
             medium: Memory
+        - name: sg-credentials
+          secret:
+            secretName: sg-runner-credentials
+            defaultMode: 0400
+        # Service account token for the drain hook only; not automounted
+        # into the other containers.
+        - name: kube-api
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items: [{ key: ca.crt, path: ca.crt }]
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef: { fieldPath: metadata.namespace }
   volumeClaimTemplates:
     # Runner identity (ecs.config, SSM registration, agent state): survives
-    # pod restarts so the runner doesn't re-register.
+    # pod restarts so the runner doesn't re-register. Kept on scale-down too:
+    # a failed deregistration then leaves the identity for the next scale-up.
     - metadata:
         name: state
       spec:
-        accessModes: ["ReadWriteOnce"]
+        accessModes: ['ReadWriteOnce']
         resources:
           requests:
             storage: 1Gi
     - metadata:
         name: docker
       spec:
-        accessModes: ["ReadWriteOnce"]
+        accessModes: ['ReadWriteOnce']
         resources:
           requests:
             storage: 20Gi
