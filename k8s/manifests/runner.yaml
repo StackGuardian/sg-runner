@@ -1,0 +1,95 @@
+# sg-runner Kubernetes prototype: each replica is one registered runner.
+# Namespace and the SG credentials Secret come from `make secret`.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sg-runner
+  namespace: sg-runner
+spec:
+  serviceName: sg-runner
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sg-runner
+  template:
+    metadata:
+      labels:
+        app: sg-runner
+    spec:
+      terminationGracePeriodSeconds: 60
+      initContainers:
+        - name: register
+          image: sg-runner-k8s:dev
+          imagePullPolicy: IfNotPresent
+          args: ["register"]
+          envFrom:
+            - secretRef:
+                name: sg-runner-credentials
+          volumeMounts:
+            - { name: state, mountPath: /etc/ecs, subPath: ecs-config }
+            - { name: state, mountPath: /var/lib/amazon/ssm, subPath: ssm }
+            - { name: state, mountPath: /var/log/registration, subPath: registration }
+      containers:
+        - name: dockerd
+          image: sg-runner-k8s:dev
+          imagePullPolicy: IfNotPresent
+          args: ["dockerd"]
+          securityContext:
+            privileged: true
+          readinessProbe:
+            exec:
+              command: ["docker", "network", "inspect", "sg-net"]
+            periodSeconds: 10
+          volumeMounts:
+            - { name: docker-run, mountPath: /var/run }
+            - { name: docker, mountPath: /var/lib/docker }
+            # Same path the agent's ECS_HOST_DATA_DIR points at.
+            - { name: state, mountPath: /var/lib/ecs/data, subPath: ecs-data }
+        - name: ssm-agent
+          image: sg-runner-k8s:dev
+          imagePullPolicy: IfNotPresent
+          args: ["ssm-agent"]
+          volumeMounts:
+            - { name: state, mountPath: /var/lib/amazon/ssm, subPath: ssm }
+            - { name: aws-creds, mountPath: /root/.aws }
+            - { name: docker-run, mountPath: /var/run }
+        - name: ecs-agent
+          image: sg-runner-k8s:dev
+          imagePullPolicy: IfNotPresent
+          args: ["ecs-agent"]
+          livenessProbe:
+            exec:
+              command: ["ecs-agent", "--healthcheck"]
+            initialDelaySeconds: 120
+            periodSeconds: 30
+          volumeMounts:
+            - { name: state, mountPath: /etc/ecs, subPath: ecs-config }
+            - { name: state, mountPath: /data, subPath: ecs-data }
+            - { name: state, mountPath: /var/lib/ecs/data, subPath: ecs-data }
+            - { name: state, mountPath: /log, subPath: ecs-log }
+            - { name: state, mountPath: /var/lib/amazon/ssm, subPath: ssm }
+            - { name: aws-creds, mountPath: /rotatingcreds, readOnly: true }
+            - { name: docker-run, mountPath: /var/run }
+      volumes:
+        - name: docker-run
+          emptyDir: {}
+        - name: aws-creds
+          emptyDir:
+            medium: Memory
+  volumeClaimTemplates:
+    # Runner identity (ecs.config, SSM registration, agent state): survives
+    # pod restarts so the runner doesn't re-register.
+    - metadata:
+        name: state
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+    - metadata:
+        name: docker
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi
