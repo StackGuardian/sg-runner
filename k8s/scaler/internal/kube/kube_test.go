@@ -178,3 +178,37 @@ func TestReapJobPodOptions(t *testing.T) {
 		t.Error("ReapJob modified the options")
 	}
 }
+
+// The Job as the API server stores it, with the chart's labels.
+func TestCreateReapJobWithChartOptions(t *testing.T) {
+	k := newKube()
+	k.ReapPod = ReapPodOptions{
+		Labels: map[string]string{"app.kubernetes.io/name": "sg-runner", "app.kubernetes.io/instance": "x",
+			"app.kubernetes.io/component": "reaper"},
+		ImagePullSecrets: []string{"regcred"},
+		NodeSelector:     map[string]string{"kubernetes.io/arch": "arm64"},
+		Tolerations:      []corev1.Toleration{{Key: "dedicated", Operator: corev1.TolerationOpEqual, Value: "runners", Effect: corev1.TaintEffectNoSchedule}},
+	}
+	ctx := context.Background()
+	if err := k.CreateReapJob(ctx, 2); err != nil {
+		t.Fatal(err)
+	}
+	j, err := k.Client.BatchV1().Jobs(ns).Get(ctx, "sg-runner-reap-2", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"app": "sg-runner-reaper", "app.kubernetes.io/name": "sg-runner",
+		"app.kubernetes.io/instance": "x", "app.kubernetes.io/component": "reaper"}
+	if !reflect.DeepEqual(j.Labels, want) || !reflect.DeepEqual(j.Spec.Template.Labels, want) {
+		t.Errorf("labels job=%v pod=%v", j.Labels, j.Spec.Template.Labels)
+	}
+	ps := j.Spec.Template.Spec
+	if !reflect.DeepEqual(ps.ImagePullSecrets, []corev1.LocalObjectReference{{Name: "regcred"}}) ||
+		ps.NodeSelector["kubernetes.io/arch"] != "arm64" || !reflect.DeepEqual(ps.Tolerations, k.ReapPod.Tolerations) {
+		t.Errorf("pod spec %+v", ps)
+	}
+	// Still found by the scaler's label selector.
+	if jobs, err := k.ReapJobs(ctx); err != nil || jobs[2] != decide.JobRunning {
+		t.Errorf("ReapJobs = %v, %v", jobs, err)
+	}
+}
