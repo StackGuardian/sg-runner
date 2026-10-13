@@ -24,7 +24,7 @@ imagePullSecrets: []
 # or create=true.
 credentials:
   # Secret with keys SG_NODE_TOKEN, SG_ORGANIZATION, SG_RUNNER_GROUP and
-  # optionally SG_BASE_API (runner.sh and scaler.sh read these file names).
+  # optionally SG_BASE_API (runner.sh and the scaler read these file names).
   existingSecret: ""
   # Let the chart create the Secret from the values below. They end up in the
   # Helm release (a Secret in the namespace); prefer existingSecret.
@@ -109,9 +109,8 @@ scaler:
   # runners parked longer than parkTTL.
   enabled: true
 
-  # The scaler's own image (Go, distroless, non-root). Empty repository = the
-  # runner image, which still ships scaler.sh (then set
-  # command: ["/opt/sg-runner/scaler.sh"] and relax the securityContext).
+  # The scaler's own image (Go, distroless, non-root; build with
+  # `make build-scaler`). Empty repository = the runner image.
   image:
     repository: sg-runner-scaler
     # Empty = the chart's appVersion.
