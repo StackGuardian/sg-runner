@@ -2,8 +2,16 @@
 
 > **Status: prototype.** Not supported, not documented for customers.
 
-Runs a Private Runner as a pod. Each StatefulSet replica is one registered
-runner: it stands in for the VM that `main.sh register` normally prepares.
+Runs Private Runners as pods. Each StatefulSet replica is one registered
+runner: it stands in for the VM that `main.sh register` normally prepares. A
+scaler parks idle runners (pod stopped, registration kept, woken again in
+seconds) and wakes or adds runners when workflows queue.
+
+| Component | Where | What |
+|---|---|---|
+| Runner image | [`Dockerfile`](Dockerfile), [`runner.sh`](runner.sh) | nested `dockerd`, SSM agent, ECS agent; `runner.sh` sources `main.sh` |
+| Scaler image | [`scaler/`](scaler) (Go) | sizes the StatefulSet from SG's queue, parks, wakes and reaps runners |
+| Helm chart | [`chart/sg-runner`](chart/sg-runner/README.md) | runner StatefulSet, scaler, credentials, optional NetworkPolicy and PDB |
 
 ## How it maps to a VM
 
@@ -17,16 +25,17 @@ runner: it stands in for the VM that `main.sh register` normally prepares.
 | `/root/.aws/credentials` (SSM → agent)      | in-memory `emptyDir` shared by both agents                |
 | `configure_local_network` (iptables/sysctl) | same function, run in the pod's network namespace         |
 
-All containers use one image (`Dockerfile`) and `runner.sh`, which sources
-`main.sh` for the API, config and network helpers.
+All runner containers use one image (`Dockerfile`) and `runner.sh`, which
+sources `main.sh` for the API, config and network helpers.
 
 ## Usage (OrbStack Kubernetes)
 
 ```sh
 cd k8s
 cp .env.example .env   # fill in a throwaway runner group's credentials
-make build             # build sg-runner-k8s:dev
-make secret            # namespace + credentials Secret
+make build             # runner image sg-runner-k8s:dev
+make build-scaler      # scaler image sg-runner-scaler:dev
+make secret            # namespace (privileged PSA) + credentials Secret
 make up                # helm upgrade --install chart/sg-runner; first start registers the runner
 make logs              # follow all containers
 make status            # pod state + ECS agent metadata
@@ -40,6 +49,35 @@ make nuke              # deregister, then uninstall, delete PVCs, namespace
 
 `make nuke` deregisters first and stops if that fails: deleting the PVC without
 deregistering would leave a dead runner in the runner group.
+
+Outside OrbStack, install the chart directly; the namespace must allow
+privileged pods (the chart doesn't create it):
+
+```sh
+kubectl create namespace sg-runner
+kubectl label namespace sg-runner pod-security.kubernetes.io/enforce=privileged
+helm upgrade --install sg-runner k8s/chart/sg-runner -n sg-runner \
+  --set credentials.existingSecret=sg-runner-credentials \
+  --set runner.size=medium
+```
+
+### Choosing the runner size
+
+Every workflow reserves 0.5 vCPU / 512 MiB for its run controller plus its own
+resource setting (default 0.5 vCPU / 1 GiB), so a default workflow takes
+1 vCPU / 1.5 GiB. `runner.size` picks the `dockerd` container's limits, which
+is what the runner advertises:
+
+| `runner.size` | Limits | Default workflows at once |
+|---|---|---|
+| `small` (default) | 2 vCPU / 4Gi | 2 |
+| `medium` | 4 vCPU / 8Gi | 4 |
+| `large` | 8 vCPU / 16Gi | 8 |
+| `custom` | `runner.resources` (limits required) | |
+
+The runner must be larger than the largest workflow (its setting plus
+0.5 vCPU / 512 MiB), or that workflow stays queued; the scaler then warns
+(`StuckQueue`) instead of waking every runner.
 
 Image versions are pinned as build args in `Dockerfile` (`ECS_AGENT_VERSION`,
 `SSM_AGENT_VERSION`, `DOCKER_VERSION`). `make build-multiarch` builds
@@ -161,7 +199,22 @@ Decisions and warnings (`StuckQueue`, `RunnerNotConnected`, `SGUnreachable`,
 
 Its Role covers only this StatefulSet, its scale and annotations, PVCs, reap
 Jobs, Events and its Lease; runner pods have no Kubernetes API access.
-Reap Job pods take extra labels, pull secrets, node selector and tolerations from `SCALER_REAP_POD_LABELS`, `SCALER_REAP_IMAGE_PULL_SECRETS`, `SCALER_REAP_NODE_SELECTOR` and `SCALER_REAP_TOLERATIONS`.
+Reap Job pods take extra labels, pull secrets, node selector and tolerations
+from `SCALER_REAP_POD_LABELS`, `SCALER_REAP_IMAGE_PULL_SECRETS`,
+`SCALER_REAP_NODE_SELECTOR` and `SCALER_REAP_TOLERATIONS`; the chart sets them
+from the runner's values.
+
+The scaler reads the SG credentials once, at start: restart it
+(`kubectl rollout restart deploy/<release>-sg-runner-scaler`) after rotating
+the node token.
+
+## Development
+
+```sh
+make lint test                       # repo root: shellcheck + bats (main.sh, k8s/runner.sh)
+(cd k8s/scaler && go vet ./... && go test ./...)
+helm lint --strict k8s/chart/sg-runner --set credentials.existingSecret=x
+```
 
 ## Known gaps
 
@@ -169,11 +222,11 @@ Reap Job pods take extra labels, pull secrets, node selector and tolerations fro
   Non-privileged works with `SYS_ADMIN`, `NET_ADMIN`, `SYS_RESOURCE`, Unconfined
   seccomp and read-write remounts of `/sys/fs/cgroup` and `/proc/sys` (verified on
   OrbStack), but that's no real isolation gain. See [`docs/TODO.md`](../docs/TODO.md).
-- **Network isolation.** The VM rule (`DOCKER-USER` DROP for
-  `169.254.169.254,10.0.0.0/24`) doesn't fit a cluster: job containers can
-  resolve cluster DNS and reach the Kubernetes API (verified). Needs a
-  NetworkPolicy on the runner pod and a CNI that enforces it
-  ([`docs/TODO.md`](../docs/TODO.md)).
+- **Network isolation is opt-in.** Workflow containers can resolve cluster DNS
+  and reach the Kubernetes API (verified). The chart's NetworkPolicy
+  (`networkPolicy.enabled`, with the cluster's CIDRs) blocks cluster ranges and
+  the metadata endpoint for runner and reap pods; it needs a CNI that enforces
+  NetworkPolicy and isn't tested on one yet.
 - **Workspaces are scratch.** `/var/tmp/workspace` is an `emptyDir` on
   `dockerd` (`runner.workspace.sizeLimit`, default 20Gi): a run doesn't
   survive a pod restart, and a workspace past the limit gets the pod evicted.
@@ -187,17 +240,25 @@ Reap Job pods take extra labels, pull secrets, node selector and tolerations fro
   workflow.
 - **Restarting a single runner pauses new workflows** for the ~10s it takes:
   SG pauses workflows submitted while no runner is `ACTIVE`, and a StatefulSet
-  stops the old pod before starting the new one. Use `SCALER_MIN=2` where that
-  matters.
+  stops the old pod before starting the new one. `podDisruptionBudget.enabled`
+  keeps node drains from evicting the last runner; for rollouts use
+  `scaler.min=2` where that matters. Unverified: whether SG resumes such
+  workflows on its own once a runner reconnects.
 - **Unverified: long parking.** Waking was tested after seconds. Whether SSM
   and ECS reconnect after hours or days parked isn't tested yet.
-- **Unverified: hard kills.** A pod killed without its `preStop` hook (node
-  crash) parks as `ACTIVE` but disconnected; how ECS treats that isn't tested.
+- **Hard kills.** A pod killed without its `preStop` hook (node loss, force
+  delete) parks as `ACTIVE` but disconnected; the scaler sets it `DRAINING` and
+  reactivates it on wake. Unverified against real SG/ECS (tested with a fake
+  SG). If someone also drains such a runner from the SG UI while the scaler's
+  mark is on it, the scaler reactivates it on wake.
 - **SG credentials in the pod.** The credentials Secret is mounted
-  (read-only) into `ecs-agent` for the status changes.
+  (read-only) into `ecs-agent` for the status changes, and into the scaler.
 - **Pods end in `Error`.** The containers exit non-zero on SIGTERM after a
   clean drain; cosmetic.
 - **SSM Run Command** lands in the `ssm-agent` container (it has the Docker
   CLI and socket), not on a host. Unverified whether SG relies on it.
 - `ecs-init` is bypassed: agent defaults it sets are copied in `runner.sh` and
   may drift with new agent releases.
+- **Go scaler not yet run against real SG.** Its rules were validated on QA in
+  the shell version it replaces, and the Go version against a fake SG; the
+  chart + Go scaler end to end on QA is still to do.
