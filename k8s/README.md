@@ -27,14 +27,15 @@ cd k8s
 cp .env.example .env   # fill in a throwaway runner group's credentials
 make build             # build sg-runner-k8s:dev
 make secret            # namespace + credentials Secret
-make up                # deploy; first start registers the runner
+make up                # helm upgrade --install chart/sg-runner; first start registers the runner
 make logs              # follow all containers
 make status            # pod state + ECS agent metadata
 
 kubectl -n sg-runner scale sts sg-runner --replicas=N   # park / wake runners
 
 make deregister        # wake parked runners, deregister all (reads .env on stdin)
-make nuke              # deregister, then delete StatefulSet, PVCs, namespace
+make down              # uninstall, keep PVCs (runners stay registered, parked)
+make nuke              # deregister, then uninstall, delete PVCs, namespace
 ```
 
 `make nuke` deregisters first and stops if that fails: deleting the PVC without
@@ -120,7 +121,7 @@ everything. Reaping runners parked for too long is up to the scaler (planned).
 
 ## Autoscaling
 
-`manifests/scaler.yaml` runs `scaler.sh`, a small loop that owns the runner
+The chart's scaler Deployment ([`chart/sg-runner`](chart/sg-runner/README.md)) runs `scaler.sh`, a small loop that owns the runner
 StatefulSet's `replicas`. Every `SCALER_INTERVAL` (15s) it reads the runner
 group from SG with the node token (`?getActiveWorkflows=true`) and:
 
@@ -152,9 +153,9 @@ Jobs; runner pods have no Kubernetes API access.
   resolve cluster DNS and reach the Kubernetes API (verified). Needs a
   NetworkPolicy on the runner pod and a CNI that enforces it
   ([`docs/TODO.md`](../docs/TODO.md)).
-- **Workspaces in the container layer.** `/var/tmp/workspace`, bind-mounted
-  by the run controller and steps, isn't on a volume yet
-  ([`docs/TODO.md`](../docs/TODO.md)).
+- **Workspaces are scratch.** `/var/tmp/workspace` is an `emptyDir` on
+  `dockerd` (`runner.workspace.sizeLimit`, default 20Gi): a run doesn't
+  survive a pod restart, and a workspace past the limit gets the pod evicted.
 - **Task cgroup limits off** (`ECS_ENABLE_TASK_CPU_MEM_LIMIT=false`): the agent
   can't create task cgroups from its container. Size the pod's resources instead.
 - **No proxy support** yet (`--http-proxy` path not wired).
