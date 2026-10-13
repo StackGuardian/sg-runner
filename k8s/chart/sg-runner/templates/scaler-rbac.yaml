@@ -31,10 +31,11 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["list", "get", "patch", "delete"]
-  # Reap Jobs deregister long-parked runners from their PVC.
+  # Reap Jobs deregister long-parked runners from their PVC; the scaler lists
+  # them to find reaps in progress.
   - apiGroups: ["batch"]
     resources: ["jobs"]
-    verbs: ["create", "get", "delete"]
+    verbs: ["create", "get", "list", "delete"]
   {{- if .Values.scaler.leaderElection.enabled }}
   # Leader election: one active scaler per StatefulSet. create can't be
   # restricted by name (the object doesn't exist yet), get/update can.
