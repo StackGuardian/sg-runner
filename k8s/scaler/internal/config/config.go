@@ -1,5 +1,5 @@
 // Package config reads the scaler's settings from the environment, with the
-// names and defaults scaler.sh used.
+// names and defaults the original bash scaler used.
 package config
 
 import (

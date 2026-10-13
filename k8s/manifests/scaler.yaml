@@ -1,4 +1,5 @@
-# Scaler for the runner StatefulSet (see scaler.sh). It owns spec.replicas.
+# Scaler for the runner StatefulSet (k8s/scaler, Go). It owns spec.replicas.
+# Two replicas share a leader Lease: one scales, the other stands by.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -11,22 +12,38 @@ metadata:
   name: sg-runner-scaler
   namespace: sg-runner
 rules:
+  # Timers (idle/stuck/unconnected) kept as annotations, across restarts.
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     resourceNames: ["sg-runner"]
-    verbs: ["get"]
+    verbs: ["get", "patch"]
   - apiGroups: ["apps"]
     resources: ["statefulsets/scale"]
     resourceNames: ["sg-runner"]
     verbs: ["get", "patch"]
-  # Parked-at stamps, and deleting a reaped runner's PVCs.
+  # Parked-at and drained-by-scaler marks, and deleting a reaped runner's PVCs.
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["list", "get", "patch", "delete"]
   # Reap Jobs deregister long-parked runners from their PVC.
   - apiGroups: ["batch"]
     resources: ["jobs"]
-    verbs: ["create", "get", "delete"]
+    verbs: ["create", "get", "list", "delete"]
+  # Events on the StatefulSet (scaled, parked, reaped, warnings).
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  # Leader election: Lease <statefulset>-scaler.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["sg-runner-scaler"]
+    verbs: ["get", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -48,9 +65,7 @@ metadata:
   name: sg-runner-scaler
   namespace: sg-runner
 spec:
-  replicas: 1
-  strategy:
-    type: Recreate
+  replicas: 2
   selector:
     matchLabels:
       app: sg-runner-scaler
@@ -60,12 +75,21 @@ spec:
         app: sg-runner-scaler
     spec:
       serviceAccountName: sg-runner-scaler
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        # Makes the 0400 credentials readable by the non-root user.
+        fsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: scaler
-          image: sg-runner-k8s:dev
+          image: sg-runner-scaler:dev
           imagePullPolicy: IfNotPresent
-          command: ["/opt/sg-runner/scaler.sh"]
           env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef: { fieldPath: metadata.namespace }
             - { name: SCALER_MIN, value: "1" }
             - { name: SCALER_MAX, value: "10" }
             # % of awake runners' capacity to keep free (warm spare); 0 = off.
@@ -74,6 +98,18 @@ spec:
             - { name: SCALER_PARK_TTL, value: "43200" }
             - { name: SCALER_IMAGE, value: sg-runner-k8s:dev }
             - { name: SCALER_CREDENTIALS_SECRET, value: sg-runner-credentials }
+          ports:
+            - { name: metrics, containerPort: 9090 }
+          livenessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: { path: /readyz, port: metrics }
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
           resources:
             requests: { cpu: 10m, memory: 32Mi }
             limits: { memory: 128Mi }
