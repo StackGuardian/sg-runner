@@ -34,6 +34,16 @@ const (
 // ReapJobTTL deletes finished reap Jobs the scaler didn't get to.
 const ReapJobTTL int32 = 24 * 3600
 
+// ReapPodOptions are extra settings for reap Jobs, so a chart's
+// NetworkPolicy, pull secrets and scheduling cover them.
+type ReapPodOptions struct {
+	// Labels go on the Job and its pod, next to app: <sts>-reaper (which wins).
+	Labels           map[string]string
+	ImagePullSecrets []string
+	NodeSelector     map[string]string
+	Tolerations      []corev1.Toleration
+}
+
 // Kube talks to the API server for one runner StatefulSet.
 type Kube struct {
 	Client      kubernetes.Interface
@@ -43,6 +53,8 @@ type Kube struct {
 	Image string
 	// CredentialsSecret is the runner group's SG credentials Secret.
 	CredentialsSecret string
+	// ReapPod customizes reap Jobs.
+	ReapPod ReapPodOptions
 
 	claimRE *regexp.Regexp
 	jobRE   *regexp.Regexp
@@ -186,7 +198,15 @@ func (k *Kube) ReapJobs(ctx context.Context) (map[int]decide.JobState, error) {
 // ReapJob is the Job deregistering a parked runner from its state PVC
 // (`runner.sh reap`).
 func (k *Kube) ReapJob(n int) *batchv1.Job {
-	labels := map[string]string{"app": k.StatefulSet + "-reaper"}
+	labels := map[string]string{}
+	for key, v := range k.ReapPod.Labels {
+		labels[key] = v
+	}
+	labels["app"] = k.StatefulSet + "-reaper"
+	var pullSecrets []corev1.LocalObjectReference
+	for _, name := range k.ReapPod.ImagePullSecrets {
+		pullSecrets = append(pullSecrets, corev1.LocalObjectReference{Name: name})
+	}
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: k.JobName(n), Namespace: k.Namespace, Labels: labels},
 		Spec: batchv1.JobSpec{
@@ -197,6 +217,9 @@ func (k *Kube) ReapJob(n int) *batchv1.Job {
 				Spec: corev1.PodSpec{
 					RestartPolicy:                corev1.RestartPolicyNever,
 					AutomountServiceAccountToken: ptr.To(false),
+					ImagePullSecrets:             pullSecrets,
+					NodeSelector:                 k.ReapPod.NodeSelector,
+					Tolerations:                  k.ReapPod.Tolerations,
 					Containers: []corev1.Container{{
 						Name: "reap", Image: k.Image, ImagePullPolicy: corev1.PullIfNotPresent,
 						Args: []string{"reap"},
