@@ -1,0 +1,242 @@
+name: k8s
+
+# Kubernetes runner: the Go scaler, the Helm chart, both images and a kind
+# smoke install. Never pushes an image and never contacts StackGuardian.
+#
+# Path-filtered so PRs that only touch the VM runner skip the slow image and
+# kind jobs. main.sh is in the filter because the runner image bundles it.
+# If any of these jobs become required checks, note that a skipped workflow
+# leaves them pending; run it with workflow_dispatch in that case.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - k8s/**
+      - main.sh
+      - .github/workflows/k8s.yml
+      - .github/scripts/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Matches the kind node image below; kubeconform validates against it.
+  KUBE_VERSION: "1.37.0"
+  KIND_VERSION: v0.33.0
+  KIND_NODE_IMAGE: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+  KUBECONFORM_VERSION: v0.8.0
+  KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+  TRIVY_VERSION: v0.75.0
+
+jobs:
+  scaler:
+    name: scaler (go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: k8s/scaler
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: k8s/scaler/go.mod
+          cache-dependency-path: k8s/scaler/go.sum
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [[ -n $unformatted ]]; then
+            echo "::error title=gofmt::not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: go test -race
+        run: |
+          go test -race -covermode=atomic -coverprofile=coverage.out ./...
+          {
+            echo '### Scaler coverage'
+            echo '```'
+            go tool cover -func=coverage.out | tail -n 1
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  chart:
+    name: chart (helm ${{ matrix.helm }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        helm: [v3.22.0, v4.3.0]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ matrix.helm }}
+      - name: Install kubeconform
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/kubeconform.tar.gz" \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  $RUNNER_TEMP/kubeconform.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/kubeconform.tar.gz" -C "$RUNNER_TEMP" kubeconform
+          echo "$RUNNER_TEMP" >>"$GITHUB_PATH"
+      # Lint, render the value scenarios, kubeconform them, check rejections.
+      - name: Chart check
+        run: .github/scripts/chart-check.sh "$RUNNER_TEMP/rendered"
+      - name: Upload rendered manifests
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rendered-helm-${{ matrix.helm }}
+          path: ${{ runner.temp }}/rendered
+          retention-days: 7
+
+  images:
+    name: image (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: runner
+            context: .
+            file: k8s/Dockerfile
+            tag: sg-runner-k8s:ci
+          - image: scaler
+            context: k8s/scaler
+            file: k8s/scaler/Dockerfile
+            tag: sg-runner-scaler:ci
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # Both platforms, kept as build cache only: proves arm64 builds too.
+      - name: Build linux/amd64 + linux/arm64
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: linux/amd64,linux/arm64
+          push: false
+          outputs: type=cacheonly
+          provenance: false
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+      # amd64 again from the cache, loaded into the local daemon for Trivy.
+      - name: Load linux/amd64 for scanning
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: linux/amd64
+          push: false
+          load: true
+          provenance: false
+          tags: ${{ matrix.tag }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+      # Report HIGH and CRITICAL for both images, never failing here.
+      - name: Trivy report
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ matrix.tag }}
+          version: ${{ env.TRIVY_VERSION }}
+          severity: HIGH,CRITICAL
+          format: table
+          output: trivy-${{ matrix.image }}.txt
+          exit-code: "0"
+      - name: Trivy summary
+        if: always()
+        run: |
+          [[ -f trivy-${{ matrix.image }}.txt ]] || exit 0
+          cat trivy-${{ matrix.image }}.txt
+          {
+            echo '### Trivy: ${{ matrix.tag }} (HIGH, CRITICAL)'
+            echo '<details><summary>report</summary>'
+            echo
+            echo '```'
+            head -c 900000 trivy-${{ matrix.image }}.txt
+            echo '```'
+            echo '</details>'
+          } >>"$GITHUB_STEP_SUMMARY"
+      # Gate: fail on CRITICAL vulnerabilities that have a fix, scaler only.
+      # The scaler is our own Go binary on distroless, so a fixable CRITICAL
+      # is actionable here (bump a module, rebuild on a newer Go patch).
+      # The runner image is not gated: it bundles upstream binaries (static
+      # Docker/containerd, the SSM agent, the ECS agent) built with Go
+      # releases Trivy marks as "fixed" upstream, which we can only clear by
+      # waiting for upstream releases. Gating it would keep CI red on things
+      # this repo can't fix; it is reported above instead.
+      - name: Trivy gate (CRITICAL, fixable)
+        if: matrix.image == 'scaler'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ matrix.tag }}
+          version: ${{ env.TRIVY_VERSION }}
+          skip-setup-trivy: true
+          severity: CRITICAL
+          ignore-unfixed: true
+          format: table
+          exit-code: "1"
+
+  kind-smoke:
+    name: kind smoke install
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # amd64 only (the CI runner's arch); reuses the images job's cache when
+      # it's there.
+      - name: Build runner image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: k8s/Dockerfile
+          platforms: linux/amd64
+          load: true
+          provenance: false
+          tags: sg-runner-k8s:ci
+          cache-from: type=gha,scope=runner
+      - name: Build scaler image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: k8s/scaler
+          platforms: linux/amd64
+          load: true
+          provenance: false
+          tags: sg-runner-scaler:ci
+          cache-from: type=gha,scope=scaler
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.3.0
+      - name: Create kind cluster
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          version: ${{ env.KIND_VERSION }}
+          node_image: ${{ env.KIND_NODE_IMAGE }}
+          cluster_name: sg-runner-ci
+          wait: 120s
+      # Dummy credentials, SG_BASE_API=http://127.0.0.1:9: never reaches SG.
+      - name: Install and check
+        env:
+          CLUSTER: sg-runner-ci
+          RUNNER_IMAGE: sg-runner-k8s:ci
+          SCALER_IMAGE: sg-runner-scaler:ci
+        run: .github/scripts/kind-smoke.sh run
+      - name: Collect diagnostics
+        if: failure()
+        env:
+          CLUSTER: sg-runner-ci
+        run: .github/scripts/kind-smoke.sh diag "$RUNNER_TEMP/kind-diag"
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kind-smoke-diagnostics
+          path: ${{ runner.temp }}/kind-diag
+          retention-days: 7
