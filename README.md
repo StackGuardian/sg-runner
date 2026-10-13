@@ -192,29 +192,38 @@ To revert you can just run:
 
 > **Prototype only.** Not supported for customer use.
 
-[`k8s/`](k8s/README.md) runs a Private Runner as a Kubernetes pod: each
+[`k8s/`](k8s/README.md) runs Private Runners as Kubernetes pods, installed with
+a Helm chart ([`k8s/chart/sg-runner`](k8s/chart/sg-runner/README.md)). Each
 StatefulSet replica is one registered runner, with nested Docker, the SSM agent
 and the ECS agent as containers, and `main.sh` sourced for registration and
-network setup. Tested end to end on OrbStack Kubernetes against QA. See
-[`k8s/README.md`](k8s/README.md) for usage.
+network setup. A scaler ([`k8s/scaler`](k8s/scaler), Go) follows the runner
+group's queue in SG:
+
+- **Parks** idle runners: the pod stops but the runner stays registered, and
+  wakes again in about 8s (a fresh registration takes about 20s).
+- **Wakes or adds** runners when workflows queue, between a minimum of 1 and
+  the runner group's `MaxNumberOfRunners`; optional headroom keeps a warm spare.
+- **Deregisters** runners parked longer than a TTL (12h by default).
+
+Customers pick the runner size at install (`runner.size`: `small`, `medium`,
+`large` or `custom`). Tested end to end on OrbStack Kubernetes against QA with
+the earlier shell scaler; see [`k8s/README.md`](k8s/README.md) for usage,
+measurements and known gaps.
 
 ### Known gaps
 
 - **Privileged pod.** Nested Docker needs it, or an equivalent set of
   capabilities; clusters enforcing restricted Pod Security reject either.
-- **No workflow network isolation.** Workflow containers can reach cluster DNS
-  and the Kubernetes API. Needs an egress NetworkPolicy (see
-  [`docs/TODO.md`](docs/TODO.md)).
-- **Workspaces in the container layer.** `/var/tmp/workspace` isn't on a volume
-  yet (see [`docs/TODO.md`](docs/TODO.md)).
+- **Network isolation is opt-in.** The chart's NetworkPolicy keeps workflow
+  containers away from cluster addresses and the metadata endpoint, but needs
+  an enforcing CNI and the cluster's CIDRs.
 - **No task CPU/memory limits.** The agent can't create task cgroups from its
   container; the pod's resources are the only cap.
 - **No proxy support.** `--http-proxy` isn't wired up.
-- **Parked runners stay registered.** Scaling down parks runners (stopped,
-  registration kept, woken in seconds); nothing deregisters them automatically
-  yet. Long parking periods are untested.
-- **SG credentials in the pod.** Mounted into the `ecs-agent` container to set
-  the runner's status.
+- **Unverified:** waking a runner after a long park (hours or days), and the Go
+  scaler against real SG.
+- **SG credentials in the pod.** Mounted into the `ecs-agent` container and the
+  scaler to set runner status and read the queue.
 - **`ecs-init` is bypassed.** Agent defaults are copied into `k8s/runner.sh` and
   may drift with new ECS agent releases.
 
