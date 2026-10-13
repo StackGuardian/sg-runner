@@ -31,7 +31,9 @@ make up                # deploy; first start registers the runner
 make logs              # follow all containers
 make status            # pod state + ECS agent metadata
 
-make deregister        # SG deregister + wipe identity (reads .env on stdin)
+kubectl -n sg-runner scale sts sg-runner --replicas=N   # park / wake runners
+
+make deregister        # wake parked runners, deregister all (reads .env on stdin)
 make nuke              # deregister, then delete StatefulSet, PVCs, namespace
 ```
 
@@ -53,29 +55,45 @@ reads them through the downward API and:
 
 Without limits on `dockerd`, the runner advertises the whole node.
 
-## Stopping and scaling down
+## Parking: stopping and scaling down
 
-The `ecs-agent` container's `preStop` hook (`runner.sh drain`) first sets the
-runner's ECS container instance `DRAINING`, so ECS stops placing new tasks on
-it, then holds the pod until running workflows finish, up to
-`terminationGracePeriodSeconds` (1h). Draining on every shutdown keeps a
-busy runner from picking up new work during a restart or rollout, which would
-otherwise hold each pod for the full hour. `dockerd` and `ssm-agent` wait for
-the hook (`wait-drained`), so workflows keep their Docker daemon and the agent
-keeps rotating credentials meanwhile. On start, the agent sets the container
-instance `ACTIVE` again once it has registered.
+Scaling down doesn't deregister a runner, it **parks** it: the pod stops, the
+registration and Docker image cache stay on its PVCs, and scaling back up
+wakes the same runner without registering again.
 
-It tells a scale-down from any other termination by reading its own
-StatefulSet (a Role allows `get` on it only; the token is projected into
-`ecs-agent` alone): the pod's ordinal no longer fits under `spec.replicas`.
-
-| Termination | Drain behavior |
+| Measured on QA | Time to ECS `ACTIVE` + connected |
 |---|---|
-| Scale-down (`kubectl scale`) | `DRAINING`, wait for workflows, deregister from SG, wipe identity |
-| Restart, rollout, eviction, StatefulSet deleted | `DRAINING`, wait for workflows, keep the identity; `ACTIVE` again on start |
+| Wake a parked runner (`kubectl scale` up) | **8s**, same container instance, image cache kept |
+| Fresh runner (new ordinal, full registration) | 20s, plus image pulls on its first workflow |
+| Park a runner (`kubectl scale` down, idle) | 14s |
 
-PVCs are kept on scale-down: if deregistration fails, the identity is still
-there for the next scale-up.
+Every shutdown (scale-down, restart, rollout, eviction) parks the same way.
+The `ecs-agent` container's `preStop` hook (`runner.sh drain`):
+
+1. sets the runner `DRAINING` through SG's `runner_status` API (the same call
+   `sg-runner-autoscaler` uses), so no new workflows are placed on it, and
+   leaves a marker on the state PVC;
+2. waits for running workflows, up to `terminationGracePeriodSeconds` (1h).
+   `dockerd` and `ssm-agent` wait for the hook (`wait-drained`), so workflows
+   keep their Docker daemon and the agent keeps rotating credentials.
+
+On wake the runner sets itself `ACTIVE` again once the agent has reconnected,
+only if the marker is there. A runner that was already `DRAINING` when it
+parked, drained on purpose from the SG UI or by an autoscaler, stays drained.
+
+A parked runner shows in SG as registered but disconnected and `DRAINING`;
+it still counts against the runner group's `MaxNumberOfRunners`. Pods are
+managed in parallel (`podManagementPolicy: Parallel`), so several runners park
+or wake at once.
+
+Setting the status needs `SG_API_KEY` in `.env`: an SG API key allowed to
+manage the runner group. The runner never calls ECS itself; a customer's
+runner has no ECS permissions. Without the key it skips the status change and
+only waits for running workflows.
+
+Deregistering is explicit: `make deregister` wakes every parked runner (each
+state PVC) and deregisters them all; `make nuke` does that and deletes
+everything. Reaping runners parked for too long is up to the scaler (planned).
 
 ## Known gaps
 
@@ -94,13 +112,17 @@ there for the next scale-up.
 - **Task cgroup limits off** (`ECS_ENABLE_TASK_CPU_MEM_LIMIT=false`): the agent
   can't create task cgroups from its container. Size the pod's resources instead.
 - **No proxy support** yet (`--http-proxy` path not wired).
-- **`DRAINING`/`ACTIVE` are denied on QA** (`AccessDeniedException` on the
-  container-instance ARN; `ECSAnywherePolicy` only names the cluster ARN). Shutdowns
-  still wait for running workflows, but ECS may place new tasks meanwhile, so a
-  busy runner can hold its pod for the full grace period
-  ([`docs/TODO.md`](../docs/TODO.md)).
-- **SG token in the pod.** Deregistering on scale-down needs it, so the
-  credentials Secret is mounted (read-only) into `ecs-agent`.
+- **Draining needs an SG API key.** Without `SG_API_KEY`, shutdowns wait for
+  running workflows but new ones may still be placed, so a busy runner can
+  hold its pod for the full grace period. The key also lives in the pod.
+- **No automatic deregistration yet.** Parked runners stay registered until
+  `make deregister`; a TTL reaper belongs in the scaler.
+- **Unverified: long parking.** Waking was tested after seconds. Whether SSM
+  and ECS reconnect after hours or days parked isn't tested yet.
+- **Unverified: hard kills.** A pod killed without its `preStop` hook (node
+  crash) parks as `ACTIVE` but disconnected; how ECS treats that isn't tested.
+- **SG credentials in the pod.** The credentials Secret is mounted
+  (read-only) into `ecs-agent` for the status changes.
 - **Pods end in `Error`.** The containers exit non-zero on SIGTERM after a
   clean drain; cosmetic.
 - **SSM Run Command** lands in the `ssm-agent` container (it has the Docker

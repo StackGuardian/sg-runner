@@ -28,15 +28,24 @@ secret: ## Create the SG credentials Secret from .env
 up: ## Deploy the runner StatefulSet (registers on first start)
 	kubectl --context $(CONTEXT) apply -f manifests/
 
-status: ## Show pod, container states and agent health
-	$(KUBECTL) get pods,pvc -o wide
+status: ## Show runner pods and state PVCs (a PVC without a pod is a parked runner)
+	$(KUBECTL) get statefulset,pods,pvc -o wide
 	-$(KUBECTL) exec $(POD) -c ecs-agent -- curl -fsS localhost:51678/v1/metadata
 
 logs: ## Tail all runner containers
 	$(KUBECTL) logs $(POD) --all-containers --prefix -f --max-log-requests 10
 
-deregister: ## Deregister from SG and wipe local identity (reads .env on stdin)
-	$(KUBECTL) exec -i $(POD) -c ecs-agent -- /opt/sg-runner/runner.sh deregister < .env
+# Parked runners are still registered but have no pod to run from, so wake
+# every runner that has a state PVC first, then deregister them one by one.
+deregister: ## Wake parked runners, deregister all from SG, wipe identities (reads .env on stdin)
+	@n=$$($(KUBECTL) get pvc -o name | grep -c '/state-sg-runner-' || true); \
+	if [ "$$n" -eq 0 ]; then echo "No runners to deregister."; exit 0; fi; \
+	$(KUBECTL) scale statefulset sg-runner --replicas=$$n && \
+	for i in $$(seq 0 $$((n - 1))); do \
+		$(KUBECTL) wait --for=condition=Ready pod/sg-runner-$$i --timeout=300s && \
+		$(KUBECTL) exec -i sg-runner-$$i -c ecs-agent -- /opt/sg-runner/runner.sh deregister < .env \
+			|| exit 1; \
+	done
 
 down: ## Delete the StatefulSet, keep PVCs (runner identity survives)
 	-$(KUBECTL) delete statefulset sg-runner

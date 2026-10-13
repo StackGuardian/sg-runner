@@ -34,28 +34,18 @@ runner pod covers workflow containers and the agents alike:
 - Needs a CNI that enforces NetworkPolicy (Calico, Cilium, ...). Check what
   OrbStack's CNI does before testing there.
 
-### Allow the runner to drain itself (platform IAM)
+### Drain through SG: confirm the credentials
 
-On every shutdown the drain hook sets the runner's ECS container instance to
-`DRAINING`, so no new task lands while running ones finish, and sets it `ACTIVE`
-again when a restarted runner comes back. On QA both calls fail:
+The drain hook sets the runner `DRAINING`/`ACTIVE` through SG's
+`POST /orgs/{org}/runnergroups/{group}/runner_status/` (as
+`sg-runner-autoscaler` does), authenticated with `SG_API_KEY`. The runner
+never calls ECS itself: on QA the runner's instance role was denied
+`ecs:UpdateContainerInstancesState` anyway, and a customer's runner has no ECS
+permissions of its own.
 
-```
-AccessDeniedException: User: arn:aws:sts::<account-id>:assumed-role/ECSAnywhereRole/...
-is not authorized to perform: ecs:UpdateContainerInstancesState on resource:
-arn:aws:ecs:eu-central-1:<account-id>:container-instance/admin-workflow-qa/...
-because no identity-based policy allows the ecs:UpdateContainerInstancesState action
-```
-
-`ECSAnywherePolicy` grants the action on `cluster/admin-workflow-qa` only, while
-ECS authorizes it against the container-instance ARN. Without it, a busy runner
-keeps receiving work while it drains and can hold its pod for the whole grace
-period (1h), one pod at a time during a rollout. Prod's policy isn't checked.
-
-- Add `arn:aws:ecs:<region>:<account>:container-instance/<cluster>/*` to that
-  statement (or use the `ecs:cluster` condition key). Platform change, not
-  something this repo controls.
-- Until then the hook logs the failure and only waits for running workflows.
+- Verify end to end on QA (DRAINING on shutdown, ACTIVE after restart).
+- Check whether the node token is accepted too; if so, drop the extra key.
+- Otherwise, document the least-privileged API key role that can call it.
 
 ### Drop privileged mode
 

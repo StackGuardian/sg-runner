@@ -210,11 +210,15 @@ network setup. Tested end to end on OrbStack Kubernetes against QA. See
 - **No task CPU/memory limits.** The agent can't create task cgroups from its
   container; the pod's resources are the only cap.
 - **No proxy support.** `--http-proxy` isn't wired up.
-- **Shutdowns can't stop new placements.** Pods wait for running workflows
-  (and deregister on scale-down), but the runner role isn't allowed to set its
-  ECS container instance `DRAINING`, so a busy runner can hold its pod for the
-  full grace period (see [`docs/TODO.md`](docs/TODO.md)).
-- **SG token in the pod.** Needed to deregister on scale-down.
+- **Draining needs an SG API key.** Pods set themselves `DRAINING` through
+  SG's `runner_status` API on shutdown, which needs `SG_API_KEY`; without it,
+  a busy runner can keep receiving work and hold its pod for the full grace
+  period.
+- **Parked runners stay registered.** Scaling down parks runners (stopped,
+  registration kept, woken in seconds); nothing deregisters them automatically
+  yet. Long parking periods are untested.
+- **SG credentials in the pod.** Mounted into the `ecs-agent` container to set
+  the runner's status.
 - **`ecs-init` is bypassed.** Agent defaults are copied into `k8s/runner.sh` and
   may drift with new ECS agent releases.
 
