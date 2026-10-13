@@ -59,7 +59,7 @@ stays queued (the scaler warns).
 |---|---|---|
 | `nameOverride` / `fullnameOverride` | `""` | Rename resources; `fullnameOverride` also renames the StatefulSet (max 52 chars). |
 | `image.repository` / `.tag` / `.pullPolicy` | `sg-runner-k8s` / `dev` / `IfNotPresent` | Runner image; also used by reap Jobs. Empty tag = `appVersion`. |
-| `imagePullSecrets` | `[]` | For runner and scaler pods (not reap Jobs). |
+| `imagePullSecrets` | `[]` | For runner, scaler and reap Job pods. |
 | `credentials.existingSecret` | `""` | Secret with `SG_NODE_TOKEN`, `SG_ORGANIZATION`, `SG_RUNNER_GROUP`, optional `SG_BASE_API`. |
 | `credentials.create` | `false` | Create the Secret from `nodeToken`, `organization`, `runnerGroup`, `apiUrl`. Exactly one of this or `existingSecret`. |
 | `runner.replicas` | `1` | Only with `scaler.enabled=false`. |
@@ -71,7 +71,7 @@ stays queued (the scaler warns).
 | `runner.storage.docker.size` / `.storageClassName` | `20Gi` / `""` | Docker data root PVC (image cache). |
 | `runner.dockerd.securityContext` | `{privileged: true}` | Nested Docker needs privileged for now. |
 | `runner.terminationGracePeriodSeconds` | `3600` | Max wait for running workflows when a runner stops. |
-| `runner.podAnnotations` / `podLabels` / `nodeSelector` / `tolerations` / `affinity` | empty | Runner pod scheduling and metadata. |
+| `runner.podAnnotations` / `podLabels` / `nodeSelector` / `tolerations` / `affinity` | empty | Runner pod scheduling and metadata; `nodeSelector` and `tolerations` also apply to reap Jobs. |
 | `scaler.enabled` | `true` | Scaler Deployment + RBAC. When on, the chart leaves the StatefulSet's `replicas` to it. |
 | `scaler.image.repository` / `.tag` / `.pullPolicy` | `sg-runner-scaler` / `dev` / `IfNotPresent` | Scaler image (Go, distroless, non-root). Empty repository = the runner image. |
 | `scaler.command` | `[]` | Empty = image entrypoint. `["/opt/sg-runner/scaler.sh"]` runs the shell scaler from the runner image. |
@@ -86,7 +86,7 @@ stays queued (the scaler warns).
 | `scaler.settleTimeout` | `300` | `SCALER_SETTLE_TIMEOUT`: wait for a runner to connect. |
 | `scaler.interval` | `15` | `SCALER_INTERVAL`: seconds between decisions. |
 | `scaler.extraEnv` | `[]` | Extra env vars for the scaler. |
-| `scaler.metrics.port` | `9090` | Container port `metrics`, always on: `/metrics`, `/healthz` (liveness), `/readyz` (readiness). |
+| `scaler.metrics.port` | `9090` | `SCALER_METRICS_ADDR=:<port>`, container port `metrics`, always on: `/metrics`, `/healthz` (liveness), `/readyz` (readiness). |
 | `scaler.metrics.enabled` | `false` | Adds a metrics Service. |
 | `scaler.metrics.serviceMonitor.enabled` / `.interval` / `.labels` | `false` / `30s` / `{}` | ServiceMonitor, only if `monitoring.coreos.com/v1` is served. |
 | `scaler.resources` | 10m / 32Mi, limit 128Mi | |
@@ -94,19 +94,45 @@ stays queued (the scaler warns).
 | `scaler.securityContext` | read-only root FS, no privilege escalation, drop `ALL` | |
 | `scaler.podAnnotations` / `podLabels` / scheduling | empty | |
 | `networkPolicy.enabled` | `false` | Egress isolation for runner pods; needs an enforcing CNI. |
-| `networkPolicy.clusterCIDRs` | `[]` | Pod, service, node CIDRs (+ API endpoint). Required when enabled. |
+| `networkPolicy.clusterCIDRs` | `[]` | Pod, service, node CIDRs (+ API endpoint). IPv4 ones required when enabled; IPv6 ones open IPv6 egress except them. |
 | `networkPolicy.blockMetadata` | `true` | Deny `169.254.169.254/32`. |
+| `networkPolicy.blockMetadataIPv6` | `false` | Deny `fd00:ec2::254/128`; only matters with IPv6 egress open. |
 | `networkPolicy.allowClusterDNS` / `dnsSelector` | `true` / kube-system `k8s-app: kube-dns` | Allow DNS (53/UDP+TCP) to the cluster resolver. |
 | `networkPolicy.extraEgress` | `[]` | Extra egress rules, as-is. |
 | `podDisruptionBudget.enabled` / `minAvailable` | `false` / `1` | Keep drains from evicting the last runner; with one awake runner it blocks drains, so pair with `scaler.min: 2`. |
 
 ## Notes
 
-- **Replicas and the scaler.** With the scaler on, Helm upgrades keep the live
-  replica count. Turning the scaler on for an install that had it off drops
-  `replicas` from the manifest, which resets it to 1 (parks the rest).
+- **Replicas and the scaler.** With the scaler on, the chart leaves the
+  StatefulSet's `replicas` out and Helm upgrades keep the live count. Turning
+  the scaler on for an install that had it off removes the field Helm managed,
+  which resets the StatefulSet to 1 replica: every other runner parks until the
+  scaler wakes them for queued work.
 - **Storage values are fixed after install**: `volumeClaimTemplates` are
   immutable on a StatefulSet.
 - **NetworkPolicy** covers runner pods, so workflow containers and agents
-  alike (nested traffic leaves through the pod IP). It doesn't cover reap Job
-  pods: `scaler.sh` labels the Job, not its pods. IPv4 only.
+  alike (nested traffic leaves through the pod IP), and reap Job pods, which
+  the scaler labels `app.kubernetes.io/component: reaper` (`SCALER_REAP_POD_LABELS`;
+  the shell `scaler.sh` doesn't, only the Go scaler).
+- **IPv6 gap.** The policy is IPv4: it allows no IPv6 egress unless IPv6
+  CIDRs are listed in `clusterCIDRs` (dual stack), which opens `::/0` except
+  those and, with `blockMetadataIPv6`, the AWS IPv6 metadata endpoint. Other
+  clouds' IPv6 metadata addresses aren't covered.
+
+## Migrating from the raw manifests
+
+The old `k8s/manifests/` used `app: sg-runner` selectors. A StatefulSet's
+selector is immutable and Helm won't adopt objects it didn't create, so the
+chart can't take over in place. The PVCs carry the runner identities and keep
+their names (`state-sg-runner-N`, `docker-sg-runner-N`) as long as the release
+is named `sg-runner`, so:
+
+1. Note the current replica count: `kubectl -n sg-runner get sts sg-runner`.
+2. Delete the old scaler, then the StatefulSet (runners drain and park; PVCs
+   stay): `kubectl -n sg-runner delete deploy/sg-runner-scaler sts/sg-runner`,
+   and the old RBAC (`sa`, `role`, `rolebinding` named `sg-runner-scaler`).
+3. Install the chart as release `sg-runner` in the same namespace with
+   `credentials.existingSecret=sg-runner-credentials` (`make up`).
+4. The StatefulSet starts at 1 replica; the scaler wakes the other parked
+   runners as work queues (or reaps them after `parkTTL`). Without the
+   scaler, set `runner.replicas` to the noted count.

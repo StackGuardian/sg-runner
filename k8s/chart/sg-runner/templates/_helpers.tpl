@@ -64,6 +64,25 @@ app.kubernetes.io/component: {{ .component }}
 {{- end }}
 
 {{/*
+Labels of reap Job pods: the runner's selector labels with component reaper,
+so the NetworkPolicy covers them too.
+*/}}
+{{- define "sg-runner.reaperLabels" -}}
+{{- include "sg-runner.selectorLabels" (dict "ctx" . "component" "reaper") }}
+{{- end }}
+
+{{/*
+imagePullSecrets names, comma-separated.
+*/}}
+{{- define "sg-runner.pullSecretNames" -}}
+{{- $names := list }}
+{{- range .Values.imagePullSecrets }}
+{{- $names = append $names (kindIs "string" . | ternary . .name) }}
+{{- end }}
+{{- join "," $names }}
+{{- end }}
+
+{{/*
 Runner image reference; the scaler also uses it for reap Jobs.
 */}}
 {{- define "sg-runner.image" -}}
