@@ -1,38 +1,5 @@
 # sg-runner Kubernetes prototype: each replica is one registered runner.
 # Namespace and the SG credentials Secret come from `make secret`.
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: sg-runner
-  namespace: sg-runner
-automountServiceAccountToken: false
----
-# The drain hook reads its own StatefulSet to tell a scale-down from a restart.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: sg-runner
-  namespace: sg-runner
-rules:
-  - apiGroups: ['apps']
-    resources: ['statefulsets']
-    resourceNames: ['sg-runner']
-    verbs: ['get']
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: sg-runner
-  namespace: sg-runner
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: sg-runner
-subjects:
-  - kind: ServiceAccount
-    name: sg-runner
-    namespace: sg-runner
----
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -41,6 +8,9 @@ metadata:
 spec:
   serviceName: sg-runner
   replicas: 1
+  # Park and wake runners side by side, not one at a time (each park can wait
+  # for running workflows).
+  podManagementPolicy: Parallel
   selector:
     matchLabels:
       app: sg-runner
@@ -49,7 +19,6 @@ spec:
       labels:
         app: sg-runner
     spec:
-      serviceAccountName: sg-runner
       automountServiceAccountToken: false
       # Upper bound on how long a terminating runner waits for running
       # workflows (the ecs-agent preStop hook) before it is killed.
@@ -59,9 +28,20 @@ spec:
           image: sg-runner-k8s:dev
           imagePullPolicy: IfNotPresent
           args: ['register']
-          envFrom:
-            - secretRef:
-                name: sg-runner-credentials
+          # Only what registration needs; SG_API_KEY stays out of it.
+          env:
+            - name: SG_NODE_TOKEN
+              valueFrom:
+                secretKeyRef: { name: sg-runner-credentials, key: SG_NODE_TOKEN }
+            - name: SG_ORGANIZATION
+              valueFrom:
+                secretKeyRef: { name: sg-runner-credentials, key: SG_ORGANIZATION }
+            - name: SG_RUNNER_GROUP
+              valueFrom:
+                secretKeyRef: { name: sg-runner-credentials, key: SG_RUNNER_GROUP }
+            - name: SG_BASE_API
+              valueFrom:
+                secretKeyRef: { name: sg-runner-credentials, key: SG_BASE_API, optional: true }
           volumeMounts:
             - { name: state, mountPath: /etc/ecs, subPath: ecs-config }
             - { name: state, mountPath: /var/lib/amazon/ssm, subPath: ssm }
@@ -113,8 +93,6 @@ spec:
           imagePullPolicy: IfNotPresent
           args: ['ecs-agent']
           env:
-            - name: SG_STATEFULSET
-              value: sg-runner
             # Rounded up to whole CPUs.
             - name: SG_TASK_CPU_LIMIT
               valueFrom:
@@ -145,13 +123,12 @@ spec:
             - { name: state, mountPath: /var/lib/amazon/ssm, subPath: ssm }
             - { name: aws-creds, mountPath: /rotatingcreds, readOnly: true }
             - { name: docker-run, mountPath: /var/run }
-            # Deregistration on scale-down needs the SG credentials.
+            # Setting the runner's status through SG needs the SG credentials.
             - {
                 name: sg-credentials,
                 mountPath: /etc/sg-runner/credentials,
                 readOnly: true,
               }
-            - { name: kube-api, mountPath: /etc/sg-runner/kube, readOnly: true }
       volumes:
         - name: docker-run
           emptyDir: {}
@@ -162,21 +139,6 @@ spec:
           secret:
             secretName: sg-runner-credentials
             defaultMode: 0400
-        # Service account token for the drain hook only; not automounted
-        # into the other containers.
-        - name: kube-api
-          projected:
-            sources:
-              - serviceAccountToken:
-                  path: token
-                  expirationSeconds: 3600
-              - configMap:
-                  name: kube-root-ca.crt
-                  items: [{ key: ca.crt, path: ca.crt }]
-              - downwardAPI:
-                  items:
-                    - path: namespace
-                      fieldRef: { fieldPath: metadata.namespace }
   volumeClaimTemplates:
     # Runner identity (ecs.config, SSM registration, agent state): survives
     # pod restarts so the runner doesn't re-register. Kept on scale-down too:

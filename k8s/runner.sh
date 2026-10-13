@@ -10,7 +10,7 @@
 #   dockerd     privileged: nested Docker daemon + main.sh network setup
 #   ssm-agent   amazon-ssm-agent; shares rotating creds via /root/.aws
 #   ecs-agent   ECS agent binary, configured from ecs.config (replaces ecs-init)
-#   drain       ecs-agent preStop: DRAINING, wait for workflows; deregister on scale-down
+#   drain       ecs-agent preStop: DRAINING, wait for workflows, park (keep registration)
 #   wait-drained  dockerd/ssm-agent preStop: outlive the drain
 #   deregister  run via `kubectl exec -i`; reads SG credentials from stdin
 #
@@ -25,11 +25,13 @@ source /opt/sg-runner/main.sh
 readonly SSM_DIR="/var/lib/amazon/ssm"
 readonly SSM_REGISTRATION_FILE="${SSM_DIR}/Vault/Store/RegistrationKey"
 readonly AGENT_CREDS_FILE="/rotatingcreds/credentials"
-readonly SG_CRED_KEYS="SG_NODE_TOKEN SG_ORGANIZATION SG_RUNNER_GROUP SG_BASE_API"
+readonly SG_CRED_KEYS="SG_NODE_TOKEN SG_ORGANIZATION SG_RUNNER_GROUP SG_BASE_API SG_API_KEY"
 readonly SG_CREDS_DIR="/etc/sg-runner/credentials"
-readonly K8S_TOKEN_DIR="/etc/sg-runner/kube"
 # On the emptyDir shared by every container: tells the others the drain is over.
 readonly DRAINED_MARKER="/var/run/sg-runner-drained"
+# On the state PVC: this pod drained the runner when it parked, so the next
+# start may set it ACTIVE again. Absent when someone else drained it on purpose.
+readonly SELF_DRAIN_MARKER="$ECS_CONFIG_DIR/.parked"
 readonly AGENT_API="http://localhost:51678/v1"
 
 # Memory kept back for dockerd/containerd themselves, out of the dockerd
@@ -229,13 +231,19 @@ load_sg_credentials_from_dir() { #{{{
 }
 #}}}: load_sg_credentials_from_dir
 
+configured_runner_id() { #{{{
+  # Prints the SG runner ID recorded in ecs.config at registration.
+  [[ -s "$ECS_CONFIG_DIR/ecs.config" ]] || die "Not registered:" "$ECS_CONFIG_DIR/ecs.config missing"
+  grep ECS_INSTANCE_ATTRIBUTES "$ECS_CONFIG_DIR/ecs.config" | cut -d "=" -f2- |
+    jq -r '.sg_runner_id'
+}
+#}}}: configured_runner_id
+
 deregister_runner() { #{{{
-  local instance_attrs url
+  local url
   load_sg_credentials
 
-  [[ -s "$ECS_CONFIG_DIR/ecs.config" ]] || die "Not registered:" "$ECS_CONFIG_DIR/ecs.config missing"
-  instance_attrs="$(grep ECS_INSTANCE_ATTRIBUTES "$ECS_CONFIG_DIR/ecs.config" | cut -d "=" -f2-)"
-  RUNNER_ID="$(echo "$instance_attrs" | jq -r '.sg_runner_id')"
+  RUNNER_ID="$(configured_runner_id)"
   validate_runner_id "$RUNNER_ID"
 
   url="${SG_BASE_API}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/deregister/"
@@ -257,93 +265,77 @@ cmd_deregister() { #{{{
 }
 #}}}: cmd_deregister
 
-k8s_api() { #{{{
-  # Usage: k8s_api <path>; GET with the pod's projected service account token.
-  curl -fsS --max-time 10 \
-    --cacert "$K8S_TOKEN_DIR/ca.crt" \
-    -H "Authorization: Bearer $(<"$K8S_TOKEN_DIR/token")" \
-    "https://kubernetes.default.svc$1"
+
+
+sg_api() { #{{{
+  # Usage: sg_api <method> <path> [payload]
+  # Calls the runner group's SG API with SG_API_KEY and prints the response.
+  # api_call authenticates with SG_NODE_TOKEN: swap in the key, in a subshell
+  # so the node token stays untouched for deregistration.
+  local method="$1" path="$2" payload="${3:-}"
+  (
+    SG_NODE_TOKEN="$SG_API_KEY"
+    if ! api_call "$method" \
+      "${SG_BASE_API}/orgs/${SG_ORGANIZATION}/runnergroups/${SG_RUNNER_GROUP}/${path}" \
+      "$payload"; then
+      info "SG API $method $path failed ($status_code):" "$message" >&2
+      exit 1
+    fi
+    printf '%s' "$response"
+  )
 }
-#}}}: k8s_api
+#}}}: sg_api
 
-is_scaling_down() { #{{{
-  # A StatefulSet scale-down removes the highest ordinals, so this pod is going
-  # away for good only if its ordinal no longer fits under spec.replicas.
-  # Rollouts, evictions and deleting the StatefulSet keep the identity.
-  local ns replicas ordinal="${HOSTNAME##*-}"
-  ns="$(<"$K8S_TOKEN_DIR/namespace")"
-  replicas="$(k8s_api "/apis/apps/v1/namespaces/${ns}/statefulsets/${SG_STATEFULSET}" |
-    jq -r '.spec.replicas')" || return 1
-  [[ "$replicas" =~ ^[0-9]+$ ]] && ((ordinal >= replicas))
+set_sg_runner_status() { #{{{
+  # Usage: set_sg_runner_status DRAINING|ACTIVE
+  # SG's runner_status API, as used by sg-runner-autoscaler: SG changes the
+  # ECS container instance state on its side, with its own permissions.
+  local runner_id
+  runner_id="$(configured_runner_id)"
+  validate_runner_id "$runner_id"
+  sg_api POST runner_status/ \
+    "$(jq -nc --arg s "$1" --arg r "$runner_id" '{Status: $s, RunnerId: $r}')" >/dev/null
 }
-#}}}: is_scaling_down
+#}}}: set_sg_runner_status
 
-ecs_api() { #{{{
-  # Usage: ecs_api <action> <json>
-  # Signed with the instance credentials the SSM agent rotates for the ECS
-  # agent; the key pair goes through a curl config file, not the command line.
-  local action="$1" payload="$2" curl_config response code rc
-  curl_config=$(mktemp)
-  chmod 600 "$curl_config"
-  awk -F' *= *' '
-    $1 == "aws_access_key_id"     { key = $2 }
-    $1 == "aws_secret_access_key" { secret = $2 }
-    $1 == "aws_session_token"     { token = $2 }
-    END {
-      printf "user = \"%s:%s\"\n", key, secret
-      printf "header = \"x-amz-security-token: %s\"\n", token
-    }' "$AGENT_CREDS_FILE" >"$curl_config"
-
-  response="$(curl -sS --max-time 15 -K "$curl_config" \
-    --aws-sigv4 "aws:amz:${AWS_DEFAULT_REGION}:ecs" \
-    -H "Content-Type: application/x-amz-json-1.1" \
-    -H "X-Amz-Target: AmazonEC2ContainerServiceV20141113.${action}" \
-    -w '\n%{http_code}' \
-    -d "$payload" \
-    "https://ecs.${AWS_DEFAULT_REGION}.amazonaws.com/")"
-  rc=$?
-  rm -f "$curl_config"
-  ((rc == 0)) || return $rc
-
-  code="${response##*$'\n'}"
-  response="${response%$'\n'*}"
-  if [[ "$code" != 2* ]]; then
-    # e.g. AccessDeniedException: ... not authorized to perform ...
-    # stderr: callers capture stdout for the response.
-    info "ECS $action failed ($code):" \
-      "$(echo "$response" | jq -r '"\(.__type // "") \(.message // .Message // "")"' 2>/dev/null)" >&2
+set_runner_status() { #{{{
+  # Usage: set_runner_status DRAINING|ACTIVE
+  # Only through SG: a customer's runner has no ECS permissions of its own.
+  # Without SG_API_KEY, shutdowns still wait for running workflows but can't
+  # stop new ones from being placed meanwhile.
+  load_sg_credentials_from_dir
+  if [[ -z "${SG_API_KEY:-}" ]]; then
+    info "SG_API_KEY not set:" "skipping $1"
     return 1
   fi
-  echo "$response"
+  set_sg_runner_status "$1"
 }
-#}}}: ecs_api
+#}}}: set_runner_status
 
-set_container_instance_state() { #{{{
-  # Usage: set_container_instance_state DRAINING|ACTIVE
-  # DRAINING stops ECS from placing new tasks on this runner; running ones
-  # carry on.
-  local metadata payload response
-  metadata="$(curl -fsS --max-time 5 "$AGENT_API/metadata")" || return 1
-  payload="$(echo "$metadata" | jq -c --arg status "$1" \
-    '{cluster: .Cluster, containerInstances: [.ContainerInstanceArn], status: $status}')"
-  response="$(ecs_api UpdateContainerInstancesState "$payload")" || return 1
-  if [[ "$(echo "$response" | jq '.failures | length')" != 0 ]]; then
-    info "ECS UpdateContainerInstancesState failures:" "$(echo "$response" | jq -c '.failures')" >&2
-    return 1
-  fi
+current_runner_status() { #{{{
+  # Prints this runner's status as SG reports it (ACTIVE, DRAINING, ...).
+  # The response holds secrets; only the status leaves this function.
+  local runner_id
+  load_sg_credentials_from_dir
+  [[ -n "${SG_API_KEY:-}" ]] || return 1
+  runner_id="$(configured_runner_id)"
+  sg_api GET "" | jq -r --arg r "$runner_id" \
+    '.msg.ContainerInstances[]? | select(.runnerId == $r) | .status'
 }
-#}}}: set_container_instance_state
+#}}}: current_runner_status
 
 reactivate_when_registered() { #{{{
-  # Every shutdown drains the runner (cmd_drain). After a restart it comes back
-  # with the same container instance, still DRAINING, so set it ACTIVE again as
-  # soon as the agent has registered. Harmless if it already is.
+  # Wake a parked runner: undo the drain this pod did on its way down
+  # (cmd_drain); it comes back with the same container instance. A drain anyone else
+  # started (SG UI, an autoscaler) leaves no marker and is kept.
+  [[ -e "$SELF_DRAIN_MARKER" ]] || return 0
   local attempt
   for ((attempt = 0; attempt < 120; attempt++)); do
     if curl -fsS --max-time 5 "$AGENT_API/metadata" 2>/dev/null |
       jq -e '.ContainerInstanceArn // empty' >/dev/null; then
-      if set_container_instance_state ACTIVE; then
-        info "Container instance" "ACTIVE"
+      if set_runner_status ACTIVE; then
+        rm -f "$SELF_DRAIN_MARKER"
+        info "Runner" "ACTIVE"
       else
         info "Could not set ACTIVE;" "a restarted runner may stay DRAINING"
       fi
@@ -355,27 +347,28 @@ reactivate_when_registered() { #{{{
 #}}}: reactivate_when_registered
 
 cmd_drain() { #{{{
-  # preStop hook of the ecs-agent container. Every shutdown first sets the
-  # runner DRAINING, so it waits only for workflows already running (bounded
-  # by terminationGracePeriodSeconds) instead of picking up new ones. A
-  # scale-down also deregisters at the end; any other shutdown keeps the
-  # identity and reactivates on start (reactivate_when_registered).
+  # preStop hook of the ecs-agent container: park the runner. Every shutdown
+  # (scale-down, restart, rollout, eviction) sets it DRAINING so no new
+  # workflows land, waits for the running ones (bounded by
+  # terminationGracePeriodSeconds), and keeps the registration on the state
+  # PVC. Scaling back up wakes the same runner in seconds
+  # (reactivate_when_registered); deregistering parked runners is left to
+  # `make deregister` / the scaler.
   # Hook output isn't logged by the kubelet, so write to the container's.
   exec >/proc/1/fd/1 2>&1
   # Release the other containers whatever happens below.
   trap 'touch "$DRAINED_MARKER"' EXIT
 
-  local scale_down=false
-  if is_scaling_down; then
-    scale_down=true
-  fi
-  info "Shutting down:" "$([[ "$scale_down" == true ]] && echo scale-down || echo restart)"
-
+  info "Parking runner.."
   # Already gone after a manual deregister (make nuke).
   if [[ -s "$ECS_CONFIG_DIR/ecs.config" ]]; then
     load_ecs_config
-    if set_container_instance_state DRAINING; then
-      info "Container instance" "DRAINING"
+    if [[ "$(current_runner_status)" == "DRAINING" ]]; then
+      # Drained on purpose by someone else: keep it that way on wake.
+      info "Runner already" "DRAINING"
+    elif set_runner_status DRAINING; then
+      info "Runner" "DRAINING"
+      touch "$SELF_DRAIN_MARKER"
     else
       info "Could not set DRAINING;" "new tasks may still land"
     fi
@@ -385,12 +378,7 @@ cmd_drain() { #{{{
     info "Waiting for running workflow containers.."
     sleep 10
   done
-  info "No workflow containers running."
-
-  if [[ "$scale_down" == true ]]; then
-    load_sg_credentials_from_dir
-    deregister_runner
-  fi
+  info "Parked:" "no workflow containers running"
 }
 #}}}: cmd_drain
 
