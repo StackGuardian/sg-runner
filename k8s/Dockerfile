@@ -2,12 +2,18 @@
 # the pod (see runner.sh). Build from the repo root:
 #   docker build -f k8s/Dockerfile -t sg-runner-k8s:dev .
 
-FROM amazon/amazon-ecs-agent:latest AS ecs-agent
+# Pinned for reproducible builds; each exists for linux/amd64 and linux/arm64.
+# ECS agent: Docker Hub tags (https://hub.docker.com/r/amazon/amazon-ecs-agent/tags).
+ARG ECS_AGENT_VERSION=v1.108.0
+
+FROM amazon/amazon-ecs-agent:${ECS_AGENT_VERSION} AS ecs-agent
 
 FROM debian:bookworm-slim
 
 ARG TARGETARCH
 ARG DOCKER_VERSION=27.5.1
+# SSM agent: .../SSMAgent/latest/VERSION names the current release.
+ARG SSM_AGENT_VERSION=3.3.5390.0
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
@@ -22,7 +28,7 @@ RUN arch="$([ "$TARGETARCH" = arm64 ] && echo aarch64 || echo x86_64)" \
 # SSM agent. Unpacked rather than installed: the postinst expects systemd.
 # Staged first: extracting onto / would replace the merged-usr /lib symlink.
 RUN curl -fsSL -o /tmp/ssm.deb \
-    "https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_${TARGETARCH}/amazon-ssm-agent.deb" \
+    "https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/${SSM_AGENT_VERSION}/debian_${TARGETARCH}/amazon-ssm-agent.deb" \
   && mkdir /tmp/ssm \
   && dpkg-deb -x /tmp/ssm.deb /tmp/ssm \
   && cp /tmp/ssm/usr/bin/* /usr/bin/ \

@@ -20,8 +20,16 @@
 
 set -o pipefail
 
-# shellcheck source-path=SCRIPTDIR/.. source=main.sh
-source /opt/sg-runner/main.sh
+# Next to this script in the image (/opt/sg-runner), one level up in the repo
+# (k8s/runner.sh, main.sh), where the tests source it from.
+RUNNER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -r "$RUNNER_DIR/main.sh" ]]; then
+  # shellcheck source-path=SCRIPTDIR/.. source=main.sh
+  source "$RUNNER_DIR/main.sh"
+else
+  # shellcheck source-path=SCRIPTDIR/.. source=main.sh
+  source "$RUNNER_DIR/../main.sh"
+fi
 
 readonly SSM_DIR="/var/lib/amazon/ssm"
 readonly SSM_REGISTRATION_FILE="${SSM_DIR}/Vault/Store/RegistrationKey"
@@ -38,6 +46,20 @@ readonly AGENT_API="http://localhost:51678/v1"
 # Memory kept back for dockerd/containerd themselves, out of the dockerd
 # container's limit, when sizing what the agent advertises.
 SG_DOCKERD_OVERHEAD_MIB="${SG_DOCKERD_OVERHEAD_MIB:-256}"
+
+# Nested Docker cleanup (prune_loop), in place of the VM's `main.sh prune`
+# cron. Every interval (0 = off), remove stopped containers, dangling images
+# and build cache older than SG_PRUNE_UNTIL, and unused volumes. Unused images
+# are the wake-up cache, so they only go once the Docker volume is
+# SG_PRUNE_IMAGES_ABOVE_PCT full (0 = every run).
+SG_PRUNE_INTERVAL_SECONDS="${SG_PRUNE_INTERVAL_SECONDS:-14400}"
+SG_PRUNE_UNTIL="${SG_PRUNE_UNTIL:-24h}"
+SG_PRUNE_IMAGES_ABOVE_PCT="${SG_PRUNE_IMAGES_ABOVE_PCT:-70}"
+DOCKER_DATA_ROOT="${DOCKER_DATA_ROOT:-/var/lib/docker}"
+
+# What the agent sizing reads; overridable so tests can feed fake files.
+PROC_STATUS_FILE="${PROC_STATUS_FILE:-/proc/self/status}"
+MEMINFO_FILE="${MEMINFO_FILE:-/proc/meminfo}"
 
 CONTAINER_ORCHESTRATOR="docker"
 
@@ -104,8 +126,8 @@ cmd_dockerd() { #{{{
   fi
 
   dockerd --host=unix:///var/run/docker.sock &
-  local dockerd_pid=$!
-  trap 'kill -TERM "$dockerd_pid"; wait "$dockerd_pid"' TERM INT
+  local dockerd_pid=$! prune_pid=""
+  trap 'kill -TERM $prune_pid "$dockerd_pid" 2>/dev/null; wait "$dockerd_pid"' TERM INT
 
   wait_for "dockerd" docker info
   # Same bridge, IMDS block and task-credential DNAT as on a VM. Rules land in
@@ -113,9 +135,94 @@ cmd_dockerd() { #{{{
   configure_local_network
   info "Docker ready, network" "$SG_DOCKER_NETWORK"
 
+  if prune_enabled; then
+    prune_loop &
+    prune_pid=$!
+  else
+    info "Docker prune disabled:" "SG_PRUNE_INTERVAL_SECONDS=$SG_PRUNE_INTERVAL_SECONDS"
+  fi
+
   wait "$dockerd_pid"
 }
 #}}}: cmd_dockerd
+
+prune_enabled() {
+  [[ "$SG_PRUNE_INTERVAL_SECONDS" =~ ^[0-9]+$ ]] && ((SG_PRUNE_INTERVAL_SECONDS > 0))
+}
+
+docker_disk_used_pct() { #{{{
+  # Prints how full the filesystem holding Docker's data is, as a bare number.
+  df -P "$DOCKER_DATA_ROOT" 2>/dev/null | awk 'NR == 2 {sub(/%/, "", $5); print $5}'
+}
+#}}}: docker_disk_used_pct
+
+should_prune_images() { #{{{
+  # Usage: should_prune_images <used_pct>
+  # Unused images are kept as the wake-up cache until the disk is filling up.
+  # An unknown usage counts as full: better a cold cache than a full PVC.
+  local used="$1" threshold="$SG_PRUNE_IMAGES_ABOVE_PCT"
+  [[ "$threshold" =~ ^[0-9]+$ ]] || threshold=70
+  [[ "$used" =~ ^[0-9]+$ ]] || return 0
+  ((threshold == 0 || used >= threshold))
+}
+#}}}: should_prune_images
+
+docker_prune() { #{{{
+  # Usage: docker_prune <docker args...>
+  # Runs one prune and prints the space it reclaimed (0B when docker reports
+  # none: `builder prune` prints "Total:", the others "Total reclaimed space:").
+  local out space
+  if ! out="$(docker "$@" 2>&1)"; then
+    info "docker $* failed:" "$(tail -n1 <<<"$out")" >&2
+    printf 'failed'
+    return 1
+  fi
+  space="$(sed -nE 's/^Total( reclaimed space)?:[[:space:]]*//p' <<<"$out" | tail -n1)"
+  printf '%s' "${space:-0B}"
+}
+#}}}: docker_prune
+
+prune_docker() { #{{{
+  # One cleanup pass over the nested Docker. Never a bare `system prune`: it
+  # removes every non-running container regardless of age, including ones the
+  # ECS agent has created but not started yet (see main.sh prune()). Every
+  # container-touching sweep carries the until= age guard.
+  local filter="until=$SG_PRUNE_UNTIL" used all=() containers images build volumes
+  containers="$(docker_prune container prune -f --filter "$filter")"
+
+  used="$(docker_disk_used_pct)"
+  # -a: unused images too, not just dangling ones. `until` is the image's
+  # creation time, not when it was pulled or last used, so it's no LRU: under
+  # pressure, every unused image older than that goes.
+  should_prune_images "$used" && all=(-a)
+  images="$(docker_prune image prune -f "${all[@]}" --filter "$filter")"
+
+  build="$(docker_prune builder prune -f --filter "$filter")"
+  # Anonymous volumes no container (in any state) refers to. Separate from the
+  # container sweep on purpose: this one can't remove a container.
+  volumes="$(docker_prune volume prune -f)"
+
+  info "Docker prune ($filter, disk ${used:-?}% used${all[*]:+, unused images too}) reclaimed:" \
+    "containers $containers, images $images, build cache $build, volumes $volumes"
+}
+#}}}: prune_docker
+
+prune_loop() { #{{{
+  # Runs once right away, then every interval: a pod may park within minutes
+  # of waking and never see a full interval, so its first pass can't wait for
+  # one. Each pass runs in a subshell so a failing docker call or a stray exit
+  # can't end the loop.
+  local sleep_pid=""
+  trap 'kill $sleep_pid 2>/dev/null; exit 0' TERM INT
+  info "Docker prune every" "${SG_PRUNE_INTERVAL_SECONDS}s, keeping anything newer than $SG_PRUNE_UNTIL"
+  while :; do
+    (prune_docker) || info "Docker prune failed;" "retrying in ${SG_PRUNE_INTERVAL_SECONDS}s"
+    sleep "$SG_PRUNE_INTERVAL_SECONDS" &
+    sleep_pid=$!
+    wait "$sleep_pid"
+  done
+}
+#}}}: prune_loop
 
 cmd_ssm_agent() { #{{{
   wait_for "SSM registration" test -s "$SSM_REGISTRATION_FILE"
@@ -141,7 +248,7 @@ size_agent_memory() { #{{{
   local limit="${SG_TASK_MEMORY_LIMIT_MIB:-}" total available reserved
   [[ "$limit" =~ ^[0-9]+$ ]] || return 0
 
-  total=$(($(awk '/^MemTotal:/ {print $2}' /proc/meminfo) / 1024))
+  total=$(($(awk '/^MemTotal:/ {print $2}' "$MEMINFO_FILE") / 1024))
   available=$((limit - SG_DOCKERD_OVERHEAD_MIB))
   reserved=$((total > available ? total - available : 0))
   # The agent parses this as uint16: anything larger silently becomes 0, which
@@ -159,7 +266,7 @@ cpu_affinity_list() { #{{{
   # Prints the first n CPUs this process may run on as a taskset list, or
   # nothing if n already covers all of them.
   local n="$1" range first last cpu allowed=0 cpus=() ranges=()
-  IFS=, read -ra ranges <<<"$(awk '/^Cpus_allowed_list:/ {print $2}' /proc/self/status)"
+  IFS=, read -ra ranges <<<"$(awk '/^Cpus_allowed_list:/ {print $2}' "$PROC_STATUS_FILE")"
   for range in "${ranges[@]}"; do
     first="${range%-*}"
     last="${range#*-}"
