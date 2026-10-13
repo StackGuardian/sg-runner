@@ -37,6 +37,5 @@ COPY --from=ecs-agent /images /images
 
 COPY main.sh /opt/sg-runner/main.sh
 COPY k8s/runner.sh /opt/sg-runner/runner.sh
-COPY k8s/scaler.sh /opt/sg-runner/scaler.sh
 
 ENTRYPOINT ["/opt/sg-runner/runner.sh"]
