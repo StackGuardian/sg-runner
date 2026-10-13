@@ -1,14 +1,26 @@
 #!/usr/bin/env bash
 # Mock: ip
-# Records the call. main.sh extracts the node IP with:
-#   ip route | grep default | cut -d" " -f9
-# so the default route line below is shaped to put 10.0.0.1 in field 9
-# (default via <gw> dev <if> proto <p> src 10.0.0.1 metric <m>).
-#   $MOCK_IP_ROUTE_OUTPUT (default: a default route whose field 9 is 10.0.0.1)
-#   $MOCK_IP_EXIT         (default: 0)
+# Records the call. main.sh's detect_private_ip queries, in order:
+#   ip -4 route get 1.1.1.1          -> $MOCK_IP_ROUTE_GET_OUTPUT
+#   ip -4 -o addr show scope global  -> $MOCK_IP_ADDR_OUTPUT
+# Each query prints its output and exits with its own exit override, so a
+# test can fail the route lookup and still exercise the addr fallback.
+#   $MOCK_IP_ROUTE_OUTPUT     (default: a dhcp default route with src 10.0.0.1)
+#   $MOCK_IP_ROUTE_GET_OUTPUT (default: a route get reply with src 10.0.0.1)
+#   $MOCK_IP_ROUTE_GET_EXIT   (default: $MOCK_IP_EXIT)
+#   $MOCK_IP_ADDR_OUTPUT      (default: one global eth0 address, 10.0.0.1/24)
+#   $MOCK_IP_ADDR_EXIT        (default: $MOCK_IP_EXIT)
+#   $MOCK_IP_EXIT             (default: 0)
 printf '%s\n' "ip $*" >>"${MOCK_CALL_LOG}"
 
-if [[ "$1" == "route" ]]; then
+args=" $* "
+if [[ "$args" == *" route get "* ]]; then
+  echo "${MOCK_IP_ROUTE_GET_OUTPUT-1.1.1.1 via 10.0.0.254 dev eth0 src 10.0.0.1 uid 0}"
+  exit "${MOCK_IP_ROUTE_GET_EXIT:-${MOCK_IP_EXIT:-0}}"
+elif [[ "$args" == *" addr "* ]]; then
+  echo "${MOCK_IP_ADDR_OUTPUT-2: eth0    inet 10.0.0.1/24 brd 10.0.0.255 scope global eth0\       valid_lft forever preferred_lft forever}"
+  exit "${MOCK_IP_ADDR_EXIT:-${MOCK_IP_EXIT:-0}}"
+elif [[ "$args" == *" route "* ]]; then
   echo "${MOCK_IP_ROUTE_OUTPUT:-default via 10.0.0.254 dev eth0 proto dhcp src 10.0.0.1 metric 100}"
 fi
 
