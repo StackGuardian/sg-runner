@@ -135,6 +135,7 @@ Decisions and warnings (`StuckQueue`, `RunnerNotConnected`, `SGUnreachable`,
 
 Its Role covers only this StatefulSet, its scale and annotations, PVCs, reap
 Jobs, Events and its Lease; runner pods have no Kubernetes API access.
+Reap Job pods take extra labels, pull secrets, node selector and tolerations from `SCALER_REAP_POD_LABELS`, `SCALER_REAP_IMAGE_PULL_SECRETS`, `SCALER_REAP_NODE_SELECTOR` and `SCALER_REAP_TOLERATIONS`.
 
 ## Known gaps
 

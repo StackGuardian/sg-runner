@@ -87,3 +87,21 @@ func TestReapPod(t *testing.T) {
 		t.Error("want an invalid label key rejected")
 	}
 }
+
+// The Helm chart renders unset values as "", {} and [].
+func TestReapPodChartDefaults(t *testing.T) {
+	c, err := Load(env(map[string]string{
+		"POD_NAMESPACE":                  "ns",
+		"SCALER_REAP_POD_LABELS":         `{}`,
+		"SCALER_REAP_IMAGE_PULL_SECRETS": "",
+		"SCALER_REAP_NODE_SELECTOR":      `{}`,
+		"SCALER_REAP_TOLERATIONS":        `[]`,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := c.ReapPod
+	if len(o.Labels) != 0 || len(o.ImagePullSecrets) != 0 || len(o.NodeSelector) != 0 || len(o.Tolerations) != 0 {
+		t.Errorf("want no reap pod settings, got %+v", o)
+	}
+}
