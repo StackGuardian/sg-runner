@@ -70,9 +70,10 @@ spec:
             - { name: SCALER_MAX, value: "10" }
             # % of awake runners' capacity to keep free (warm spare); 0 = off.
             - { name: SCALER_HEADROOM_PCT, value: "0" }
-            - { name: SCALER_IDLE_SECONDS, value: "300" }
-            - { name: SCALER_PARK_TTL, value: "86400" }
+            - { name: SCALER_IDLE_SECONDS, value: "60" }
+            - { name: SCALER_PARK_TTL, value: "43200" }
             - { name: SCALER_IMAGE, value: sg-runner-k8s:dev }
+            - { name: SCALER_CREDENTIALS_SECRET, value: sg-runner-credentials }
           resources:
             requests: { cpu: 10m, memory: 32Mi }
             limits: { memory: 128Mi }

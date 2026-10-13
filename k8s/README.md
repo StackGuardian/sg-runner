@@ -104,9 +104,9 @@ group from SG with the node token (`?getActiveWorkflows=true`) and:
 |---|---|---|
 | Scale out | workflows queued and no awake runner fully idle | +1 runner: wakes a parked one, or registers a new one |
 | Headroom (optional) | less than `SCALER_HEADROOM_PCT` of awake runners' CPU or memory free (0 = off, the default) | +1 runner, kept as a warm spare |
-| Scale in | nothing queued, highest awake runner idle for `SCALER_IDLE_SECONDS` (300), the rest still keeps the headroom | park it (-1) |
+| Scale in | nothing queued, highest awake runner idle for `SCALER_IDLE_SECONDS` (60), the rest still keeps the headroom | park it (-1) |
 | Stuck queue | workflows queued while an awake runner sits fully idle for `SCALER_STUCK_SECONDS` (180) | warn, ignore the queue (it needs more than a runner pod offers) |
-| Reap | runner parked longer than `SCALER_PARK_TTL` (24h) | Job deregisters it from its PVC, then its PVCs are deleted |
+| Reap | runner parked longer than `SCALER_PARK_TTL` (12h) | Job deregisters it from its PVC, then its PVCs are deleted |
 
 Replicas stay within `SCALER_MIN` (≥ 1: SG pauses workflows without an
 `ACTIVE` runner) and the lower of `SCALER_MAX` and the runner group's

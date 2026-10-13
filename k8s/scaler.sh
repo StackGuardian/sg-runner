@@ -37,14 +37,16 @@ SCALER_MIN="${SCALER_MIN:-1}"
 SCALER_MAX="${SCALER_MAX:-10}"
 # Share of awake capacity to keep free; 0 = off (scale out on the queue only).
 SCALER_HEADROOM_PCT="${SCALER_HEADROOM_PCT:-0}"
-SCALER_IDLE_SECONDS="${SCALER_IDLE_SECONDS:-300}"
-SCALER_PARK_TTL="${SCALER_PARK_TTL:-86400}"
+SCALER_IDLE_SECONDS="${SCALER_IDLE_SECONDS:-60}"
+SCALER_PARK_TTL="${SCALER_PARK_TTL:-43200}"
 # Longer than SG's retry delay for queued workflows.
 SCALER_STUCK_SECONDS="${SCALER_STUCK_SECONDS:-180}"
 # How long to wait for an awake runner to connect before deciding without it.
 SCALER_SETTLE_TIMEOUT="${SCALER_SETTLE_TIMEOUT:-300}"
 SCALER_STATEFULSET="${SCALER_STATEFULSET:-sg-runner}"
 SCALER_IMAGE="${SCALER_IMAGE:-sg-runner-k8s:dev}"
+# The runner group's SG credentials, mounted by reap Jobs.
+SCALER_CREDENTIALS_SECRET="${SCALER_CREDENTIALS_SECRET:-sg-runner-credentials}"
 
 readonly SA_DIR="/var/run/secrets/kubernetes.io/serviceaccount"
 readonly PARKED_AT_ANNOTATION="sg-runner.stackguardian.io/parked-at"
@@ -143,7 +145,8 @@ annotate_pvc() { #{{{
 reap_job() { #{{{
   # Usage: reap_job <ordinal>; prints the Job manifest.
   local n="$1"
-  jq -n --arg n "$n" --arg sts "$SCALER_STATEFULSET" --arg image "$SCALER_IMAGE" '{
+  jq -n --arg n "$n" --arg sts "$SCALER_STATEFULSET" --arg image "$SCALER_IMAGE" \
+    --arg secret "$SCALER_CREDENTIALS_SECRET" '{
     apiVersion: "batch/v1", kind: "Job",
     metadata: {name: "\($sts)-reap-\($n)", labels: {app: "\($sts)-reaper"}},
     spec: {backoffLimit: 0, template: {spec: {
@@ -160,7 +163,7 @@ reap_job() { #{{{
       }],
       volumes: [
         {name: "state", persistentVolumeClaim: {claimName: "state-\($sts)-\($n)"}},
-        {name: "sg-credentials", secret: {secretName: "sg-runner-credentials", defaultMode: 256}}
+        {name: "sg-credentials", secret: {secretName: $secret, defaultMode: 256}}
       ]
     }}}
   }'
