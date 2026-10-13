@@ -50,6 +50,19 @@ else
 		--output type=cacheonly ..
 endif
 
+# The scaler (Go, k8s/scaler). SCALER_PLATFORMS builds a multi-arch image instead
+# (buildx, e.g. SCALER_PLATFORMS=linux/amd64,linux/arm64 with --push in SCALER_BUILDX_FLAGS).
+SCALER_BUILD_IMAGE ?= sg-runner-scaler:dev
+SCALER_PLATFORMS ?=
+SCALER_BUILDX_FLAGS ?=
+.PHONY: build-scaler
+build-scaler: ## Build the scaler image (Go)
+ifeq ($(SCALER_PLATFORMS),)
+	docker build -t $(SCALER_BUILD_IMAGE) scaler
+else
+	docker buildx build --platform $(SCALER_PLATFORMS) $(SCALER_BUILDX_FLAGS) -t $(SCALER_BUILD_IMAGE) scaler
+endif
+
 # The namespace must allow privileged pods (dockerd); the chart doesn't create it.
 secret: ## Create the namespace and the SG credentials Secret from .env
 	@test -f .env || { echo "Copy .env.example to .env and fill it in first."; exit 1; }

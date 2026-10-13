@@ -74,7 +74,7 @@ stays queued (the scaler warns).
 | `runner.podAnnotations` / `podLabels` / `nodeSelector` / `tolerations` / `affinity` | empty | Runner pod scheduling and metadata; `nodeSelector` and `tolerations` also apply to reap Jobs. |
 | `scaler.enabled` | `true` | Scaler Deployment + RBAC. When on, the chart leaves the StatefulSet's `replicas` to it. |
 | `scaler.image.repository` / `.tag` / `.pullPolicy` | `sg-runner-scaler` / `dev` / `IfNotPresent` | Scaler image (Go, distroless, non-root). Empty repository = the runner image. |
-| `scaler.command` | `[]` | Empty = image entrypoint. `["/opt/sg-runner/scaler.sh"]` runs the shell scaler from the runner image. |
+| `scaler.command` | `[]` | Empty = image entrypoint. |
 | `scaler.replicas` | `1` | 2 is safe with leader election; > 1 without it fails rendering. |
 | `scaler.leaderElection.enabled` | `true` | `SCALER_LEADER_ELECT`; lease `<statefulset>-scaler`. Also switches the rollout to `RollingUpdate`. |
 | `scaler.min` | `1` | `SCALER_MIN`, ≥ 1 (SG pauses workflows without an ACTIVE runner). |
@@ -112,8 +112,7 @@ stays queued (the scaler warns).
   immutable on a StatefulSet.
 - **NetworkPolicy** covers runner pods, so workflow containers and agents
   alike (nested traffic leaves through the pod IP), and reap Job pods, which
-  the scaler labels `app.kubernetes.io/component: reaper` (`SCALER_REAP_POD_LABELS`;
-  the shell `scaler.sh` doesn't, only the Go scaler).
+  the scaler labels `app.kubernetes.io/component: reaper` (`SCALER_REAP_POD_LABELS`).
 - **IPv6 gap.** The policy is IPv4: it allows no IPv6 egress unless IPv6
   CIDRs are listed in `clusterCIDRs` (dual stack), which opens `::/0` except
   those and, with `blockMetadataIPv6`, the AWS IPv6 metadata endpoint. Other

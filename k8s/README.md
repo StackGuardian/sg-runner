@@ -117,12 +117,14 @@ itself: a customer's runner has no ECS permissions.
 
 Deregistering is explicit: `make deregister` wakes every parked runner (each
 state PVC) and deregisters them all; `make nuke` does that and deletes
-everything. Reaping runners parked for too long is up to the scaler (planned).
+everything. Runners parked longer than `SCALER_PARK_TTL` are reaped by the scaler.
 
 ## Autoscaling
 
-The chart's scaler Deployment ([`chart/sg-runner`](chart/sg-runner/README.md)) runs `scaler.sh`, a small loop that owns the runner
-StatefulSet's `replicas`. Every `SCALER_INTERVAL` (15s) it reads the runner
+The chart's scaler Deployment ([`chart/sg-runner`](chart/sg-runner/README.md))
+runs the scaler ([`scaler/`](scaler), Go; image built with `make build-scaler`),
+a loop that owns the runner StatefulSet's `replicas`. Every `SCALER_INTERVAL`
+(15s) it reads the runner
 group from SG with the node token (`?getActiveWorkflows=true`) and:
 
 | Rule | When | Action |
@@ -139,8 +141,27 @@ Replicas stay within `SCALER_MIN` (≥ 1: SG pauses workflows without an
 While an awake runner hasn't connected yet, the scaler waits instead of
 deciding again, for up to `SCALER_SETTLE_TIMEOUT` (300s); a runner that still
 isn't connected by then (failed registration, crash loop) is left out of the
-decision and reported every loop, so one broken pod can't freeze scaling. Its Role covers only this StatefulSet's scale, PVCs and reap
-Jobs; runner pods have no Kubernetes API access.
+decision, reported and set `DRAINING`, so one broken pod can't freeze scaling.
+
+A parked runner that SG still shows `ACTIVE` (its pod went away without the
+`preStop` drain: node loss, force delete) is set `DRAINING` too. Drains the
+scaler does are marked on the runner's state PVC
+(`sg-runner.stackguardian.io/drained-by-scaler`), and the scaler sets the
+runner `ACTIVE` again once it's awake and connected. Drains from anyone else
+(SG UI, an autoscaler) leave no mark and stick.
+
+Two replicas share a leader Lease (`<statefulset>-scaler`;
+`SCALER_LEADER_ELECT=false` turns it off). The idle, stuck and settle timers
+are kept as annotations on the StatefulSet, so a restart or a new leader
+carries on where the last one stopped. On SG or Kubernetes API errors a loop
+decides nothing and the next one waits longer (doubling, up to 5 minutes).
+Decisions and warnings (`StuckQueue`, `RunnerNotConnected`, `SGUnreachable`,
+`ReapFailed`, ...) are Events on the StatefulSet; Prometheus metrics
+(`sg_runner_scaler_*`), `/healthz` and `/readyz` are served on port 9090.
+
+Its Role covers only this StatefulSet, its scale and annotations, PVCs, reap
+Jobs, Events and its Lease; runner pods have no Kubernetes API access.
+Reap Job pods take extra labels, pull secrets, node selector and tolerations from `SCALER_REAP_POD_LABELS`, `SCALER_REAP_IMAGE_PULL_SECRETS`, `SCALER_REAP_NODE_SELECTOR` and `SCALER_REAP_TOLERATIONS`.
 
 ## Known gaps
 
