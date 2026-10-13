@@ -149,8 +149,9 @@ scaler:
   interval: 15
   extraEnv: []
 
-  # The scaler always listens on this port (container port `metrics`):
-  # /metrics, plus /healthz and /readyz for the probes.
+  # The scaler always listens on this port (container port `metrics`,
+  # SCALER_METRICS_ADDR=:<port>): /metrics, plus /healthz and /readyz for the
+  # probes.
   # metrics.enabled only adds a Service (and optionally a ServiceMonitor).
   metrics:
     enabled: false
@@ -189,7 +190,11 @@ scaler:
 # Egress isolation for runner pods. Nested workflow traffic leaves through the
 # pod IP, so this covers workflow containers and the agents alike. Needs a CNI
 # that enforces NetworkPolicy (Calico, Cilium, ...); others silently ignore it.
-# Reap Job pods aren't covered (they carry no runner labels).
+# Also covers reap Job pods (component=reaper, set by the scaler).
+#
+# IPv4 by default: no IPv6 egress is allowed at all. On dual-stack clusters,
+# list the IPv6 pod/service/node CIDRs in clusterCIDRs too, which opens IPv6
+# egress except those.
 networkPolicy:
   enabled: false
   # Pod, service and node CIDRs, plus the Kubernetes API endpoint if it's
@@ -197,6 +202,9 @@ networkPolicy:
   clusterCIDRs: []
   # Block the cloud metadata endpoint (169.254.169.254).
   blockMetadata: true
+  # Also block AWS's IPv6 metadata endpoint (fd00:ec2::254). Only matters when
+  # IPv6 egress is open (IPv6 entries in clusterCIDRs).
+  blockMetadataIPv6: false
   # Allow DNS to the cluster resolver. Off = workflows and agents must resolve
   # through an external resolver.
   allowClusterDNS: true
