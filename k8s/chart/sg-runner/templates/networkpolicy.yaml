@@ -1,0 +1,71 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $np := .Values.networkPolicy }}
+{{- $component := dict "ctx" . "component" "runner" }}
+{{- $v4 := list }}
+{{- $v6 := list }}
+{{- range $np.clusterCIDRs }}
+{{- if contains ":" . }}{{ $v6 = append $v6 . }}{{ else }}{{ $v4 = append $v4 . }}{{ end }}
+{{- end }}
+{{- if not $v4 }}
+{{- fail "networkPolicy.clusterCIDRs needs the IPv4 pod, service and node CIDRs (and the API server endpoint if outside them) with networkPolicy.enabled=true" }}
+{{- end }}
+# Workflow isolation. Nested workflow traffic leaves through the runner pod's
+# IP, so this policy covers workflow containers and the agents alike (and reap
+# Job pods, labelled component=reaper by the scaler): no
+# cluster-internal destinations, no cloud metadata, everything else (SG API,
+# AWS endpoints, VCS, registries, workflow targets) allowed.
+# Needs a CNI that enforces NetworkPolicy (Calico, Cilium, ...); others ignore
+# it without warning.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sg-runner.runnerName" . }}
+  labels:
+    {{- include "sg-runner.labels" $component | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "sg-runner.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+    matchExpressions:
+      - { key: app.kubernetes.io/component, operator: In, values: [runner, reaper] }
+  policyTypes: ["Ingress", "Egress"]
+  # No ingress rules: runners only dial out.
+  ingress: []
+  egress:
+    {{- if $np.allowClusterDNS }}
+    # Cluster DNS only; the CIDR rule below excludes it otherwise.
+    - to:
+        - {{ toYaml $np.dnsSelector | nindent 10 | trim }}
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    {{- end }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- range $v4 }}
+              - {{ . }}
+              {{- end }}
+              {{- if $np.blockMetadata }}
+              - 169.254.169.254/32
+              {{- end }}
+    {{- /* IPv6 egress only when the cluster's IPv6 CIDRs are listed (dual
+    stack); otherwise this policy allows no IPv6 at all. */}}
+    {{- if $v6 }}
+    - to:
+        - ipBlock:
+            cidr: ::/0
+            except:
+              {{- range $v6 }}
+              - {{ . }}
+              {{- end }}
+              {{- if $np.blockMetadataIPv6 }}
+              - fd00:ec2::254/128
+              {{- end }}
+    {{- end }}
+    {{- with $np.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

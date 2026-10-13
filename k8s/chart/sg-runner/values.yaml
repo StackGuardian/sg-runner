@@ -1,0 +1,226 @@
+# sg-runner chart (prototype). Each runner StatefulSet replica is one
+# registered StackGuardian Private Runner; the scaler owns the replica count.
+#
+# The namespace must allow privileged pods (nested Docker):
+#   pod-security.kubernetes.io/enforce: privileged
+# The chart doesn't create the namespace.
+
+nameOverride: ""
+# Also renames the runner StatefulSet, so its pods and PVCs. Changing it on an
+# existing install orphans the runners registered from the old PVCs.
+fullnameOverride: ""
+
+# Runner image (register, dockerd, ssm-agent, ecs-agent; reap Jobs too).
+image:
+  repository: sg-runner-k8s
+  # Empty = the chart's appVersion.
+  tag: dev
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# SG credentials: the runner group's node token, used to register, set runner
+# status and (scaler) read the runner group. Set exactly one of existingSecret
+# or create=true.
+credentials:
+  # Secret with keys SG_NODE_TOKEN, SG_ORGANIZATION, SG_RUNNER_GROUP and
+  # optionally SG_BASE_API (runner.sh and scaler.sh read these file names).
+  existingSecret: ""
+  # Let the chart create the Secret from the values below. They end up in the
+  # Helm release (a Secret in the namespace); prefer existingSecret.
+  create: false
+  nodeToken: ""
+  organization: ""
+  runnerGroup: ""
+  # Empty = the runner's default (https://api.app.stackguardian.io/api/v1).
+  apiUrl: ""
+
+runner:
+  # Only used with scaler.enabled=false. With the scaler the chart leaves
+  # spec.replicas out: the scaler owns it, and upgrades keep the live value.
+  replicas: 1
+
+  # Size of the dockerd container, where workflows run. Its limits are what the
+  # runner advertises to SG: CPU = limits.cpu, memory = limits.memory - 256 MiB
+  # (SG_DOCKERD_OVERHEAD_MIB, left for dockerd itself).
+  #
+  #   preset   requests          limits (advertised)   default workflows
+  #   small    1 CPU / 2Gi       2 CPU / 4Gi           2
+  #   medium   2 CPU / 4Gi       4 CPU / 8Gi           4
+  #   large    4 CPU / 8Gi       8 CPU / 16Gi          8
+  #   custom   runner.resources (limits.cpu and limits.memory required)
+  #
+  # A workflow reserves 0.5 vCPU / 512 MiB for its run controller plus its own
+  # resource setting (default 0.5 vCPU / 1 GiB), so a default workflow takes
+  # 1 vCPU / 1.5 GiB; the presets are CPU-bound. The runner must be at least
+  # the largest workflow + 0.5 vCPU / 512 MiB, else that workflow stays queued
+  # forever (the scaler warns about it).
+  #
+  # Requests are half the limits, so nodes can be overcommitted; set equal
+  # requests and limits with `custom` to guarantee the advertised capacity.
+  size: small
+  # Used with size=custom, e.g.:
+  #   requests: { cpu: "3", memory: 6Gi }
+  #   limits: { cpu: "3", memory: 6Gi }
+  resources: {}
+
+  # Scratch space for workflow runs. The run controller and every step
+  # bind-mount /var/tmp/workspace from the Docker daemon they run on, i.e. the
+  # dockerd container. Without a volume it lands in the container's writable
+  # layer. An emptyDir matches a VM (scratch, gone when the pod goes).
+  workspace:
+    # The kubelet evicts the pod (and with it running workflows) when the
+    # workspace grows past this.
+    sizeLimit: 20Gi
+    # ephemeral-storage request on dockerd, so the scheduler places runners on
+    # nodes with room for workspaces. Empty = no request.
+    request: 2Gi
+
+  storage:
+    # Runner identity (ecs.config, SSM registration, agent state). Survives
+    # restarts and parking so a runner doesn't register again.
+    state:
+      size: 1Gi
+      # Empty = the cluster's default StorageClass.
+      storageClassName: ""
+    # Docker data root (/var/lib/docker): images cached across parking.
+    docker:
+      size: 20Gi
+      storageClassName: ""
+
+  dockerd:
+    # Nested Docker needs a privileged container for now (see docs/TODO.md).
+    securityContext:
+      privileged: true
+
+  # Upper bound on how long a terminating runner waits for running workflows
+  # (the ecs-agent preStop drain) before it is killed.
+  terminationGracePeriodSeconds: 3600
+
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+scaler:
+  # Deployment that owns the runner StatefulSet's replicas: wakes parked
+  # runners or adds new ones when workflows queue, parks idle ones, and reaps
+  # runners parked longer than parkTTL.
+  enabled: true
+
+  # The scaler's own image (Go, distroless, non-root). Empty repository = the
+  # runner image, which still ships scaler.sh (then set
+  # command: ["/opt/sg-runner/scaler.sh"] and relax the securityContext).
+  image:
+    repository: sg-runner-scaler
+    # Empty = the chart's appVersion.
+    tag: dev
+    pullPolicy: IfNotPresent
+  # Empty = the image's entrypoint.
+  command: []
+
+  # Two replicas are safe with leader election: only the lease holder scales,
+  # the other takes over when it goes away. Without it, keep 1 (two scalers
+  # would fight over replicas).
+  replicas: 1
+  leaderElection:
+    # Lease <runner StatefulSet>-scaler in the release namespace.
+    enabled: true
+
+  # Runners kept awake. At least 1: SG pauses workflows while no runner is
+  # ACTIVE. 2 avoids that pause while a single runner restarts.
+  min: 1
+  # Also capped by the runner group's MaxNumberOfRunners.
+  max: 10
+  # % of awake runners' CPU or memory to keep free (warm spare); 0 = off.
+  headroomPct: 0
+  # Park the highest awake runner after it has been idle this long.
+  idleSeconds: 60
+  # Deregister runners parked longer than this (12h) and delete their PVCs.
+  parkTTL: 43200
+  # Queued workflows with an idle awake runner for this long are treated as
+  # too big for any runner: warn and stop scaling out for them.
+  stuckSeconds: 180
+  # How long to wait for a woken or new runner to connect before deciding
+  # without it.
+  settleTimeout: 300
+  # Seconds between scaling decisions.
+  interval: 15
+  extraEnv: []
+
+  # The scaler always listens on this port (container port `metrics`,
+  # SCALER_METRICS_ADDR=:<port>): /metrics, plus /healthz and /readyz for the
+  # probes.
+  # metrics.enabled only adds a Service (and optionally a ServiceMonitor).
+  metrics:
+    enabled: false
+    port: 9090
+    # Needs the Prometheus Operator CRDs; skipped when the API isn't there.
+    serviceMonitor:
+      enabled: false
+      interval: 30s
+      labels: {}
+
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { memory: 128Mi }
+  podAnnotations: {}
+  podLabels: {}
+  # The Go image is distroless and runs as non-root. runAsUser is explicit:
+  # the kubelet can't verify runAsNonRoot against a named USER (distroless
+  # `nonroot` = 65532). fsGroup makes the credentials Secret's files group-owned
+  # by that GID, so they're readable with mode 0440 (see the Deployment).
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# Egress isolation for runner pods. Nested workflow traffic leaves through the
+# pod IP, so this covers workflow containers and the agents alike. Needs a CNI
+# that enforces NetworkPolicy (Calico, Cilium, ...); others silently ignore it.
+# Also covers reap Job pods (component=reaper, set by the scaler).
+#
+# IPv4 by default: no IPv6 egress is allowed at all. On dual-stack clusters,
+# list the IPv6 pod/service/node CIDRs in clusterCIDRs too, which opens IPv6
+# egress except those.
+networkPolicy:
+  enabled: false
+  # Pod, service and node CIDRs, plus the Kubernetes API endpoint if it's
+  # outside them. Required when enabled: workflows must not reach the cluster.
+  clusterCIDRs: []
+  # Block the cloud metadata endpoint (169.254.169.254).
+  blockMetadata: true
+  # Also block AWS's IPv6 metadata endpoint (fd00:ec2::254). Only matters when
+  # IPv6 egress is open (IPv6 entries in clusterCIDRs).
+  blockMetadataIPv6: false
+  # Allow DNS to the cluster resolver. Off = workflows and agents must resolve
+  # through an external resolver.
+  allowClusterDNS: true
+  dnsSelector:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: kube-system
+    podSelector:
+      matchLabels:
+        k8s-app: kube-dns
+  # Extra egress rules (NetworkPolicyEgressRule list), added as-is.
+  extraEgress: []
+
+# Keeps node drains from evicting the last runner: SG pauses workflows while no
+# runner is ACTIVE. With a single awake runner it blocks drains until the
+# scaler wakes another; use scaler.min >= 2 alongside it.
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1

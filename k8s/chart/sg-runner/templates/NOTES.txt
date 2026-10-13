@@ -1,0 +1,41 @@
+{{- $sts := include "sg-runner.runnerName" . -}}
+{{- $ns := .Release.Namespace -}}
+sg-runner {{ .Chart.Version }} installed as StatefulSet {{ $ns }}/{{ $sts }} (size: {{ .Values.runner.size }}).
+
+The namespace must allow privileged pods (nested Docker); the chart doesn't
+create or label it:
+
+  kubectl label namespace {{ $ns }} pod-security.kubernetes.io/enforce=privileged
+
+Each replica registers one runner in the runner group on its first start.
+
+Runners:
+  kubectl -n {{ $ns }} get statefulset,pods -l app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=runner
+
+Parked runners are state PVCs without a pod (still registered in SG, shown as
+DRAINING and disconnected):
+  kubectl -n {{ $ns }} get pvc | grep '^state-{{ $sts }}-'
+{{- if .Values.scaler.enabled }}
+
+The scaler owns the replica count ({{ .Values.scaler.min }}..{{ .Values.scaler.max }}). Watch its decisions:
+  kubectl -n {{ $ns }} logs -f deploy/{{ include "sg-runner.scalerName" . }}
+{{- if .Values.scaler.leaderElection.enabled }}
+With several scaler replicas only the lease holder decides:
+  kubectl -n {{ $ns }} get lease {{ include "sg-runner.runnerName" . }}-scaler
+{{- end }}
+
+Don't `kubectl scale` the StatefulSet by hand; the scaler overrides it.
+{{- else }}
+
+Scaler disabled: the StatefulSet runs {{ .Values.runner.replicas }} replica(s). Scaling down parks runners,
+scaling up wakes them:
+  kubectl -n {{ $ns }} scale statefulset {{ $sts }} --replicas=N
+{{- end }}
+
+Uninstalling keeps the PVCs: runners stay registered in SG as parked. To
+remove them, deregister each runner first (see the chart README), then delete
+the PVCs.
+{{- if .Values.networkPolicy.enabled }}
+
+NetworkPolicy {{ $sts }} only takes effect with a CNI that enforces it.
+{{- end }}

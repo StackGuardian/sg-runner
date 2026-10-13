@@ -1,68 +1,85 @@
-# sg-runner Kubernetes prototype: each replica is one registered runner.
-# Namespace and the SG credentials Secret come from `make secret`.
+{{- $name := include "sg-runner.runnerName" . }}
+{{- $secret := include "sg-runner.credentialsSecretName" . }}
+{{- $image := include "sg-runner.image" . }}
+{{- $component := dict "ctx" . "component" "runner" }}
+# Each replica is one registered runner.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: sg-runner
-  namespace: sg-runner
+  name: {{ $name }}
+  labels:
+    {{- include "sg-runner.labels" $component | nindent 4 }}
 spec:
-  serviceName: sg-runner
-  # No replicas here: the scaler (scaler.yaml) owns them, and re-applying this
-  # manifest must not reset them. A new StatefulSet starts with 1.
+  serviceName: {{ $name }}
+  {{- if not .Values.scaler.enabled }}
+  replicas: {{ .Values.runner.replicas }}
+  {{- end }}
+  {{- /* With the scaler, no replicas: it owns them, and Helm's 3-way merge
+  keeps the live value on upgrade. A new StatefulSet starts with 1. */}}
   # Park and wake runners side by side, not one at a time (each park can wait
   # for running workflows).
   podManagementPolicy: Parallel
   selector:
     matchLabels:
-      app: sg-runner
+      {{- include "sg-runner.selectorLabels" $component | nindent 6 }}
   template:
     metadata:
+      # Selector labels only: a chart version label here would roll (drain)
+      # every runner on each chart upgrade.
       labels:
-        app: sg-runner
+        {{- include "sg-runner.selectorLabels" $component | nindent 8 }}
+        {{- with .Values.runner.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.runner.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       # Upper bound on how long a terminating runner waits for running
       # workflows (the ecs-agent preStop hook) before it is killed.
-      terminationGracePeriodSeconds: 3600
+      terminationGracePeriodSeconds: {{ .Values.runner.terminationGracePeriodSeconds }}
       initContainers:
         - name: register
-          image: sg-runner-k8s:dev
-          imagePullPolicy: IfNotPresent
+          image: {{ $image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ['register']
           # Only what registration needs.
           env:
             - name: SG_NODE_TOKEN
               valueFrom:
-                secretKeyRef: { name: sg-runner-credentials, key: SG_NODE_TOKEN }
+                secretKeyRef: { name: {{ $secret }}, key: SG_NODE_TOKEN }
             - name: SG_ORGANIZATION
               valueFrom:
-                secretKeyRef: { name: sg-runner-credentials, key: SG_ORGANIZATION }
+                secretKeyRef: { name: {{ $secret }}, key: SG_ORGANIZATION }
             - name: SG_RUNNER_GROUP
               valueFrom:
-                secretKeyRef: { name: sg-runner-credentials, key: SG_RUNNER_GROUP }
+                secretKeyRef: { name: {{ $secret }}, key: SG_RUNNER_GROUP }
             - name: SG_BASE_API
               valueFrom:
-                secretKeyRef: { name: sg-runner-credentials, key: SG_BASE_API, optional: true }
+                secretKeyRef: { name: {{ $secret }}, key: SG_BASE_API, optional: true }
           volumeMounts:
             - { name: state, mountPath: /etc/ecs, subPath: ecs-config }
             - { name: state, mountPath: /var/lib/amazon/ssm, subPath: ssm }
-            - {
-                name: state,
-                mountPath: /var/log/registration,
-                subPath: registration,
-              }
+            - { name: state, mountPath: /var/log/registration, subPath: registration }
       containers:
         - name: dockerd
-          image: sg-runner-k8s:dev
-          imagePullPolicy: IfNotPresent
+          image: {{ $image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ['dockerd']
+          {{- with .Values.runner.dockerd.securityContext }}
           securityContext:
-            privileged: true
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           # Workflow containers run inside this container, so its limits are
           # what the ECS agent advertises (see SG_TASK_* on ecs-agent).
           resources:
-            requests: { cpu: '1', memory: 2Gi }
-            limits: { cpu: '2', memory: 4Gi }
+            {{- include "sg-runner.dockerdResources" . | nindent 12 }}
           lifecycle:
             preStop:
               exec:
@@ -76,9 +93,12 @@ spec:
             - { name: docker, mountPath: /var/lib/docker }
             # Same path the agent's ECS_HOST_DATA_DIR points at.
             - { name: state, mountPath: /var/lib/ecs/data, subPath: ecs-data }
+            # Run controller and step containers bind-mount this path from
+            # this daemon's filesystem; keep it off the writable layer.
+            - { name: workspace, mountPath: /var/tmp/workspace }
         - name: ssm-agent
-          image: sg-runner-k8s:dev
-          imagePullPolicy: IfNotPresent
+          image: {{ $image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ['ssm-agent']
           # Keeps rotating the agent's credentials while a drain runs.
           lifecycle:
@@ -90,23 +110,17 @@ spec:
             - { name: aws-creds, mountPath: /root/.aws }
             - { name: docker-run, mountPath: /var/run }
         - name: ecs-agent
-          image: sg-runner-k8s:dev
-          imagePullPolicy: IfNotPresent
+          image: {{ $image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ['ecs-agent']
           env:
             # Rounded up to whole CPUs.
             - name: SG_TASK_CPU_LIMIT
               valueFrom:
-                resourceFieldRef:
-                  { containerName: dockerd, resource: limits.cpu, divisor: '1' }
+                resourceFieldRef: { containerName: dockerd, resource: limits.cpu, divisor: '1' }
             - name: SG_TASK_MEMORY_LIMIT_MIB
               valueFrom:
-                resourceFieldRef:
-                  {
-                    containerName: dockerd,
-                    resource: limits.memory,
-                    divisor: 1Mi,
-                  }
+                resourceFieldRef: { containerName: dockerd, resource: limits.memory, divisor: 1Mi }
           lifecycle:
             preStop:
               exec:
@@ -125,36 +139,58 @@ spec:
             - { name: aws-creds, mountPath: /rotatingcreds, readOnly: true }
             - { name: docker-run, mountPath: /var/run }
             # Setting the runner's status through SG needs the SG credentials.
-            - {
-                name: sg-credentials,
-                mountPath: /etc/sg-runner/credentials,
-                readOnly: true,
-              }
+            - { name: sg-credentials, mountPath: /etc/sg-runner/credentials, readOnly: true }
       volumes:
         - name: docker-run
           emptyDir: {}
         - name: aws-creds
           emptyDir:
             medium: Memory
+        - name: workspace
+          {{- if .Values.runner.workspace.sizeLimit }}
+          emptyDir:
+            sizeLimit: {{ .Values.runner.workspace.sizeLimit }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
         - name: sg-credentials
           secret:
-            secretName: sg-runner-credentials
+            secretName: {{ $secret }}
             defaultMode: 0400
+      {{- with .Values.runner.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.runner.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.runner.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
   volumeClaimTemplates:
     # Runner identity (ecs.config, SSM registration, agent state): survives
     # pod restarts so the runner doesn't re-register. Kept on scale-down too:
-    # a failed deregistration then leaves the identity for the next scale-up.
+    # a parked runner wakes from it. Not managed by Helm, so uninstall keeps it.
     - metadata:
         name: state
       spec:
         accessModes: ['ReadWriteOnce']
+        {{- with .Values.runner.storage.state.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
         resources:
           requests:
-            storage: 1Gi
+            storage: {{ .Values.runner.storage.state.size }}
+    # Docker data root: the image cache survives parking.
     - metadata:
         name: docker
       spec:
         accessModes: ['ReadWriteOnce']
+        {{- with .Values.runner.storage.docker.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
         resources:
           requests:
-            storage: 20Gi
+            storage: {{ .Values.runner.storage.docker.size }}
