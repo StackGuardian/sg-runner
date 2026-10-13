@@ -40,6 +40,30 @@ make nuke              # deregister, then delete StatefulSet, PVCs, namespace
 `make nuke` deregisters first and stops if that fails: deleting the PVC without
 deregistering would leave a dead runner in the runner group.
 
+Image versions are pinned as build args in `Dockerfile` (`ECS_AGENT_VERSION`,
+`SSM_AGENT_VERSION`, `DOCKER_VERSION`). `make build-multiarch` builds
+`linux/amd64` and `linux/arm64` on a dedicated buildx builder and keeps only
+the build cache; `PUSH=1 REGISTRY=<registry/namespace>` pushes the result.
+
+## Docker cleanup
+
+On a VM, `main.sh prune` runs from cron. In the pod, the `dockerd` container
+prunes the nested Docker itself: once at start (a runner may park before a
+full interval) and then every `SG_PRUNE_INTERVAL_SECONDS`.
+
+| Env (on `dockerd`) | Default | |
+|---|---|---|
+| `SG_PRUNE_INTERVAL_SECONDS` | `14400` (4h, as the VM cron) | `0` turns cleanup off |
+| `SG_PRUNE_UNTIL` | `24h` | minimum age of stopped containers, images and build cache it removes |
+| `SG_PRUNE_IMAGES_ABOVE_PCT` | `70` | unused images go only once the Docker volume is this full (`0`: every run) |
+
+Every sweep that can remove a container is age-guarded: an unguarded prune
+deletes containers the ECS agent created but hasn't started yet. Volumes are
+pruned on their own (`docker volume prune`). Unused images are the wake-up
+cache, so they're kept until the volume fills up; Docker filters images by
+creation time, not last use, so a prune under pressure removes every unused
+image older than `SG_PRUNE_UNTIL`.
+
 ## Resource sizing
 
 The ECS agent sizes the runner from the node, not the pod: CPU is
