@@ -73,8 +73,10 @@ stays queued (the scaler warns).
 | `runner.terminationGracePeriodSeconds` | `3600` | Max wait for running workflows when a runner stops. |
 | `runner.podAnnotations` / `podLabels` / `nodeSelector` / `tolerations` / `affinity` | empty | Runner pod scheduling and metadata. |
 | `scaler.enabled` | `true` | Scaler Deployment + RBAC. When on, the chart leaves the StatefulSet's `replicas` to it. |
-| `scaler.image.repository` / `.tag` / `.pullPolicy` | `""` / `""` / `IfNotPresent` | Empty repository = the runner image. |
-| `scaler.command` | `["/opt/sg-runner/scaler.sh"]` | Scaler entrypoint. |
+| `scaler.image.repository` / `.tag` / `.pullPolicy` | `sg-runner-scaler` / `dev` / `IfNotPresent` | Scaler image (Go, distroless, non-root). Empty repository = the runner image. |
+| `scaler.command` | `[]` | Empty = image entrypoint. `["/opt/sg-runner/scaler.sh"]` runs the shell scaler from the runner image. |
+| `scaler.replicas` | `1` | 2 is safe with leader election; > 1 without it fails rendering. |
+| `scaler.leaderElection.enabled` | `true` | `SCALER_LEADER_ELECT`; lease `<statefulset>-scaler`. Also switches the rollout to `RollingUpdate`. |
 | `scaler.min` | `1` | `SCALER_MIN`, ≥ 1 (SG pauses workflows without an ACTIVE runner). |
 | `scaler.max` | `10` | `SCALER_MAX`, also capped by `MaxNumberOfRunners`. |
 | `scaler.headroomPct` | `0` | `SCALER_HEADROOM_PCT`: capacity to keep free, 0 = off. |
@@ -84,10 +86,13 @@ stays queued (the scaler warns).
 | `scaler.settleTimeout` | `300` | `SCALER_SETTLE_TIMEOUT`: wait for a runner to connect. |
 | `scaler.interval` | `15` | `SCALER_INTERVAL`: seconds between decisions. |
 | `scaler.extraEnv` | `[]` | Extra env vars for the scaler. |
-| `scaler.metrics.enabled` / `.port` | `false` / `9090` | Container port `metrics` and a Service. |
+| `scaler.metrics.port` | `9090` | Container port `metrics`, always on: `/metrics`, `/healthz` (liveness), `/readyz` (readiness). |
+| `scaler.metrics.enabled` | `false` | Adds a metrics Service. |
 | `scaler.metrics.serviceMonitor.enabled` / `.interval` / `.labels` | `false` / `30s` / `{}` | ServiceMonitor, only if `monitoring.coreos.com/v1` is served. |
 | `scaler.resources` | 10m / 32Mi, limit 128Mi | |
-| `scaler.podSecurityContext` / `securityContext` / scheduling | empty | |
+| `scaler.podSecurityContext` | non-root 65532, `fsGroup` 65532, seccomp `RuntimeDefault` | `fsGroup` + Secret mode `0440` let the non-root scaler read the credentials. |
+| `scaler.securityContext` | read-only root FS, no privilege escalation, drop `ALL` | |
+| `scaler.podAnnotations` / `podLabels` / scheduling | empty | |
 | `networkPolicy.enabled` | `false` | Egress isolation for runner pods; needs an enforcing CNI. |
 | `networkPolicy.clusterCIDRs` | `[]` | Pod, service, node CIDRs (+ API endpoint). Required when enabled. |
 | `networkPolicy.blockMetadata` | `true` | Deny `169.254.169.254/32`. |
