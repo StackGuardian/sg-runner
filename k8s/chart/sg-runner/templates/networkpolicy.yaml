@@ -1,0 +1,48 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $np := .Values.networkPolicy }}
+{{- $component := dict "ctx" . "component" "runner" }}
+{{- if not $np.clusterCIDRs }}
+{{- fail "networkPolicy.clusterCIDRs is required with networkPolicy.enabled=true: list the pod, service and node CIDRs (and the API server endpoint if outside them)" }}
+{{- end }}
+# Workflow isolation. Nested workflow traffic leaves through the runner pod's
+# IP, so this policy covers workflow containers and the agents alike: no
+# cluster-internal destinations, no cloud metadata, everything else (SG API,
+# AWS endpoints, VCS, registries, workflow targets) allowed.
+# Needs a CNI that enforces NetworkPolicy (Calico, Cilium, ...); others ignore
+# it without warning.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sg-runner.runnerName" . }}
+  labels:
+    {{- include "sg-runner.labels" $component | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "sg-runner.selectorLabels" $component | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  # No ingress rules: runners only dial out.
+  ingress: []
+  egress:
+    {{- if $np.allowClusterDNS }}
+    # Cluster DNS only; the CIDR rule below excludes it otherwise.
+    - to:
+        - {{ toYaml $np.dnsSelector | nindent 10 | trim }}
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    {{- end }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- range $np.clusterCIDRs }}
+              - {{ . }}
+              {{- end }}
+              {{- if $np.blockMetadata }}
+              - 169.254.169.254/32
+              {{- end }}
+    {{- with $np.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

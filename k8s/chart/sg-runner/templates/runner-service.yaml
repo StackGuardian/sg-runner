@@ -1,0 +1,14 @@
+{{- $component := dict "ctx" . "component" "runner" }}
+# Headless Service backing the StatefulSet's serviceName. Runners need no
+# inbound traffic; it gives pods their <pod>.<service> FQDN, which the scaler
+# uses to map SG runners (by hostname) to ordinals.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "sg-runner.runnerName" . }}
+  labels:
+    {{- include "sg-runner.labels" $component | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "sg-runner.selectorLabels" $component | nindent 4 }}

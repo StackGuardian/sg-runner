@@ -1,0 +1,97 @@
+{{- if .Values.scaler.enabled }}
+{{- $s := .Values.scaler }}
+{{- $name := include "sg-runner.scalerName" . }}
+{{- $component := dict "ctx" . "component" "scaler" }}
+# Scaler for the runner StatefulSet (see k8s/scaler.sh). It owns spec.replicas.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "sg-runner.labels" $component | nindent 4 }}
+spec:
+  # One decision-maker: two scalers would fight over replicas.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "sg-runner.selectorLabels" $component | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "sg-runner.selectorLabels" $component | nindent 8 }}
+        {{- with $s.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $s.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ $name }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $s.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: scaler
+          image: {{ include "sg-runner.scalerImage" . }}
+          imagePullPolicy: {{ $s.image.pullPolicy }}
+          {{- with $s.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $s.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            - { name: SCALER_STATEFULSET, value: {{ include "sg-runner.runnerName" . | quote }} }
+            - { name: SCALER_MIN, value: {{ $s.min | quote }} }
+            - { name: SCALER_MAX, value: {{ $s.max | quote }} }
+            # % of awake runners' capacity to keep free (warm spare); 0 = off.
+            - { name: SCALER_HEADROOM_PCT, value: {{ $s.headroomPct | quote }} }
+            - { name: SCALER_IDLE_SECONDS, value: {{ $s.idleSeconds | quote }} }
+            - { name: SCALER_PARK_TTL, value: {{ $s.parkTTL | quote }} }
+            - { name: SCALER_STUCK_SECONDS, value: {{ $s.stuckSeconds | quote }} }
+            - { name: SCALER_SETTLE_TIMEOUT, value: {{ $s.settleTimeout | quote }} }
+            - { name: SCALER_INTERVAL, value: {{ $s.interval | quote }} }
+            # Reap Jobs run the runner image with the credentials Secret.
+            - { name: SCALER_IMAGE, value: {{ include "sg-runner.image" . | quote }} }
+            - { name: SCALER_CREDENTIALS_SECRET, value: {{ include "sg-runner.credentialsSecretName" . | quote }} }
+            {{- with $s.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if $s.metrics.enabled }}
+          ports:
+            - { name: metrics, containerPort: {{ $s.metrics.port }}, protocol: TCP }
+          {{- end }}
+          {{- with $s.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - { name: sg-credentials, mountPath: /etc/sg-runner/credentials, readOnly: true }
+      volumes:
+        - name: sg-credentials
+          secret:
+            secretName: {{ include "sg-runner.credentialsSecretName" . }}
+            defaultMode: 0400
+      {{- with $s.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $s.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $s.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
