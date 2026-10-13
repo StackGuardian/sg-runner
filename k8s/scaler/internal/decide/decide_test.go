@@ -466,3 +466,24 @@ func TestStateRoundTrip(t *testing.T) {
 		t.Errorf("bad annotations decoded to %+v", bad)
 	}
 }
+
+// A woken runner the scaler reactivates this loop counts as ACTIVE: an
+// idle one takes the queued workflow, so no other runner is woken.
+func TestReactivatedRunnerCountsAsActive(t *testing.T) {
+	r := idle(1)
+	r.Status = StatusDraining
+	o := obs(0, 2, 1, full(0), r)
+	o.Claims[1] = Claim{Name: claimName(1), DrainedByScaler: true}
+	d := Decide(cfg(), o, State{})
+	if d.Scale != ScaleNone || len(d.StatusChanges) != 1 || d.StatusChanges[0].Status != StatusActive {
+		t.Errorf("got %v (%s) changes=%+v", d.Scale, d.Why, d.StatusChanges)
+	}
+	if o.Runners[1].Status != StatusDraining {
+		t.Error("Decide modified the observation")
+	}
+	// Drained by someone else: it stays DRAINING and doesn't count.
+	o.Claims[1] = Claim{Name: claimName(1)}
+	if d := Decide(cfg(), o, State{}); d.Scale != ScaleOut {
+		t.Errorf("want scale out past a runner drained on purpose, got %v", d.Scale)
+	}
+}
