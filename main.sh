@@ -328,6 +328,12 @@ EOF
 #}}}: api_call
 
 update_runner_group() { #{{{
+  # Best-effort report, sent at most once per error: api_call reports its own
+  # failures through err(), which would call back in here and retry until the
+  # stack overflows (one authenticated request per round) whenever the API is
+  # unreachable. The guard is dynamically scoped, so nested calls see it.
+  [[ -n "${REPORTING_RUNNER_GROUP_ERROR:-}" ]] && return 0
+  local REPORTING_RUNNER_GROUP_ERROR=1
   local err_msg ip_addr payload url
   url="${SG_BASE_API}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/"
 
@@ -344,11 +350,15 @@ update_runner_group() { #{{{
     --arg command "${0} $*" \
     '{RunnerRegistrationErrors: {($ip): {RunnerId: $runner_id, error: $error, timestamp: $timestamp, command: $command}}}')
 
-  if api_call "PATCH" "$url" "$payload"; then
+  # Subshell: api_call exits on an empty response, and a failed report must
+  # not end a caller that only meant to log a non-fatal error.
+  if (api_call "PATCH" "$url" "$payload"); then
     debug "updated runner group with error msg"
   else
     debug "failed to update runner group with error msg"
   fi
+  # debug() returns non-zero when --debug is off; a report never fails err().
+  return 0
 }
 #}}}: update_runner_group
 
