@@ -27,6 +27,8 @@ SCALER=sg-runner-scaler
 SECRET=sg-runner-credentials
 CHART=k8s/chart/sg-runner
 TIMEOUT=${TIMEOUT:-240}
+# Failed SG API calls one register run may make (see the register step).
+MAX_API_ATTEMPTS=3
 # Distinctive, so finding it in any log means a credential leaked.
 TOKEN=ci-dummy-node-token-6f1d3c9a
 SA=system:serviceaccount:$NS:$SCALER
@@ -101,20 +103,22 @@ cmd_run() {
 
   step "runner StatefulSet exists, register init container fails"
   k get "statefulset/$STS"
-  until_ok "register init container of $STS-0 to exit non-zero" register_failed
-  local logs code
-  code=$(register_exit_code)
-  logs=$(k logs "$STS-0" -c register --previous 2>/dev/null || k logs "$STS-0" -c register)
-  # Deduplicated: a failing API call can repeat the same error many times.
-  awk '!seen[$0]++' <<<"$logs" | tail -n 20
-  grep -Eq "Could not fetch data from API|API call failed" <<<"$logs" \
-    || fail "register exited $code, but not on the SG API call"
-  echo "register exited $code on the SG API call, as expected"
-  if ((code >= 128)); then
-    # err() reports through the API, whose failure calls err() again: with SG
-    # unreachable that recurses until bash crashes instead of exiting 1.
-    echo "::warning title=kind smoke::register crashed (exit $code, $(grep -c 'API call failed' <<<"$logs") failed API calls) instead of exiting cleanly"
-  fi
+  until_ok "a finished run of the register init container of $STS-0" register_finished
+  local logs=$REGISTER_LOG code=$REGISTER_CODE attempts
+  echo "$logs" | tail -n 20
+  # Exactly 1: die() on the failed SG call. 0 would mean it registered
+  # against nothing; >=128 means it crashed (e.g. error reporting recursing
+  # into itself while the API is down).
+  [[ $code == 1 ]] || fail "register exited $code, want 1"
+  grep -q "API call failed" <<<"$logs" \
+    || fail "register exited 1, but not on the SG API call"
+  grep -qF "$TOKEN" <<<"$logs" && fail "register printed the dummy SG_NODE_TOKEN"
+  # Each failed API call logs one "API call failed": the registration call
+  # plus at most one best-effort error report. More means it is retrying.
+  attempts=$(grep -c "API call failed" <<<"$logs")
+  ((attempts <= MAX_API_ATTEMPTS)) \
+    || fail "register made $attempts failed API calls in one run, want <= $MAX_API_ATTEMPTS"
+  echo "register exited 1 after $attempts failed API calls, as expected"
   endstep
 
   step "no credentials in logs or events"
@@ -152,18 +156,23 @@ scaler_saw_sg_unreachable() {
     | grep '"loop failed, skipping decisions"' | grep -q '"reason":"SGUnreachable"'
 }
 
-# Exit code of the register init container's last finished run, if any.
-register_exit_code() {
-  local status
+# Sets REGISTER_CODE and REGISTER_LOG from the register init container's last
+# finished run: the current container once it has terminated, else the
+# previous one (it restarts in a loop). Fails until a run has finished and its
+# log is retrievable.
+register_finished() {
+  local status prev=()
   status=$(k get pod "$STS-0" -o jsonpath='{.status.initContainerStatuses[?(@.name=="register")]}' 2>/dev/null) \
-    || return 0
-  jq -r '(.state.terminated // .lastState.terminated // {}).exitCode // empty' <<<"$status"
-}
-
-register_failed() {
-  local code
-  code=$(register_exit_code)
-  [[ -n $code && $code != 0 ]]
+    || return 1
+  REGISTER_CODE=$(jq -r '.state.terminated.exitCode // empty' <<<"$status")
+  if [[ -z $REGISTER_CODE ]]; then
+    REGISTER_CODE=$(jq -r '.lastState.terminated.exitCode // empty' <<<"$status")
+    prev=(--previous)
+  fi
+  [[ -n $REGISTER_CODE ]] || return 1
+  REGISTER_LOG=$(k logs "$STS-0" -c register "${prev[@]}" 2>/dev/null) || return 1
+  # Gone between the two calls (restarted again): try the next round.
+  [[ -n $REGISTER_LOG && $REGISTER_LOG != "unable to retrieve container logs"* ]]
 }
 
 can() { # <verb resource [flags]> <yes|no>
