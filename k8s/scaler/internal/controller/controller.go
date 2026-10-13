@@ -103,8 +103,9 @@ func (c *Controller) Run(ctx context.Context) error {
 	c.init()
 	c.Log.Info("scaling", "statefulset", c.Kube.StatefulSet, "namespace", c.Kube.Namespace,
 		"min", c.Config.Min, "max", c.Config.Max, "headroom_pct", c.Config.HeadroomPct,
-		"idle", c.Config.IdleAfter, "park_ttl", c.Config.ParkTTL, "stuck_after", c.Config.StuckAfter,
-		"settle_timeout", c.Config.SettleTimeout, "interval", c.Interval)
+		"idle", c.Config.IdleAfter.String(), "park_ttl", c.Config.ParkTTL.String(),
+		"stuck_after", c.Config.StuckAfter.String(), "settle_timeout", c.Config.SettleTimeout.String(),
+		"interval", c.Interval.String())
 	// Timers are re-read from the StatefulSet when (re)starting, e.g. after
 	// taking over the lease.
 	c.state = nil
@@ -164,7 +165,7 @@ func (c *Controller) Once(ctx context.Context) error {
 		reason = le.reason
 	}
 	c.Log.Error("loop failed, skipping decisions", "reason", reason, "err", err,
-		"consecutive_failures", c.failures, "next_in", c.Delay())
+		"consecutive_failures", c.failures, "next_in", c.Delay().String())
 	if c.failures >= c.FailureEvents && sts != nil {
 		c.warn(sts, decide.Event{Type: decide.EventWarning, Reason: reason, Key: reason,
 			Message: fmt.Sprintf("%d loops failed in a row, not scaling: %v", c.failures, err)})

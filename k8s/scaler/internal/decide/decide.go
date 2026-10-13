@@ -243,6 +243,33 @@ func Decide(cfg Config, obs Observation, prev State) Decision {
 	if obs.MaxRunners > 0 && obs.MaxRunners < d.Max {
 		d.Max = obs.MaxRunners
 	}
+
+	// Undo the scaler's own drains once the runner is awake and connected
+	// again; drains by anyone else (no mark) stick. Decide as if they were
+	// ACTIVE already, or the runner reactivated this loop looks busy and
+	// another one gets woken for nothing.
+	var reactivate []StatusChange
+	runners := make([]Runner, len(obs.Runners))
+	copy(runners, obs.Runners)
+	for i, r := range runners {
+		claim, ok := obs.Claims[r.Ordinal]
+		if !ok || !claim.DrainedByScaler || r.Ordinal >= replicas || !r.Connected || r.ID == "" {
+			continue
+		}
+		switch r.Status {
+		case StatusDraining:
+			reactivate = append(reactivate, StatusChange{
+				Ordinal: r.Ordinal, RunnerID: r.ID, Claim: claim.Name, Status: StatusActive,
+				Reason: "Reactivated",
+			})
+			runners[i].Status = StatusActive
+		case StatusActive:
+			// Active again (by someone, or a drain that failed): the mark is stale.
+			d.ClearDrainMarks = append(d.ClearDrainMarks, claim.Name)
+		}
+	}
+	obs.Runners = runners
+
 	d.ReservedPct = ReservedPct(obs.Runners, replicas)
 	d.FreePct = 100 - d.ReservedPct
 	d.Awake = replicas
@@ -400,22 +427,10 @@ func Decide(cfg Config, obs Observation, prev State) Decision {
 		})
 	}
 
-	// Undo the scaler's own drains once the runner is awake and connected
-	// again; drains by anyone else (no mark) stick.
-	for _, r := range obs.Runners {
-		claim, ok := obs.Claims[r.Ordinal]
-		if !ok || !claim.DrainedByScaler || r.Ordinal >= d.Replicas || !r.Connected || r.ID == "" {
-			continue
-		}
-		switch r.Status {
-		case StatusDraining:
-			d.StatusChanges = append(d.StatusChanges, StatusChange{
-				Ordinal: r.Ordinal, RunnerID: r.ID, Claim: claim.Name, Status: StatusActive,
-				Reason: "Reactivated",
-			})
-		case StatusActive:
-			// Active again (by someone, or a drain that failed): the mark is stale.
-			d.ClearDrainMarks = append(d.ClearDrainMarks, claim.Name)
+	// Not the runner parked this loop: its pod is on its way down.
+	for _, sc := range reactivate {
+		if sc.Ordinal < d.Replicas {
+			d.StatusChanges = append(d.StatusChanges, sc)
 		}
 	}
 
