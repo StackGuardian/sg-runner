@@ -13,6 +13,7 @@
 #   drain       ecs-agent preStop: DRAINING, wait for workflows, park (keep registration)
 #   wait-drained  dockerd/ssm-agent preStop: outlive the drain
 #   deregister  run via `kubectl exec -i`; reads SG credentials from stdin
+#   reap        scaler Job: deregister a runner parked too long, from its PVC
 #
 # main.sh is sourced for the API, config and network helpers; its
 # BASH_SOURCE guard keeps main() from running.
@@ -25,7 +26,7 @@ source /opt/sg-runner/main.sh
 readonly SSM_DIR="/var/lib/amazon/ssm"
 readonly SSM_REGISTRATION_FILE="${SSM_DIR}/Vault/Store/RegistrationKey"
 readonly AGENT_CREDS_FILE="/rotatingcreds/credentials"
-readonly SG_CRED_KEYS="SG_NODE_TOKEN SG_ORGANIZATION SG_RUNNER_GROUP SG_BASE_API SG_API_KEY"
+readonly SG_CRED_KEYS="SG_NODE_TOKEN SG_ORGANIZATION SG_RUNNER_GROUP SG_BASE_API"
 readonly SG_CREDS_DIR="/etc/sg-runner/credentials"
 # On the emptyDir shared by every container: tells the others the drain is over.
 readonly DRAINED_MARKER="/var/run/sg-runner-drained"
@@ -265,16 +266,22 @@ cmd_deregister() { #{{{
 }
 #}}}: cmd_deregister
 
+cmd_reap() { #{{{
+  # One-off Job the scaler starts for a runner parked longer than its TTL: the
+  # pod is gone, so deregister using the identity on the mounted state PVC.
+  load_sg_credentials_from_dir
+  deregister_runner
+}
+#}}}: cmd_reap
+
 
 
 sg_api() { #{{{
   # Usage: sg_api <method> <path> [payload]
-  # Calls the runner group's SG API with SG_API_KEY and prints the response.
-  # api_call authenticates with SG_NODE_TOKEN: swap in the key, in a subshell
-  # so the node token stays untouched for deregistration.
+  # Calls the runner group's SG API with the node token and prints the
+  # response. Subshell: api_call exits on an empty response.
   local method="$1" path="$2" payload="${3:-}"
   (
-    SG_NODE_TOKEN="$SG_API_KEY"
     if ! api_call "$method" \
       "${SG_BASE_API}/orgs/${SG_ORGANIZATION}/runnergroups/${SG_RUNNER_GROUP}/${path}" \
       "$payload"; then
@@ -301,13 +308,7 @@ set_sg_runner_status() { #{{{
 set_runner_status() { #{{{
   # Usage: set_runner_status DRAINING|ACTIVE
   # Only through SG: a customer's runner has no ECS permissions of its own.
-  # Without SG_API_KEY, shutdowns still wait for running workflows but can't
-  # stop new ones from being placed meanwhile.
   load_sg_credentials_from_dir
-  if [[ -z "${SG_API_KEY:-}" ]]; then
-    info "SG_API_KEY not set:" "skipping $1"
-    return 1
-  fi
   set_sg_runner_status "$1"
 }
 #}}}: set_runner_status
@@ -317,7 +318,6 @@ current_runner_status() { #{{{
   # The response holds secrets; only the status leaves this function.
   local runner_id
   load_sg_credentials_from_dir
-  [[ -n "${SG_API_KEY:-}" ]] || return 1
   runner_id="$(configured_runner_id)"
   sg_api GET "" | jq -r --arg r "$runner_id" \
     '.msg.ContainerInstances[]? | select(.runnerId == $r) | .status'
@@ -399,8 +399,9 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   drain) cmd_drain ;;
   wait-drained) cmd_wait_drained ;;
   deregister) cmd_deregister ;;
+  reap) cmd_reap ;;
   *)
-    echo "Usage: $(basename "$0") register|dockerd|ssm-agent|ecs-agent|drain|wait-drained|deregister" >&2
+    echo "Usage: $(basename "$0") register|dockerd|ssm-agent|ecs-agent|drain|wait-drained|deregister|reap" >&2
     exit 2
     ;;
   esac

@@ -34,19 +34,6 @@ runner pod covers workflow containers and the agents alike:
 - Needs a CNI that enforces NetworkPolicy (Calico, Cilium, ...). Check what
   OrbStack's CNI does before testing there.
 
-### Drain through SG: confirm the credentials
-
-The drain hook sets the runner `DRAINING`/`ACTIVE` through SG's
-`POST /orgs/{org}/runnergroups/{group}/runner_status/` (as
-`sg-runner-autoscaler` does), authenticated with `SG_API_KEY`. The runner
-never calls ECS itself: on QA the runner's instance role was denied
-`ecs:UpdateContainerInstancesState` anyway, and a customer's runner has no ECS
-permissions of its own.
-
-- Verify end to end on QA (DRAINING on shutdown, ACTIVE after restart).
-- Check whether the node token is accepted too; if so, drop the extra key.
-- Otherwise, document the least-privileged API key role that can call it.
-
 ### Drop privileged mode
 
 Spike results on OrbStack (k8s 1.36, cri-dockerd, arm64):

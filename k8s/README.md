@@ -86,14 +86,36 @@ it still counts against the runner group's `MaxNumberOfRunners`. Pods are
 managed in parallel (`podManagementPolicy: Parallel`), so several runners park
 or wake at once.
 
-Setting the status needs `SG_API_KEY` in `.env`: an SG API key allowed to
-manage the runner group. The runner never calls ECS itself; a customer's
-runner has no ECS permissions. Without the key it skips the status change and
-only waits for running workflows.
+Status changes use the runner group's node token, the same credential the
+runner registers with; no extra key is needed. The runner never calls ECS
+itself: a customer's runner has no ECS permissions.
 
 Deregistering is explicit: `make deregister` wakes every parked runner (each
 state PVC) and deregisters them all; `make nuke` does that and deletes
 everything. Reaping runners parked for too long is up to the scaler (planned).
+
+## Autoscaling
+
+`manifests/scaler.yaml` runs `scaler.sh`, a small loop that owns the runner
+StatefulSet's `replicas`. Every `SCALER_INTERVAL` (15s) it reads the runner
+group from SG with the node token (`?getActiveWorkflows=true`) and:
+
+| Rule | When | Action |
+|---|---|---|
+| Scale out | workflows queued and no awake runner fully idle | +1 runner: wakes a parked one, or registers a new one |
+| Headroom (optional) | less than `SCALER_HEADROOM_PCT` of awake runners' CPU or memory free (0 = off, the default) | +1 runner, kept as a warm spare |
+| Scale in | nothing queued, highest awake runner idle for `SCALER_IDLE_SECONDS` (300), the rest still keeps the headroom | park it (-1) |
+| Stuck queue | workflows queued while an awake runner sits fully idle for `SCALER_STUCK_SECONDS` (180) | warn, ignore the queue (it needs more than a runner pod offers) |
+| Reap | runner parked longer than `SCALER_PARK_TTL` (24h) | Job deregisters it from its PVC, then its PVCs are deleted |
+
+Replicas stay within `SCALER_MIN` (≥ 1: SG pauses workflows without an
+`ACTIVE` runner) and the lower of `SCALER_MAX` and the runner group's
+`MaxNumberOfRunners`. Runners map to ordinals by hostname (the pod's FQDN).
+While an awake runner hasn't connected yet, the scaler waits instead of
+deciding again, for up to `SCALER_SETTLE_TIMEOUT` (300s); a runner that still
+isn't connected by then (failed registration, crash loop) is left out of the
+decision and reported every loop, so one broken pod can't freeze scaling. Its Role covers only this StatefulSet's scale, PVCs and reap
+Jobs; runner pods have no Kubernetes API access.
 
 ## Known gaps
 
@@ -112,11 +134,15 @@ everything. Reaping runners parked for too long is up to the scaler (planned).
 - **Task cgroup limits off** (`ECS_ENABLE_TASK_CPU_MEM_LIMIT=false`): the agent
   can't create task cgroups from its container. Size the pod's resources instead.
 - **No proxy support** yet (`--http-proxy` path not wired).
-- **Draining needs an SG API key.** Without `SG_API_KEY`, shutdowns wait for
-  running workflows but new ones may still be placed, so a busy runner can
-  hold its pod for the full grace period. The key also lives in the pod.
-- **No automatic deregistration yet.** Parked runners stay registered until
-  `make deregister`; a TTL reaper belongs in the scaler.
+- **Workflows bigger than a runner pod never run.** A workflow reserves
+  0.5 vCPU / 512 MiB plus its own resource setting; if that exceeds the
+  `dockerd` container's limits it stays queued. The scaler detects it and warns
+  instead of waking every runner, but the pod size must cover the largest
+  workflow.
+- **Restarting a single runner pauses new workflows** for the ~10s it takes:
+  SG pauses workflows submitted while no runner is `ACTIVE`, and a StatefulSet
+  stops the old pod before starting the new one. Use `SCALER_MIN=2` where that
+  matters.
 - **Unverified: long parking.** Waking was tested after seconds. Whether SSM
   and ECS reconnect after hours or days parked isn't tested yet.
 - **Unverified: hard kills.** A pod killed without its `preStop` hook (node

@@ -210,10 +210,6 @@ network setup. Tested end to end on OrbStack Kubernetes against QA. See
 - **No task CPU/memory limits.** The agent can't create task cgroups from its
   container; the pod's resources are the only cap.
 - **No proxy support.** `--http-proxy` isn't wired up.
-- **Draining needs an SG API key.** Pods set themselves `DRAINING` through
-  SG's `runner_status` API on shutdown, which needs `SG_API_KEY`; without it,
-  a busy runner can keep receiving work and hold its pod for the full grace
-  period.
 - **Parked runners stay registered.** Scaling down parks runners (stopped,
   registration kept, woken in seconds); nothing deregisters them automatically
   yet. Long parking periods are untested.

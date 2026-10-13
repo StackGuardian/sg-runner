@@ -7,7 +7,8 @@ metadata:
   namespace: sg-runner
 spec:
   serviceName: sg-runner
-  replicas: 1
+  # No replicas here: the scaler (scaler.yaml) owns them, and re-applying this
+  # manifest must not reset them. A new StatefulSet starts with 1.
   # Park and wake runners side by side, not one at a time (each park can wait
   # for running workflows).
   podManagementPolicy: Parallel
@@ -28,7 +29,7 @@ spec:
           image: sg-runner-k8s:dev
           imagePullPolicy: IfNotPresent
           args: ['register']
-          # Only what registration needs; SG_API_KEY stays out of it.
+          # Only what registration needs.
           env:
             - name: SG_NODE_TOKEN
               valueFrom:
