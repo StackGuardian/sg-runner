@@ -15,7 +15,9 @@ ARG DOCKER_VERSION=27.5.1
 # SSM agent: .../SSMAgent/latest/VERSION names the current release.
 ARG SSM_AGENT_VERSION=3.3.5390.0
 
+# upgrade: pick up Debian security fixes newer than the base image.
 RUN apt-get update \
+  && apt-get upgrade -y \
   && apt-get install -y --no-install-recommends \
     bash ca-certificates curl jq iproute2 iptables procps xz-utils \
   && rm -rf /var/lib/apt/lists/*
