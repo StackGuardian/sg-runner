@@ -2,7 +2,10 @@
 {{- $s := .Values.scaler }}
 {{- $name := include "sg-runner.scalerName" . }}
 {{- $component := dict "ctx" . "component" "scaler" }}
-# Scaler for the runner StatefulSet (see k8s/scaler.sh). It owns spec.replicas.
+{{- if and (gt (int $s.replicas) 1) (not $s.leaderElection.enabled) }}
+{{- fail "scaler.replicas > 1 needs scaler.leaderElection.enabled: two scalers without a lease would fight over the runner StatefulSet's replicas" }}
+{{- end }}
+# Scaler for the runner StatefulSet. It owns spec.replicas.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -10,10 +13,15 @@ metadata:
   labels:
     {{- include "sg-runner.labels" $component | nindent 4 }}
 spec:
-  # One decision-maker: two scalers would fight over replicas.
-  replicas: 1
+  replicas: {{ $s.replicas }}
   strategy:
+    {{- if $s.leaderElection.enabled }}
+    # The lease keeps a single active scaler while old and new pods overlap.
+    type: RollingUpdate
+    {{- else }}
+    # No lease: never run two scalers at once.
     type: Recreate
+    {{- end }}
   selector:
     matchLabels:
       {{- include "sg-runner.selectorLabels" $component | nindent 6 }}
@@ -51,7 +59,11 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef: { fieldPath: metadata.namespace }
             - { name: SCALER_STATEFULSET, value: {{ include "sg-runner.runnerName" . | quote }} }
+            - { name: SCALER_LEADER_ELECT, value: {{ $s.leaderElection.enabled | quote }} }
             - { name: SCALER_MIN, value: {{ $s.min | quote }} }
             - { name: SCALER_MAX, value: {{ $s.max | quote }} }
             # % of awake runners' capacity to keep free (warm spare); 0 = off.
@@ -61,16 +73,23 @@ spec:
             - { name: SCALER_STUCK_SECONDS, value: {{ $s.stuckSeconds | quote }} }
             - { name: SCALER_SETTLE_TIMEOUT, value: {{ $s.settleTimeout | quote }} }
             - { name: SCALER_INTERVAL, value: {{ $s.interval | quote }} }
-            # Reap Jobs run the runner image with the credentials Secret.
+            # Reap Jobs run the runner image (not the scaler's) with the
+            # credentials Secret.
             - { name: SCALER_IMAGE, value: {{ include "sg-runner.image" . | quote }} }
             - { name: SCALER_CREDENTIALS_SECRET, value: {{ include "sg-runner.credentialsSecretName" . | quote }} }
             {{- with $s.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- if $s.metrics.enabled }}
+          # Serves /metrics, /healthz and /readyz.
           ports:
             - { name: metrics, containerPort: {{ $s.metrics.port }}, protocol: TCP }
-          {{- end }}
+          livenessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            periodSeconds: 20
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: metrics }
+            periodSeconds: 10
           {{- with $s.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -81,7 +100,10 @@ spec:
         - name: sg-credentials
           secret:
             secretName: {{ include "sg-runner.credentialsSecretName" . }}
-            defaultMode: 0400
+            # 0440, not the runners' 0400: the files are owned by root, and the
+            # scaler runs as a non-root UID. The pod's fsGroup makes them
+            # group-owned by its GID, so group read is what lets it read them.
+            defaultMode: 0440
       {{- with $s.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -109,13 +109,24 @@ scaler:
   # runners parked longer than parkTTL.
   enabled: true
 
-  # Defaults to the runner image (scaler.sh ships in it). Set when the scaler
-  # ships as its own image.
+  # The scaler's own image (Go, distroless, non-root). Empty repository = the
+  # runner image, which still ships scaler.sh (then set
+  # command: ["/opt/sg-runner/scaler.sh"] and relax the securityContext).
   image:
-    repository: ""
-    tag: ""
+    repository: sg-runner-scaler
+    # Empty = the chart's appVersion.
+    tag: dev
     pullPolicy: IfNotPresent
-  command: ["/opt/sg-runner/scaler.sh"]
+  # Empty = the image's entrypoint.
+  command: []
+
+  # Two replicas are safe with leader election: only the lease holder scales,
+  # the other takes over when it goes away. Without it, keep 1 (two scalers
+  # would fight over replicas).
+  replicas: 1
+  leaderElection:
+    # Lease <runner StatefulSet>-scaler in the release namespace.
+    enabled: true
 
   # Runners kept awake. At least 1: SG pauses workflows while no runner is
   # ACTIVE. 2 avoids that pause while a single runner restarts.
@@ -138,8 +149,9 @@ scaler:
   interval: 15
   extraEnv: []
 
-  # Prometheus metrics (being added to the scaler): containerPort 9090 named
-  # `metrics` and a Service.
+  # The scaler always listens on this port (container port `metrics`):
+  # /metrics, plus /healthz and /readyz for the probes.
+  # metrics.enabled only adds a Service (and optionally a ServiceMonitor).
   metrics:
     enabled: false
     port: 9090
@@ -154,8 +166,22 @@ scaler:
     limits: { memory: 128Mi }
   podAnnotations: {}
   podLabels: {}
-  podSecurityContext: {}
-  securityContext: {}
+  # The Go image is distroless and runs as non-root. runAsUser is explicit:
+  # the kubelet can't verify runAsNonRoot against a named USER (distroless
+  # `nonroot` = 65532). fsGroup makes the credentials Secret's files group-owned
+  # by that GID, so they're readable with mode 0440 (see the Deployment).
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
   nodeSelector: {}
   tolerations: []
   affinity: {}
