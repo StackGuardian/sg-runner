@@ -8,9 +8,19 @@ NS      := sg-runner
 POD     := sg-runner-0
 KUBECTL := kubectl --context $(CONTEXT) -n $(NS)
 
+# build-multiarch: builds every platform and keeps only the build cache unless
+# PUSH=1, which pushes $(REGISTRY)/$(IMAGE) (REGISTRY required). The default
+# docker driver can't build multi-platform without the containerd image store,
+# so it runs on its own docker-container builder, created on first use and
+# never made the default.
+PLATFORMS ?= linux/amd64,linux/arm64
+BUILDER   ?= sg-runner-multiarch
+PUSH      ?= 0
+REGISTRY  ?=
+
 .DEFAULT_GOAL := help
 
-.PHONY: help build secret up status logs deregister down nuke
+.PHONY: help build build-multiarch secret up status logs deregister down nuke
 
 help: ## List the available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -18,6 +28,20 @@ help: ## List the available targets
 
 build: ## Build the runner image (OrbStack k8s uses local images directly)
 	docker build -f Dockerfile -t $(IMAGE) ..
+
+build-multiarch: ## Build amd64 + arm64 (PLATFORMS); cache only, or PUSH=1 REGISTRY=... to push
+ifeq ($(PUSH),1)
+	@test -n "$(REGISTRY)" || { echo "PUSH=1 needs REGISTRY=<registry/namespace>."; exit 1; }
+endif
+	@docker buildx inspect $(BUILDER) >/dev/null 2>&1 \
+		|| docker buildx create --name $(BUILDER) --driver docker-container
+ifeq ($(PUSH),1)
+	docker buildx build --builder $(BUILDER) -f Dockerfile --platform $(PLATFORMS) \
+		-t $(REGISTRY)/$(IMAGE) --push ..
+else
+	docker buildx build --builder $(BUILDER) -f Dockerfile --platform $(PLATFORMS) \
+		--output type=cacheonly ..
+endif
 
 secret: ## Create the SG credentials Secret from .env
 	@test -f .env || { echo "Copy .env.example to .env and fill it in first."; exit 1; }
