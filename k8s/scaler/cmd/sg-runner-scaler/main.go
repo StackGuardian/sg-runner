@@ -83,11 +83,13 @@ func run(log *slog.Logger) error {
 	defer broadcaster.Shutdown()
 	recorder := broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "sg-runner-scaler"})
 
+	k := kube.New(client, cfg.Namespace, cfg.StatefulSet, cfg.Image, cfg.CredentialsSecret)
+	k.ReapPod = cfg.ReapPod
 	ctrl := &controller.Controller{
 		Config:   cfg.Rules,
 		Interval: cfg.Interval,
 		SG:       sg.New(creds, nil),
-		Kube:     kube.New(client, cfg.Namespace, cfg.StatefulSet, cfg.Image, cfg.CredentialsSecret),
+		Kube:     k,
 		Events:   recorder,
 		Metrics:  m,
 		Log:      log,

@@ -154,3 +154,27 @@ func TestReapJobLifecycle(t *testing.T) {
 		t.Fatalf("missing pvc should be fine: %v", err)
 	}
 }
+
+func TestReapJobPodOptions(t *testing.T) {
+	k := New(nil, ns, "sg-runner", "img:1", "creds")
+	k.ReapPod = ReapPodOptions{
+		Labels:           map[string]string{"np": "egress", "app": "hijack"},
+		ImagePullSecrets: []string{"regcred"},
+		NodeSelector:     map[string]string{"kubernetes.io/os": "linux"},
+		Tolerations:      []corev1.Toleration{{Key: "dedicated", Operator: corev1.TolerationOpExists}},
+	}
+	j := k.ReapJob(1)
+	ps := j.Spec.Template.Spec
+	for _, l := range []map[string]string{j.Labels, j.Spec.Template.Labels} {
+		if l["np"] != "egress" || l["app"] != "sg-runner-reaper" {
+			t.Errorf("labels %v", l)
+		}
+	}
+	if len(ps.ImagePullSecrets) != 1 || ps.ImagePullSecrets[0].Name != "regcred" ||
+		ps.NodeSelector["kubernetes.io/os"] != "linux" || len(ps.Tolerations) != 1 {
+		t.Errorf("pod spec %+v", ps)
+	}
+	if len(k.ReapPod.Labels) != 2 || k.ReapPod.Labels["app"] != "hijack" {
+		t.Error("ReapJob modified the options")
+	}
+}

@@ -3,13 +3,19 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
+
 	"github.com/StackGuardian/sg-runner/k8s/scaler/internal/decide"
+	"github.com/StackGuardian/sg-runner/k8s/scaler/internal/kube"
 )
 
 const serviceAccountNamespace = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
@@ -25,6 +31,8 @@ type Config struct {
 	Namespace         string
 	MetricsAddr       string
 	LeaderElect       bool
+	// ReapPod is extra pod settings for reap Jobs.
+	ReapPod kube.ReapPodOptions
 	// MinRaised reports a SCALER_MIN below 1 (MinGiven) raised to 1.
 	MinRaised bool
 	MinGiven  int
@@ -94,6 +102,8 @@ func Load(getenv func(string) string) (Config, error) {
 		errs = append(errs, fmt.Sprintf("SCALER_LEADER_ELECT=%q: want true or false", v))
 	}
 
+	c.ReapPod, errs = reapPod(str, errs)
+
 	c.Namespace = str("POD_NAMESPACE", "")
 	if c.Namespace == "" {
 		if b, err := os.ReadFile(serviceAccountNamespace); err == nil {
@@ -107,4 +117,57 @@ func Load(getenv func(string) string) (Config, error) {
 		return c, fmt.Errorf("invalid configuration: %s", strings.Join(errs, "; "))
 	}
 	return c, nil
+}
+
+// strictJSON decodes raw into v, rejecting unknown fields and trailing data.
+func strictJSON(raw string, v any) error {
+	dec := json.NewDecoder(bytes.NewReader([]byte(raw)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if dec.More() {
+		return fmt.Errorf("trailing data")
+	}
+	return nil
+}
+
+// reapPod reads the reap Job pod settings the Helm chart passes.
+func reapPod(str func(string, string) string, errs []string) (kube.ReapPodOptions, []string) {
+	var o kube.ReapPodOptions
+	if raw := str("SCALER_REAP_POD_LABELS", ""); raw != "" {
+		if err := strictJSON(raw, &o.Labels); err != nil {
+			errs = append(errs, fmt.Sprintf("SCALER_REAP_POD_LABELS: want a JSON object of strings: %v", err))
+		}
+		for k, v := range o.Labels {
+			for _, msg := range append(validation.IsQualifiedName(k), validation.IsValidLabelValue(v)...) {
+				errs = append(errs, fmt.Sprintf("SCALER_REAP_POD_LABELS: label %q=%q: %s", k, v, msg))
+			}
+		}
+	}
+	if raw := str("SCALER_REAP_IMAGE_PULL_SECRETS", ""); raw != "" {
+		for _, name := range strings.Split(raw, ",") {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			for _, msg := range validation.IsDNS1123Subdomain(name) {
+				errs = append(errs, fmt.Sprintf("SCALER_REAP_IMAGE_PULL_SECRETS: %q: %s", name, msg))
+			}
+			o.ImagePullSecrets = append(o.ImagePullSecrets, name)
+		}
+	}
+	if raw := str("SCALER_REAP_NODE_SELECTOR", ""); raw != "" {
+		if err := strictJSON(raw, &o.NodeSelector); err != nil {
+			errs = append(errs, fmt.Sprintf("SCALER_REAP_NODE_SELECTOR: want a JSON object of strings: %v", err))
+		}
+	}
+	if raw := str("SCALER_REAP_TOLERATIONS", ""); raw != "" {
+		var t []corev1.Toleration
+		if err := strictJSON(raw, &t); err != nil {
+			errs = append(errs, fmt.Sprintf("SCALER_REAP_TOLERATIONS: want a JSON array of tolerations: %v", err))
+		}
+		o.Tolerations = t
+	}
+	return o, errs
 }

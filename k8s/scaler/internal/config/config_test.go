@@ -55,3 +55,35 @@ func TestInvalid(t *testing.T) {
 		}
 	}
 }
+
+func TestReapPod(t *testing.T) {
+	c, err := Load(env(map[string]string{
+		"POD_NAMESPACE":                  "ns",
+		"SCALER_REAP_POD_LABELS":         `{"app.kubernetes.io/part-of":"sg-runner","np":"egress"}`,
+		"SCALER_REAP_IMAGE_PULL_SECRETS": "regcred, other ,",
+		"SCALER_REAP_NODE_SELECTOR":      `{"kubernetes.io/os":"linux"}`,
+		"SCALER_REAP_TOLERATIONS":        `[{"key":"dedicated","operator":"Equal","value":"runners","effect":"NoSchedule"}]`,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := c.ReapPod
+	if o.Labels["np"] != "egress" || len(o.Labels) != 2 || strings.Join(o.ImagePullSecrets, ",") != "regcred,other" ||
+		o.NodeSelector["kubernetes.io/os"] != "linux" || len(o.Tolerations) != 1 || o.Tolerations[0].Value != "runners" {
+		t.Errorf("reap pod %+v", o)
+	}
+	for k, v := range map[string]string{
+		"SCALER_REAP_POD_LABELS":         `["a"]`,
+		"SCALER_REAP_IMAGE_PULL_SECRETS": "Bad_Name",
+		"SCALER_REAP_NODE_SELECTOR":      `{"a":1}`,
+		"SCALER_REAP_TOLERATIONS":        `[{"keyy":"x"}]`,
+	} {
+		_, err := Load(env(map[string]string{"POD_NAMESPACE": "ns", k: v}))
+		if err == nil || !strings.Contains(err.Error(), k) {
+			t.Errorf("%s=%s: want an error naming it, got %v", k, v, err)
+		}
+	}
+	if _, err := Load(env(map[string]string{"POD_NAMESPACE": "ns", "SCALER_REAP_POD_LABELS": `{"bad key!":"x"}`})); err == nil {
+		t.Error("want an invalid label key rejected")
+	}
+}
