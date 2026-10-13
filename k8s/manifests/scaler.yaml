@@ -1,0 +1,85 @@
+# Scaler for the runner StatefulSet (see scaler.sh). It owns spec.replicas.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sg-runner-scaler
+  namespace: sg-runner
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sg-runner-scaler
+  namespace: sg-runner
+rules:
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    resourceNames: ["sg-runner"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets/scale"]
+    resourceNames: ["sg-runner"]
+    verbs: ["get", "patch"]
+  # Parked-at stamps, and deleting a reaped runner's PVCs.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["list", "get", "patch", "delete"]
+  # Reap Jobs deregister long-parked runners from their PVC.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sg-runner-scaler
+  namespace: sg-runner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sg-runner-scaler
+subjects:
+  - kind: ServiceAccount
+    name: sg-runner-scaler
+    namespace: sg-runner
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sg-runner-scaler
+  namespace: sg-runner
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: sg-runner-scaler
+  template:
+    metadata:
+      labels:
+        app: sg-runner-scaler
+    spec:
+      serviceAccountName: sg-runner-scaler
+      containers:
+        - name: scaler
+          image: sg-runner-k8s:dev
+          imagePullPolicy: IfNotPresent
+          command: ["/opt/sg-runner/scaler.sh"]
+          env:
+            - { name: SCALER_MIN, value: "1" }
+            - { name: SCALER_MAX, value: "10" }
+            # % of awake runners' capacity to keep free (warm spare); 0 = off.
+            - { name: SCALER_HEADROOM_PCT, value: "0" }
+            - { name: SCALER_IDLE_SECONDS, value: "300" }
+            - { name: SCALER_PARK_TTL, value: "86400" }
+            - { name: SCALER_IMAGE, value: sg-runner-k8s:dev }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          volumeMounts:
+            - { name: sg-credentials, mountPath: /etc/sg-runner/credentials, readOnly: true }
+      volumes:
+        - name: sg-credentials
+          secret:
+            secretName: sg-runner-credentials
+            defaultMode: 0400
