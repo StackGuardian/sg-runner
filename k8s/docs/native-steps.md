@@ -1,181 +1,153 @@
-# Proposal: workflow steps as native pods
+# Native steps: workflow steps as pods
 
-Status: proposal, nothing built. Goal: the run controller stays an ECS task on
-the runner (ECS Anywhere and registration are unchanged), but each workflow
-step runs as its own Kubernetes pod instead of a container in the runner
-pod's nested `dockerd`.
+Opt-in (`runner.nativeSteps.enabled`, default off). The run controller stays
+an ECS task in the runner pod's nested `dockerd`, registered through ECS
+Anywhere as before; only the workflow **steps** it starts become Kubernetes
+pods. Needs a run controller with the step broker client (sg-run-controller,
+`external_runner/step_broker.py`); a controller without it keeps running steps
+in `dockerd`.
 
-## What the run controller does with Docker today
+Contract: [steps-api.md](steps-api.md). Tests: [testing.md](testing.md)
+(plan 8, and the kind smoke's native-steps stage).
 
-From `src/run_controller/external.py` in sg-run-controller (docker-py 6.0.1).
-All of it is in one place, the step loop of `main()` (about 250 lines):
+## Why
 
-| Call | Purpose |
-|---|---|
-| `docker.from_env()` | Talks to `/var/run/docker.sock`, bind-mounted into the controller task |
-| `client.login(...)` | SG's ECR (token from SG's account) or a private registry (secret from the run) |
-| `client.images.pull(...)` | Only for `:latest` tags |
-| `client.containers.run(detach=True, ...)` | Image, name, env list, labels `orgId`/`wfrunId`, `privileged=False`, `cpu_shares` (CPU weight only, no limit), `mem_limit` = `mem_reservation`, `network="bridge"`, optional `command`, bind mounts |
-| `container.logs(stream=True, follow=True)` | A thread relays every line into the controller's log (and from there to the storage backend) |
-| `container.reload()` / `.status` / `.attrs["State"]["ExitCode"]` | Polled every 1.5 s |
-| `container.wait(timeout=10)` | Exit code: 0 ok, 11 approval required, 12 finish the run early, other = errored |
-| `container.kill(SIGTERM)`, wait 30 s, `kill(SIGKILL)` | Cancel and step timeout |
+- **Security.** User code leaves the privileged runner pod. A step that
+  escapes its container lands in an unprivileged pod (no service account
+  token, `RuntimeDefault` seccomp, no privilege), not next to a privileged
+  `dockerd`.
+- **Visibility.** Steps are pods: scheduling, image pulls, OOM kills and exit
+  codes show up as Kubernetes state and events.
+- **Images.** Pulled by the kubelet and cached per node, shared by every
+  runner on it.
+- **Resources.** Each step requests its own CPU and memory; the runner pod
+  only reserves what its run controllers need.
 
-Bind mounts of a step:
+## How it works
 
-- the run's shared workspace `${WORKSPACES_DIR}<org><run>/shared-workspace`
-  (`WORKSPACES_DIR=/var/tmp/workspace`) at `/mnt/sg_workspace`: the cloned
-  repo, artifacts, run facts, spilled env payloads, the step's
-  `aws_credentials` / `aws_config` files;
-- the step template's `mountPoints` (shape not confirmed; see open questions).
+```
+runner pod (StatefulSet)                               step pods (same node)
+┌─────────────────────────────────────────────┐
+│ dockerd ── run controller (ECS task)        │        ┌──────────────────────┐
+│              │ step_client(): unix socket   │        │ step (user image)    │
+│              ▼                              │ create │  /mnt/sg_workspace = │
+│ steps (broker, Go) ── Kubernetes API ───────┼───────▶│  subPath of the      │
+│                                             │        │  runner's workspace  │
+│ workspace: ephemeral PVC <pod>-workspace ◀──┼────────┤  PVC                 │
+│ ecs-agent, ssm-agent                        │        └──────────────────────┘
+└─────────────────────────────────────────────┘
+```
 
-Containers are never removed, and the workspace is `chmod -R 777`'d before
-each step (steps may run as any UID).
+- The run controller mounts the runner's `/var/tmp/workspace` (verified with
+  `docker inspect`), so it finds the broker's socket at
+  `/var/tmp/workspace/.sg-runner/steps.sock`: an emptyDir nested inside the
+  workspace mount, shared with the broker container. Steps mount only their
+  own run's directory and can't reach it.
+- The controller's `step_client()` returns docker-py's client or, when that
+  socket exists, a broker client that duck-types the docker-py calls
+  `external.py` makes (`login`, `images.pull`, `containers.run` and the
+  container's `status`, `attrs`, `reload`, `wait`, `kill`, `logs`). `main()`
+  is unchanged apart from that one line. The choice is made once per run; a
+  run on the broker **never falls back to Docker**: a broker failure fails the
+  step with a clear error.
+- The broker (`sg-runner-steps`, in the scaler image) builds the step pod
+  itself, from a fixed template:
+  - env in a Secret (`envFrom`), registry credentials in a pull Secret;
+  - the step's command as `args` (the image's ENTRYPOINT is kept, as with
+    Docker), `$` escaped so the kubelet never expands `$(VAR)`;
+  - CPU request = Docker CPU shares / 1024, no CPU limit (Docker's shares were
+    a weight); memory request = limit;
+  - each Docker bind mount becomes a `subPath` of the runner's workspace PVC;
+    sources outside the run's own directory are rejected;
+  - pinned to the runner's node (required node affinity), owned by the runner
+    pod, no service account token, `RuntimeDefault` seccomp, unprivileged.
+- **Finished steps are deleted** (pod and Secrets) 10s (`FINISHED_GRACE`)
+  after the controller has read the result and its log stream has closed.
+  Their output is in SG's run log; `kubectl logs` works only while a step
+  runs. The broker keeps the result in memory for an hour. Steps nobody read
+  (controller gone) are deleted after `FINISHED_TTL`.
+- **Drain.** The broker's preStop waits for the runner's drain marker and it
+  ignores SIGTERM until then: run controllers keep their steps running through
+  a runner shutdown.
+- **RBAC.** The runner's ServiceAccount can create, read and delete pods, read
+  pod logs, and create and delete Secrets. It can't read or list Secrets (the
+  node token is one) or exec into pods. The token is mounted in the broker
+  container only.
 
-The controller and the step see the same paths because the controller's task
-mounts the host's `/var/tmp/workspace` at the same path, and "host" is the
-runner pod. That shared directory is the one hard problem: everything else
-maps one to one onto the pod API.
+## Sizing: one runner per node
 
-## Options
+The runner pod requests only what its run controllers need
+(`runner.nativeSteps.controllerResources`, roughly 512 Mi per concurrent run).
+The ECS agent advertises `runner.nativeSteps.advertise` (whole CPUs, memory)
+instead: that's what SG places workflows against, and the step pods consume
+it. Nothing reserves that capacity on the node, so the supported layout is one
+runner per node (required anti-affinity, rendered by the chart) with
+`advertise` ≤ node allocatable − runner pod − DaemonSets.
 
-### A. A new run controller (separate repo)
+ECS keeps the CPU and memory a runner registered with. When `advertise` (or
+the runner size) changes, the pod rolls, and its register step compares what
+SG has registered with what the agent will advertise: an idle runner
+deregisters and registers again with the new size (new runner ID, same image
+cache); one with runs placed on it keeps the old size and logs a warning
+(`runner.reregisterOnResize`, default on).
 
-Not worth it. The controller is ~12k lines of business logic (approvals,
-policies, VCS, interpolation, artifacts, drift, run facts, error surfacing,
-the status rules in `fail_clean`), and Docker is ~250 of them. A fork would
-drift from every controller release. And the image the ECS task runs is set
-by SG's task definition: a separate controller only runs if SG points the
-runner group at it.
+## Workspace
 
-### B. The controller talks to the Kubernetes API
+A generic ephemeral PVC (`<pod>-workspace`, RWO), created and deleted with the
+runner pod, like the emptyDir it replaces; step pods mount it through
+`subPath`. RWO allows several pods on the same node, which is why steps are
+pinned there. Turning native steps on or off is a normal rollout.
 
-A `KubernetesStepRunner` next to the Docker code. Needs a controller release,
-puts cluster credentials in the controller (it has to get them through a
-file, since we don't control the task definition's env), and every
-Kubernetes policy decision (pod spec, security context, GC) lives in Python
-in another team's repo.
+Later option: an RWX storage class, so steps can schedule on any node and the
+cluster autoscaler adds nodes for steps (no PD on step pods, no nudge). Costs
+an RWX prerequisite (Filestore, EFS, NFS) and slower small-file I/O.
 
-### C. A step broker on the runner pod (recommended)
+## Known behaviour and limits
 
-A new Go component in the runner pod, `sg-runner-steps`, owns everything
-Kubernetes: it builds step pods from a fixed template, holds the RBAC, and
-cleans up. The controller only asks it to run a step. Two fronts on the same
-core:
+- **Steps that exit non-zero show as `Failed` / `Error`**, including SG's
+  signal codes 11 (approval required) and 12 (finish the run early).
+  Kubernetes sets the phase from the exit code and nothing can patch it.
+  Mitigated by deleting finished steps ~10s after their result is read.
+  Monitoring on failed pods must exclude `app.kubernetes.io/component=step`.
+  Real fixes, later: a wrapper in the step pod that maps 11/12 to 0 and
+  reports the code through the termination message (needs each image's
+  ENTRYPOINT/CMD from the registry), or step images signalling approval and
+  early finish without exit codes (an SG-wide contract change).
+- **Architecture.** SG's step images are amd64-only. Nested Docker could run
+  them on arm64 under emulation; the kubelet refuses to pull them. On arm64
+  nodes they must be preloaded with `runner.nativeSteps.step.imagePullPolicy:
+  IfNotPresent` (OrbStack testing); production runs on amd64 nodes.
+- **Log bursts.** A step writing tens of MiB within a second can lose lines
+  when the kubelet rotates its log file (10 MiB by default) faster than the
+  stream reads it. At ~1 MiB/s nothing is lost. Raise the kubelet's
+  `containerLogMaxSize` if steps log heavily.
+- **Pending time** (scheduling, image pull) isn't part of the step's timeout
+  in the run controller; the broker bounds it (`schedulingTimeout`,
+  `startTimeout`).
+- **NetworkPolicy.** With `networkPolicy.enabled`, the policy also covers
+  step pods, but its cluster-CIDR exclusion blocks the broker's access to the
+  Kubernetes API. Workaround: allow the API endpoint through
+  `networkPolicy.extraEgress` (opens it to the whole runner pod).
+- **Mount checks are lexical.** A symlink inside one run's directory pointing
+  into another run's would be followed by the kubelet. Mount sources are
+  chosen by the run controller, not users.
+- **Node autoscaling.** The scaler's nudge placeholder copies the runner pod's
+  requests, i.e. controller-sized, so on GKE a new node may be too small for
+  the steps. Not handled yet.
 
-1. **Docker API front (phase 1, no controller change).** The broker listens
-   on the `/var/run/docker.sock` that the controller task mounts; the real
-   `dockerd` moves to another socket that only the ECS agent uses. It
-   implements the dozen endpoints listed above for containers labeled
-   `wfrunId`, and proxies everything else to `dockerd` unchanged (the run
-   analyzer and any other socket user keep working). Works with the
-   official controller image today.
-2. **Native front (phase 2, small controller change).** A `StepRunner`
-   interface in the controller with today's Docker code as one
-   implementation and a broker client as the other, selected by the
-   broker's presence. Explicit semantics (pod phases, image pull errors as
-   real errors) instead of emulating Docker. The Docker front is then
-   retired.
+## Testing a controller that isn't released yet
 
-The controller never holds cluster credentials, the pod spec is ours and
-reviewable, and the broker shares code with the scaler (`internal/kube`).
+SG's task definition picks the run controller image. Until the broker client
+ships in it, it's tested by overlaying the client onto the official image tag
+inside the runner's `dockerd`, with the ECS agent set to
+`ECS_IMAGE_PULL_BEHAVIOR=prefer-cached` (`runner.ecsAgent.extraEnv`). Steps in
+[testing.md](testing.md), plan 8.
 
-## How the broker runs a step
+## Open
 
-| Docker call | Broker |
-|---|---|
-| `login` | Remembers the credentials per registry for this run's next step |
-| `images.pull` | No-op; `:latest` gets `imagePullPolicy: Always` |
-| `containers.create` + `start` | Secret `<pod>-env` with the env (the run payload and credentials stay out of the pod spec; `envFrom`), Secret with a `dockerconfigjson` if it logged in, then the pod |
-| `logs(follow)` | Pod log stream, framed as Docker's multiplexed stream |
-| `inspect` / `status` | Pod phase → `created` / `running` / `exited`; container exit code |
-| `wait` | Watch until the container terminated |
-| `kill(SIGTERM)` / `kill(SIGKILL)` | Delete the pod with a 30 s / 0 s grace period |
-| (no remove) | Broker deletes step pods and their Secrets once finished and logs are read, and on startup any whose controller container is gone |
-
-Step pod template:
-
-- **Resources:** requests CPU `userJobCpu / 1024`, memory `userJobMemory` Mi,
-  memory limit = request, no CPU limit (as today: a weight, not a cap).
-- **Workspace:** the runner's `/var/tmp/workspace` moves onto a per-runner
-  workspace PVC (RWO). The step mounts the same PVC with
-  `subPath: <run>/shared-workspace` at `/mnt/sg_workspace`. RWO allows
-  several pods **on the same node**, so step pods get a required pod
-  affinity to their runner's node. Bind sources outside the workspace are
-  refused with a clear error.
-- **Security:** `privileged: false`, no service account token, Docker's
-  default capability set (Pod Security "baseline", what steps get today),
-  `runAsUser` left to the image.
-- **Network:** NetworkPolicy for step pods: egress to the internet; no
-  Kubernetes API, no other pods, no `169.254.169.254`.
-- **Labels:** org, workflow, run, step, runner. Logs and events become
-  `kubectl`-visible per run, so the `workflow-logs` sidecar isn't needed for
-  steps.
-
-## What it changes
-
-- **Security:** user code leaves the privileged runner pod. Today a step that
-  escapes its container lands in a privileged pod; as a pod it lands in an
-  unprivileged one. The run controller (SG's code, not the user's) is all that
-  stays in `dockerd`.
-- **Visibility:** steps are pods: logs, events, metrics, OOM kills, image pull
-  errors, all native.
-- **Images:** pulled by the kubelet, cached per node, shared by every runner
-  on it; the docker PVC shrinks to controller images.
-- **Resources:** each step gets its requests enforced by the scheduler,
-  instead of every workflow sharing one runner pod.
-- **Not yet elastic:** in phase 1 steps run on their runner's node, so a
-  runner still needs a node sized for its workflows. The runner advertises
-  capacity to ECS as today (ECS reserves `512 + workflow size` per run, so
-  admission control stays); the runner pod itself only requests what the
-  ECS agent, `dockerd` and controllers need.
-
-## Phase 3: steps anywhere
-
-With an RWX storage class (Filestore, EFS, NFS) for the workspace, the node
-affinity goes away: step pods schedule on any node and the cluster autoscaler
-adds nodes for them directly (no persistent disk on a step pod, so no nudge).
-Runners shrink to controller-only pods. Costs: an RWX storage prerequisite
-and NFS performance for Terraform's provider directories. Optional, per
-install.
-
-## Effort (one engineer, rough)
-
-| Work | Estimate |
-|---|---|
-| Phase 0: broker in pure proxy mode logging every Docker API call during real runs; confirms the exact surface docker-py 6.0.1 uses and the task's mounts | 2–3 days |
-| Broker core: pod and Secret builder, log streaming, wait/exit codes, cancel, pull secrets, GC, events → errors, tests | 2–3 weeks |
-| Docker API front: the endpoints, multiplexed log framing, version negotiation, passthrough | 1 week |
-| Runner pod and chart: `dockerd` socket move (`DOCKER_HOST` for the ECS agent), workspace PVC, broker container, RBAC, step NetworkPolicy, capacity advertising | 1 week |
-| GKE validation with real workflows (below) | 1 week |
-| **Phase 1 total** | **~5–6 weeks** |
-| Phase 2: `StepRunner` in sg-run-controller and a native broker API; then an SG controller release | 1–2 weeks plus their review and release |
-| Phase 3: RWX workspace option | ~1 week plus storage testing |
-
-A new controller (option A) would be months, then permanent upkeep.
-
-## Validation list
-
-Terraform plan/apply, approval (exit 11), early finish (12), failure, cancel
-mid-step, step timeout, SG ECR image, private registry image, `:latest`,
-command override, large payload (env spill files), drift and policy
-discovery runs, resume after approval, runner park while a step runs, broker
-restart mid-step, runner pod deleted mid-step (orphan GC), log volume beyond
-kubelet rotation (10 MiB).
-
-## Open questions (not confirmed)
-
-- **The controller task's mounts.** That it mounts the host's
-  `/var/run/docker.sock` and `/var/tmp/workspace` at the same paths is
-  inferred from `docker.from_env()`, `WORKSPACES_DIR` and the step mounts
-  seen in workflow logs, not read from the task definition (it lives in SG's
-  account). Phase 0 confirms it with `docker inspect`.
-- **Step `mountPoints`.** Passed straight to `docker.types.Mount(type="bind")`;
-  where they come from and whether any template uses a host path outside the
-  workspace wasn't found in the controller repo.
-- **Anything a step reads from the ECS environment** (task metadata,
-  `169.254.170.2` credentials). Steps get AWS credentials as files, but a
-  custom step image could rely on more.
-- **Who runs the official controller image.** Phase 2 needs SG to ship the
-  `StepRunner` change in its controller release; worth raising with the
-  controller's owners before building phase 1 too far.
+- Drift and policy-discovery runs (their workspace directories differ from a
+  normal run's): not tested yet.
+- ValidatingAdmissionPolicy limiting what the runner's ServiceAccount may
+  create (the namespace is privileged for `dockerd`).
+- RWX workspace; nudge sized for steps; NetworkPolicy value for the broker's
+  API access; GKE validation (PD attach, multi-node).

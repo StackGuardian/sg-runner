@@ -38,11 +38,32 @@ agent's source, and tests on QA. Re-check them if behavior seems off.
   policy names the cluster ARN, the action is authorized against the
   container-instance ARN). Irrelevant now: status changes go through SG.
 
+- **The run controller's mounts.** Its ECS task bind-mounts the host's
+  `/var/run/docker.sock` and `/var/tmp/workspace` at the same paths
+  (`WORKSPACES_DIR=/var/tmp/workspace`), runs as root, and its image is set by
+  tag, not digest. Steps get `.../wfruns/<run>/shared-workspace` at
+  `/mnt/sg_workspace` plus the AWS credentials files at their own paths.
+  Verified with `docker inspect` on QA.
+- **ECS keeps a runner's registered size.** `registeredResources` are fixed
+  at the container instance's first registration; an agent restart with a
+  different size changes nothing (seen on QA: 2048/3840 stayed after the agent
+  advertised 4096/6144). The runner therefore re-registers when its size
+  changes (see below).
+- **Exit codes 11 and 12 are signals.** A step exits 11 when it needs approval
+  and 12 to finish the run early; the run controller acts on the code.
+
 ## Decisions
 
 | Decision | Why | Rejected alternatives |
 |---|---|---|
-| One pod = one runner host; nested `dockerd` | ECS agent and run controller both need a Docker API; real clusters run containerd | Host Docker socket (not on modern clusters); steps as k8s Jobs (needs run-controller changes; kept as a future option) |
+| One pod = one runner host; nested `dockerd` | ECS agent and run controller both need a Docker API; real clusters run containerd | Host Docker socket (not on modern clusters) |
+| Native steps (opt-in): steps as pods through a step broker in the runner pod; run controller unchanged otherwise ([native-steps.md](native-steps.md)) | User code out of the privileged pod; Kubernetes owns scheduling and images; the broker, not the controller, holds cluster credentials and builds the pod spec | A Docker API shim in front of `dockerd` (emulates Docker semantics, works with an unmodified controller); the controller calling the Kubernetes API itself; a new run controller (12k lines of logic to fork) |
+| Broker client duck-types docker-py in the controller | `main()` stays unchanged apart from one line; the existing exit-code and status logic and its tests keep working | A `StepRunner` refactor of `main()` |
+| A run on the broker never falls back to Docker | A silent fallback would run user code in a `dockerd` sized for controllers only | Fallback with a warning |
+| Workspace as a generic ephemeral PVC, steps pinned to the runner's node | Same lifetime as the emptyDir it replaces; toggling is a normal rollout; works on any storage class | volumeClaimTemplate (immutable, needs scaler/teardown changes); hostPath; RWX (later option) |
+| Delete finished step pods ~10s after the result is read | Exit 11/12 show as `Failed`/`Error`; logs are in SG | Keep them for a TTL (looks like failures); a wrapper that rewrites exit codes (later option) |
+| Re-register an idle runner whose advertised size changed (`runner.reregisterOnResize`) | ECS never updates a registered size; without it a resized runner keeps its old capacity silently | Document a manual reap; refuse to start (blocks rollouts) |
+| Broker can create/delete Secrets but not read or list them | The node token is a Secret in the same namespace | Secret list for garbage collection |
 | Run the ECS agent binary directly, not `ecs-init` | `ecs-init` needs systemd | Running the installer (systemd/packages) |
 | Advertise the `dockerd` container's limits | Workflows run inside it; otherwise ECS over-places | Pod limits alone (the agent ignores cgroup quotas) |
 | Never call ECS from the runner | Customers' runners have no ECS permissions; SG's `runner_status` API does it with SG's | Direct `UpdateContainerInstancesState` (also denied on QA) |
