@@ -42,21 +42,27 @@ make status            # pod state + ECS agent metadata
 
 kubectl -n sg-runner scale sts sg-runner --replicas=N   # park / wake runners
 
-make deregister        # wake parked runners, deregister all (reads .env on stdin)
-make down              # uninstall, keep PVCs (runners stay registered, parked)
-make nuke              # deregister, then uninstall, delete PVCs, namespace
+make down              # uninstall --no-hooks, keep PVCs (runners stay registered, parked)
+make nuke              # helm uninstall (deregisters every runner, deletes PVCs), then the namespace
 ```
 
-`make nuke` deregisters first and stops if that fails: deleting the PVC without
-deregistering would leave a dead runner in the runner group.
+`helm uninstall` cleans up through the chart's pre-delete hook (see the
+[chart README](chart/sg-runner/README.md#uninstall)). If a runner can't be
+deregistered, the hook fails and keeps that runner's PVCs, and `make nuke`
+stops before deleting the namespace: deleting the PVC without deregistering
+would leave a dead runner in the runner group.
 
-Outside OrbStack, install the chart directly; the namespace must allow
-privileged pods (the chart doesn't create it):
+Outside OrbStack, install the chart directly. Only the node token is a
+Secret; the runner group is plain values. Label the namespace where Pod
+Security is enforced (runner pods are privileged):
 
 ```sh
 kubectl create namespace sg-runner
 kubectl label namespace sg-runner pod-security.kubernetes.io/enforce=privileged
+kubectl -n sg-runner create secret generic sg-runner-credentials \
+  --from-literal=SG_NODE_TOKEN=...
 helm upgrade --install sg-runner k8s/chart/sg-runner -n sg-runner \
+  --set sg.organization=<org> --set sg.runnerGroup=<runner group> \
   --set credentials.existingSecret=sg-runner-credentials \
   --set runner.size=medium
 ```
@@ -83,6 +89,15 @@ Image versions are pinned as build args in `Dockerfile` (`ECS_AGENT_VERSION`,
 `SSM_AGENT_VERSION`, `DOCKER_VERSION`). `make build-multiarch` builds
 `linux/amd64` and `linux/arm64` on a dedicated buildx builder and keeps only
 the build cache; `PUSH=1 REGISTRY=<registry/namespace>` pushes the result.
+
+## Workflow logs
+
+Opt-in (`runner.workflowLogs.enabled=true`): a `workflow-logs` sidecar
+(`runner.sh workflow-logs`) follows every workflow step container through
+the shared Docker socket and writes its output to stdout, tagged with run and
+workflow; `[SG_DEBUG]` lines only with `runner.workflowLogs.debug=true`.
+Details in the
+[chart README](chart/sg-runner/README.md#workflow-logs).
 
 ## Docker cleanup
 
@@ -153,9 +168,9 @@ Status changes use the runner group's node token, the same credential the
 runner registers with; no extra key is needed. The runner never calls ECS
 itself: a customer's runner has no ECS permissions.
 
-Deregistering is explicit: `make deregister` wakes every parked runner (each
-state PVC) and deregisters them all; `make nuke` does that and deletes
-everything. Runners parked longer than `SCALER_PARK_TTL` are reaped by the scaler.
+Runners are deregistered when they're reaped (parked longer than
+`SCALER_PARK_TTL`) and on `helm uninstall`, which deregisters every runner,
+awake or parked, from its state PVC and deletes the PVCs.
 
 ## Autoscaling
 
