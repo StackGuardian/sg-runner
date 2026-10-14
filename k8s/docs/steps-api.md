@@ -2,8 +2,10 @@
 
 Contract between the run controller (`sg-run-controller`,
 `external_runner/step_broker.py`) and the step broker (`sg-runner-steps`, a
-container in the runner pod). The broker runs each workflow step as a pod; the
-controller only asks it to. See [native-steps.md](native-steps.md) for why.
+native sidecar of the runner pod). The broker runs each workflow step as a
+pod; the controller only asks it to. The runner runs steps only this way: the
+broker's [guard](#guard) keeps dockerd from running them. See
+[native-steps.md](native-steps.md) for why.
 
 ## Transport and discovery
 
@@ -20,7 +22,8 @@ controller only asks it to. See [native-steps.md](native-steps.md) for why.
 - The controller uses the broker when that path is a socket
   (`stat.S_ISSOCK`), decided once per run at the first step. It then calls
   `GET /healthz`; any failure or an `api` other than `v1` fails the step. A
-  controller that uses the broker never falls back to Docker.
+  controller that uses the broker never falls back to Docker; one without
+  broker support is stopped by the [guard](#guard).
 
 ## Errors
 
@@ -226,6 +229,35 @@ It never lists or reads Secrets (that returns their data, and the runner's
 node token shares the namespace): step Secrets go by name with their step,
 or with the runner pod that owns them (ownerReference), like step pods.
 
+## Guard
+
+The broker also serves dockerd the authorization plugin `sg-steps-guard`, so
+a run controller without broker support (an older one) can't run steps in
+dockerd: they would run inside the runner pod, outside every pod limit.
+
+- It listens on `GUARD_SOCKET` (`/run/sg-guard/sg-steps-guard.sock`). The
+  chart mounts that directory into `dockerd` at `/run/docker/plugins`, where
+  dockerd finds the plugin by its socket name, and starts dockerd with
+  `--authorization-plugin=sg-steps-guard`.
+- Docker plugin protocol (`application/vnd.docker.plugins.v1.2+json`):
+  `POST /Plugin.Activate` answers `{"Implements":["authz"]}`;
+  `POST /AuthZPlugin.AuthZReq` decides; `POST /AuthZPlugin.AuthZRes` always
+  allows.
+- A request is refused (`{"Allow":false,"Msg":"This runner runs workflow
+  steps as Kubernetes pods and needs a run controller with native step support
+  (step broker client); refusing to start the step in dockerd."}`) when its
+  `RequestMethod` is `POST`, the path of its `RequestUri` matches
+  `^(/v[0-9.]+)?/containers/create$`, and its JSON body's `Labels` has the key
+  `wfrunId` (the run controller's label on step containers). Everything else
+  is allowed, the ECS agent creating run controllers (`com.amazonaws.ecs.*`
+  labels) included.
+- A container create without a body (dockerd sends only JSON bodies, within
+  its size limit) or with one it can't parse is allowed, with a warning in the
+  broker's log. An unreadable authorization request gets `Err` (dockerd
+  refuses the call).
+- While the guard doesn't answer, dockerd refuses every API call: the broker
+  starts before dockerd (a native sidecar) and stops after it.
+
 ## RBAC
 
 The broker's ServiceAccount, in its namespace: pods `create`, `get`, `list`,
@@ -252,11 +284,19 @@ The broker's ServiceAccount, in its namespace: pods `create`, `get`, `list`,
 | `BROKER_IMAGE` | empty | The broker's own image (has `/sg-step-wrapper`) for the wrapper's init container; empty = steps run unwrapped |
 | `BROKER_IMAGE_PULL_POLICY` | empty | `Always`, `IfNotPresent` or `Never` for that init container; empty = the cluster's default |
 | `BROKER_IMAGE_PULL_SECRETS` | empty | Comma-separated pull Secrets for `BROKER_IMAGE`, added to wrapped step pods |
-| `DRAINED_MARKER` | `/var/run/sg-runner-drained` | File the runner's drain creates when done (see below). The chart mounts the runner's `/var/run` read-only at `/run/sg-runner` in the broker and sets `/run/sg-runner/sg-runner-drained` |
+| `GUARD_SOCKET` | `/run/sg-guard/sg-steps-guard.sock` | The guard's socket; its directory is dockerd's `/run/docker/plugins`. Must differ from `SOCKET_PATH` |
 
 ## Lifecycle in the runner pod
 
-The broker must outlive the run controllers during a drain: its preStop is
-`sg-runner-steps wait-drained` (polls `DRAINED_MARKER`), and it ignores SIGTERM
-until the marker exists. The runner's drain waits for every run controller
-container, and controllers wait for their steps.
+The broker is a native sidecar: an init container with `restartPolicy:
+Always`. Kubernetes starts it, and waits for its startup probe, before the
+runner's containers (dockerd needs the guard from its first API call, run
+controllers the broker), and stops it only after they all exited. So on
+SIGTERM it just shuts down: it stops listening and gives open requests up to
+10s.
+
+- `sg-runner-steps serve` (the default) runs the broker.
+- `sg-runner-steps healthcheck` is its startup and readiness probe (the image
+  has no shell): exit 0 when `GET /healthz` on `SOCKET_PATH` answers `api`
+  `v1` and `POST /Plugin.Activate` on `GUARD_SOCKET` answers `authz`, else
+  1. It reads only those two variables.

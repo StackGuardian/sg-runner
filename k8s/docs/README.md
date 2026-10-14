@@ -17,7 +17,7 @@ them.
 | [decisions.md](decisions.md) | Design decisions with the reasons and rejected alternatives; facts learned from StackGuardian's code and AWS |
 | [dev-notes.md](dev-notes.md) | Environment gotchas and working practices for the next session |
 | [gke-one-runner-per-node.md](gke-one-runner-per-node.md) | The GKE layout with one runner per node: sizing, how parking and waking behave there, suggested settings |
-| [native-steps.md](native-steps.md) | Native steps (opt-in): workflow steps as pods through a step broker in the runner pod; how it works, sizing, known behaviour |
+| [native-steps.md](native-steps.md) | How the Kubernetes runner runs workflow steps as pods (the only mode): requirements, the step broker and guard, sizing, known behaviour |
 | [steps-api.md](steps-api.md) | The step broker's API (v1): the contract between the run controller and the broker |
 
 ## Status
@@ -32,7 +32,7 @@ not a supported product.
 | Scaler (`scaler/`, Go) | Scales out on queue, parks idle runners, reaps long-parked ones, drains hard-killed ones; Events, metrics, leader election, persisted timers. Unit-tested and smoke-tested against a **fake** SG. The rules were validated on QA in the shell version it replaced; **the Go version has not run against real SG yet.** |
 | Helm chart (`chart/sg-runner`) | Runner StatefulSet, scaler, credentials, size presets, workspace volume, optional NetworkPolicy and PDB, values schema. `helm lint --strict`, kubeconform, kind install with a fake API. |
 | CI (`.github/workflows/k8s.yml`) | Go, chart (Helm 3 and 4), multi-arch image builds, Trivy, kind smoke. Passed locally; **never run on GitHub yet.** |
-| Native steps (`runner.nativeSteps`, `scaler/internal/steps`) | Step broker, chart wiring, and the run controller's broker client (sg-run-controller, same branch name). Unit tests, kind smoke stage, and end to end on QA with an overlaid controller (OrbStack). Needs SG to ship the controller change. |
+| Native steps (`scaler/internal/steps`, `internal/guard`, `internal/wrapper`) | The only mode: step broker as a native sidecar, `dockerd` guard, step wrapper; the run controller's broker client is in sg-run-controller (same branch name). Unit tests, kind smoke stage, and end to end on QA with an overlaid controller (OrbStack). Needs SG to ship the controller change. |
 | `main.sh` fixes on this branch | Private-IP detection; error reports no longer retry themselves into a stack overflow. Both also affect VM runners. |
 
 ## Picking it up

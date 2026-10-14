@@ -60,7 +60,8 @@
 | Operator / `RunnerPool` CRD | Natural next step for the Go scaler (kubebuilder) if this becomes a product. |
 | Proxy support | `main.sh`'s `--http-proxy` path isn't wired into the pod (env on the agents, Docker daemon proxy config). |
 | `sg-net` bypass (known) | Workflow containers run on Docker's default bridge, so `main.sh`'s `DOCKER-USER` DROP rules for `sg-net` never apply to them, on VMs too. Known and parked. |
-| Native steps: SG release of the run controller change | sg-run-controller branch `feat/k8s-run-controller` (`step_broker.py` + one line in `external.py`). Until it ships, native steps run only with an overlaid controller image (testing.md plan 8). |
+| SG release of the run controller change (**blocks Kubernetes runners**) | sg-run-controller branch `feat/k8s-run-controller` (`step_broker.py` + one line in `external.py`). Kubernetes runners are native-only: until it ships, the guard refuses the official controller's steps, so workflows only run with an overlaid controller image (testing.md plan 8). |
+| Step templates with host `mountPoints` | Rejected on Kubernetes runners (sources outside the run's workspace, `docker.sock`). Check whether any SG template uses them. |
 | Native steps: drift and policy-discovery runs | Not tested; their workspace directories (`shared-workspace-drift`, `-discovery`) differ from a normal run's. |
 | Native steps: NetworkPolicy and the broker | The policy's cluster-CIDR exclusion blocks the broker's API access; needs a dedicated value instead of the `extraEgress` workaround. |
 | Native steps: GKE | Nudge placeholder sized for steps (`advertise`), PD attach and node pinning on multi-node clusters, NetworkPolicy enforcement. |
@@ -79,11 +80,6 @@
   scheduled) and a new one. The placeholder is released at
   `TriggeredScaleUp`, so the runner takes the node as soon as it joins.
 
-- **Workflow logs sidecar (opt-in)** follows step containers only: the run
-  controller relays every step line to its own output (verified on QA), so
-  following it too doubled the stream. Its own setup lines (health check,
-  storage, VCS checkout, policies) aren't in the sidecar. Output lands in the
-  cluster's log pipeline, secrets included.
 
 - **`helm uninstall` waits for running workflows** (the hook parks runners
   first). Helm's default `--timeout` of 5m can expire first; the Job keeps

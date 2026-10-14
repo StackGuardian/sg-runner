@@ -20,6 +20,7 @@
 | `helm uninstall` hook | Go unit tests (fake clientset); kind smoke with a fake API | Stops the scaler, parks, reaps every state PVC (never-registered ones succeed), deletes PVCs and Jobs; a failed reap keeps that runner's PVCs and fails the hook |
 | Native steps: broker on a real cluster | OrbStack, `curl` over the socket from `dockerd` | Exit codes 0/1/11/12, `$(VAR)` stays literal, workspace writes visible, mounts outside the run rejected, bad image fails at once, Unschedulable after the timeout, stop keeps the step's exit code (143), 503,329/503,329 log lines at ~1 MiB/s across rotations, runner SA can't read Secrets or exec |
 | Native steps: controller client | OrbStack, client inside the controller image in nested `dockerd`, real broker | Both observation paths (exited / wait), failing exit, bad image → `AdminJobException`, cancel via `stop_container` (graceful and SIGKILL), `DockerLogger` relays step output |
+| Native-only runner + guard | QA, OrbStack (chart 0.9.0) | Broker as native sidecar, `dockerd` started with `--authorization-plugin=sg-steps-guard`; overlaid controller: step pod Completed / `completed-early`, run COMPLETED; SG's official controller: step create refused with the guard's message (403), run ERRORED, nothing in `dockerd`, no step pod |
 | Native steps end to end | QA, OrbStack, QA controller image + broker client overlaid ([plan 8](#8-native-steps-end-to-end-runbook)) | Scenarios 1–9, 11, 12, 14 pass: plan/apply, approval + resume, exit 12 (output of a 1s step kept), exit 3, cancel, step timeout, bad image, command override/env/workspace, two concurrent runs isolated, drain mid-step, step pods gone with their runner pod, nothing runs in `dockerd`. Scenario 15 (step wrapper): approval and exit-12 step pods `Completed`, outcome `approval-required` / `completed-early`, wrapped (image config read from SG's private ECR with the controller's login), Secrets deleted, pods kept |
 
 ## Not verified
@@ -131,13 +132,15 @@ client onto the official controller image inside the runner's `dockerd`.
 **Setup** (OrbStack, a throwaway runner group in `.env`, nothing else
 registered in it):
 
-1. Native values file:
+1. Values file (OrbStack):
 
    ```yaml
    runner:
-     nativeSteps:
-       enabled: true
-       advertise: { cpu: 4, memory: 6144Mi }
+     size: custom
+     advertise: { cpu: 4, memory: 6144Mi }
+     controllerResources:
+       limits: { cpu: "2", memory: 2Gi }
+     steps:
        schedulingTimeout: 2m
        startTimeout: 5m
        step:
@@ -152,11 +155,11 @@ registered in it):
    ```
 
 2. `make build build-scaler && make secret up HELM_ARGS="-f native.yaml"`.
-   **Register fresh with these values** (`make nuke` first if the runner
-   existed): ECS keeps the CPU/memory a runner registered with, and an agent
-   restart with a new size doesn't change it.
+   A runner registered with another size registers again on its own when
+   idle (`runner.reregisterOnResize`).
 3. Run one workflow so the official controller image is pulled into `dockerd`
-   (its `.Config.Image` must be a tag, not a digest). Then overlay: copy
+   (its `.Config.Image` must be a tag, not a digest). Its steps are refused by
+   the guard (scenario 16), which is expected. Then overlay: copy
    `src/run_controller` out of the image, add `external_runner/step_broker.py`
    and the one-line `step_client(...)` change to its `external.py`, and
    commit it under the same tag:
@@ -205,6 +208,7 @@ kubectl -n sg-runner exec sg-runner-0 -c dockerd -- docker ps -a --filter label=
 | 11 | `kubectl delete pod sg-runner-0` while a step runs | The broker stays up through the drain, the step finishes in its pod, the run completes, then the runner restarts |
 | 12 | Runner pod deleted | Its step pods are deleted with it (ownerReference) |
 | 14 | Every run | `docker ps -a --filter label=wfrunId` in `dockerd` stays empty |
+| 16 | Any run with the official controller (no broker client) | The step fails at once: "This runner runs workflow steps as Kubernetes pods and needs a run controller with native step support"; nothing runs in `dockerd` |
 | 15 | Approval (exit 11) and exit 12 runs | Step pods `Completed`, outcome `approval-required` / `completed-early`, annotation `wrapped: "true"`; env Secret gone, pod kept for `finishedTTL` |
 
 **Known behaviour**: exit 11 and 12 end `Completed` through the step wrapper

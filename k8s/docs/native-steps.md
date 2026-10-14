@@ -1,11 +1,24 @@
 # Native steps: workflow steps as pods
 
-Opt-in (`runner.nativeSteps.enabled`, default off). The run controller stays
-an ECS task in the runner pod's nested `dockerd`, registered through ECS
-Anywhere as before; only the workflow **steps** it starts become Kubernetes
-pods. Needs a run controller with the step broker client (sg-run-controller,
-`external_runner/step_broker.py`); a controller without it keeps running steps
-in `dockerd`.
+How the Kubernetes runner runs workflows: the run controller stays an ECS task
+in the runner pod's nested `dockerd`, registered through ECS Anywhere as
+before; the workflow **steps** it starts are Kubernetes pods. This is the only
+mode of the Kubernetes runner.
+
+## Requirements
+
+- **A run controller with the step broker client** (sg-run-controller,
+  `external_runner/step_broker.py`). SG's task definition picks the
+  controller, so SG must release it before Kubernetes runners can run
+  workflows. A controller without it is refused by the runner's guard (below):
+  its steps fail with a clear error instead of running in `dockerd`.
+- **Kubernetes 1.29 or newer** (the broker is a native sidecar).
+- **amd64 nodes** for SG's step images (amd64-only); arm64 only with
+  preloaded images (`runner.steps.step.imagePullPolicy: IfNotPresent`).
+- **One runner per node** (rendered as a required anti-affinity; see Sizing).
+- **No host bind mounts in steps.** Step `mountPoints` whose source is
+  outside the run's workspace (host paths, `docker.sock`) are rejected. Not
+  yet known whether any SG step template uses them (open item).
 
 Contract: [steps-api.md](steps-api.md). Tests: [testing.md](testing.md)
 (plan 8, and the kind smoke's native-steps stage).
@@ -82,9 +95,21 @@ runner pod (StatefulSet)                               step pods (same node)
   pull Secrets (the run's credentials) are deleted as soon as they finish.
   `kubectl get pods -l app.kubernetes.io/component=step -L
   sg-runner.stackguardian.io/outcome` shows what happened.
-- **Drain.** The broker's preStop waits for the runner's drain marker and it
-  ignores SIGTERM until then: run controllers keep their steps running through
-  a runner shutdown.
+- **Guard.** `dockerd` runs with an authorization plugin served by the
+  broker (`--authorization-plugin=sg-steps-guard`, socket shared through an
+  emptyDir at `/run/docker/plugins`). It refuses to create any container
+  labelled `wfrunId`, which is how the run controller labels steps, so a
+  controller without the broker client can't run user code in `dockerd`; its
+  step fails with "This runner runs workflow steps as Kubernetes pods and needs
+  a run controller with native step support". Everything else (the ECS agent
+  starting run controllers, pulls, logs) passes. Fail closed: while the
+  guard doesn't answer, `dockerd` refuses every call, so a crash-looping broker
+  blocks the runner.
+- **Lifecycle.** The broker is a native sidecar (init container with
+  `restartPolicy: Always`): it starts and passes its health check (both
+  sockets) before `dockerd` and the agents start, and stops only after they
+  have exited, so a draining runner's controllers keep their steps running to
+  the end.
 - **RBAC.** The runner's ServiceAccount can create, read, patch (the outcome
   label) and delete pods, read pod logs, and create and delete Secrets. It can't read or list Secrets (the
   node token is one) or exec into pods. The token is mounted in the broker
@@ -93,8 +118,10 @@ runner pod (StatefulSet)                               step pods (same node)
 ## Sizing: one runner per node
 
 The runner pod requests only what its run controllers need
-(`runner.nativeSteps.controllerResources`, roughly 512 Mi per concurrent run).
-The ECS agent advertises `runner.nativeSteps.advertise` (whole CPUs, memory)
+(derived from `runner.size`, or `runner.controllerResources` with `custom`;
+roughly 512 Mi per concurrent run). The ECS agent advertises the size's
+workflow capacity (`small` 2 CPU / 4 GiB, `medium` 4 / 8, `large` 8 / 16, or
+`runner.advertise` with `custom`)
 instead: that's what SG places workflows against, and the step pods consume
 it. Nothing reserves that capacity on the node, so the supported layout is one
 runner per node (required anti-affinity, rendered by the chart) with
@@ -132,7 +159,7 @@ an RWX prerequisite (Filestore, EFS, NFS) and slower small-file I/O.
   20s for that lookup.
 - **Architecture.** SG's step images are amd64-only. Nested Docker could run
   them on arm64 under emulation; the kubelet refuses to pull them. On arm64
-  nodes they must be preloaded with `runner.nativeSteps.step.imagePullPolicy:
+  nodes they must be preloaded with `runner.steps.step.imagePullPolicy:
   IfNotPresent` (OrbStack testing); production runs on amd64 nodes.
 - **Log bursts.** A step writing tens of MiB within a second can lose lines
   when the kubelet rotates its log file (10 MiB by default) faster than the
@@ -162,6 +189,8 @@ inside the runner's `dockerd`, with the ECS agent set to
 
 ## Open
 
+- Step templates with host `mountPoints`: check SG's templates for any;
+  they can't run on Kubernetes runners.
 - Drift and policy-discovery runs (their workspace directories differ from a
   normal run's): not tested yet.
 - ValidatingAdmissionPolicy limiting what the runner's ServiceAccount may
