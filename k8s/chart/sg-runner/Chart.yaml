@@ -3,7 +3,7 @@ name: sg-runner
 description: StackGuardian Private Runner on Kubernetes (prototype). Each StatefulSet replica is one registered runner.
 type: application
 # Chart version, bumped on every chart change.
-version: 0.7.0
+version: 0.8.0
 # The prototype image is built locally (`make build`), there is no released
 # tag yet. Used as the image tag when image.tag is empty.
 appVersion: "dev"

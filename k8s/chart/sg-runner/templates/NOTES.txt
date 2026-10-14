@@ -1,6 +1,6 @@
 {{- $sts := include "sg-runner.runnerName" . -}}
 {{- $ns := .Release.Namespace -}}
-sg-runner {{ .Chart.Version }} installed as StatefulSet {{ $ns }}/{{ $sts }} (size: {{ .Values.runner.size }}).
+sg-runner {{ .Chart.Version }} installed as StatefulSet {{ $ns }}/{{ $sts }} ({{ if .Values.runner.nativeSteps.enabled }}native steps{{ else }}size: {{ .Values.runner.size }}{{ end }}).
 
 Runner group: {{ .Values.sg.organization }}/{{ .Values.sg.runnerGroup }}. Each replica registers one runner on its
 first start.
@@ -41,7 +41,23 @@ running workflows, so pass a --timeout that covers them:
 uninstall.deregister=false: `helm uninstall` keeps the PVCs, and runners stay
 registered in SG as parked.
 {{- end }}
+{{- if .Values.runner.nativeSteps.enabled }}
+
+Native steps (experimental): one runner per node, advertising {{ .Values.runner.nativeSteps.advertise.cpu }} CPU / {{ .Values.runner.nativeSteps.advertise.memory }}.
+Each workflow step runs as a pod on its runner's node:
+  kubectl -n {{ $ns }} get pods -l app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=step
+  kubectl -n {{ $ns }} logs -f <step pod>
+Only while a step runs: a finished step pod is deleted once its run controller
+has the result (the output is in SG).
+The steps broker in each runner pod creates them:
+  kubectl -n {{ $ns }} logs -f {{ $sts }}-0 -c steps
+{{- end }}
 {{- if .Values.networkPolicy.enabled }}
 
 NetworkPolicy {{ $sts }} only takes effect with a CNI that enforces it.
+{{- if .Values.runner.nativeSteps.enabled }}
+It blocks the Kubernetes API too, which the steps broker needs: allow the API
+server's endpoint (`kubectl get endpoints kubernetes`) in
+networkPolicy.extraEgress. That opens it to everything in the runner pod.
+{{- end }}
 {{- end }}

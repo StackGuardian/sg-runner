@@ -48,6 +48,42 @@
     "positiveInt": {
       "type": "integer",
       "minimum": 1
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
+    },
+    "envList": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "properties": {
+        "requests": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/quantity"
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/quantity"
+          }
+        }
+      }
     }
   },
   "properties": {
@@ -190,6 +226,9 @@
           "properties": {
             "securityContext": {
               "type": "object"
+            },
+            "extraEnv": {
+              "$ref": "#/definitions/envList"
             }
           }
         },
@@ -231,6 +270,143 @@
               "type": "object"
             }
           }
+        },
+        "ecsAgent": {
+          "type": "object",
+          "properties": {
+            "extraEnv": {
+              "$ref": "#/definitions/envList"
+            }
+          }
+        },
+        "nativeSteps": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "advertise": {
+              "type": "object",
+              "properties": {
+                "cpu": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1
+                },
+                "memory": {
+                  "type": "string",
+                  "pattern": "^([1-9][0-9]*(Mi|Gi))?$"
+                }
+              },
+              "additionalProperties": false
+            },
+            "controllerResources": {
+              "$ref": "#/definitions/resources"
+            },
+            "workspace": {
+              "type": "object",
+              "required": [
+                "size"
+              ],
+              "properties": {
+                "storageClassName": {
+                  "type": "string"
+                },
+                "size": {
+                  "$ref": "#/definitions/quantity"
+                },
+                "accessModes": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "enum": [
+                      "ReadWriteOnce",
+                      "ReadWriteOncePod",
+                      "ReadWriteMany"
+                    ]
+                  }
+                }
+              }
+            },
+            "schedulingTimeout": {
+              "$ref": "#/definitions/duration"
+            },
+            "startTimeout": {
+              "$ref": "#/definitions/duration"
+            },
+            "finishedTTL": {
+              "$ref": "#/definitions/duration"
+            },
+            "step": {
+              "type": "object",
+              "properties": {
+                "nodeSelector": {
+                  "type": "object"
+                },
+                "tolerations": {
+                  "type": "array"
+                },
+                "imagePullPolicy": {
+                  "enum": [
+                    "",
+                    "Always",
+                    "IfNotPresent",
+                    "Never"
+                  ]
+                }
+              }
+            },
+            "broker": {
+              "type": "object",
+              "properties": {
+                "image": {
+                  "$ref": "#/definitions/image"
+                },
+                "resources": {
+                  "$ref": "#/definitions/resources"
+                },
+                "extraEnv": {
+                  "$ref": "#/definitions/envList"
+                }
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "then": {
+            "required": [
+              "advertise"
+            ],
+            "properties": {
+              "advertise": {
+                "required": [
+                  "cpu",
+                  "memory"
+                ],
+                "properties": {
+                  "cpu": {
+                    "type": "integer"
+                  },
+                  "memory": {
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "reregisterOnResize": {
+          "type": "boolean"
         }
       },
       "if": {

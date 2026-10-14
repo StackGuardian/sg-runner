@@ -61,6 +61,16 @@ expect_no_kind() { # <name> <kind>
   ! grep -q "^kind: $2\$" "$OUT/$1.yaml" \
     || { echo "::error title=helm template::scenario '$1' unexpectedly has a $2"; failed=1; }
 }
+expect_text() { # <name> <fixed string>
+  grep -qF -- "$2" "$OUT/$1.yaml" \
+    || { echo "::error title=helm template::scenario '$1' lacks: $2"; failed=1; }
+}
+expect_count() { # <name> <fixed string> <count>
+  local got
+  got=$(grep -cF -- "$2" "$OUT/$1.yaml" || true)
+  [[ $got == "$3" ]] \
+    || { echo "::error title=helm template::scenario '$1' has $got x '$2', want $3"; failed=1; }
+}
 
 echo "::group::helm lint --strict"
 helm version
@@ -73,6 +83,11 @@ expect_kind defaults Deployment
 expect_kind defaults Role
 # The uninstall hook (pre-delete Job).
 expect_kind defaults Job
+# The register init container sees what ecs-agent will advertise, to
+# re-register a runner whose size changed.
+expect_count defaults 'name: SG_TASK_CPU_LIMIT' 2
+expect_count defaults 'name: SG_TASK_MEMORY_LIMIT_MIB' 2
+expect_text defaults '{ name: SG_REREGISTER_ON_RESIZE, value: "true" }'
 
 render credentials-create \
   --set credentials.create=true \
@@ -122,6 +137,44 @@ render metrics "${CREDS[@]}" \
 expect_kind metrics Service
 expect_kind metrics ServiceMonitor
 
+# Native steps: broker container, runner RBAC, workspace PVC per pod; the
+# NetworkPolicy covers step pods.
+NATIVE=(--set runner.nativeSteps.enabled=true
+  --set runner.nativeSteps.advertise.cpu=4 --set runner.nativeSteps.advertise.memory=6Gi)
+render native-steps "${CREDS[@]}" "${NATIVE[@]}" \
+  --set networkPolicy.enabled=true --set 'networkPolicy.clusterCIDRs={10.0.0.0/8}' \
+  --set 'runner.ecsAgent.extraEnv[0].name=ECS_IMAGE_PULL_BEHAVIOR' \
+  --set 'runner.ecsAgent.extraEnv[0].value=prefer-cached' \
+  --set 'runner.dockerd.extraEnv[0].name=SG_PRUNE_INTERVAL_SECONDS' \
+  --set-string 'runner.dockerd.extraEnv[0].value=0' \
+  --set runner.nativeSteps.step.imagePullPolicy=IfNotPresent
+expect_kind native-steps ServiceAccount
+expect_kind native-steps Role
+expect_kind native-steps RoleBinding
+expect_kind native-steps NetworkPolicy
+expect_text native-steps 'volumeClaimTemplate:'
+expect_text native-steps '- name: steps'
+expect_text native-steps 'values: [runner, reaper, step]'
+expect_text native-steps '{ name: SG_TASK_MEMORY_LIMIT_MIB, value: "6144" }'
+expect_text native-steps 'topologyKey: kubernetes.io/hostname'
+expect_count native-steps '{ name: SG_TASK_CPU_LIMIT, value: "4" }' 2
+expect_count native-steps '{ name: SG_DOCKERD_OVERHEAD_MIB, value: "0" }' 2
+expect_text native-steps '{ name: STEP_IMAGE_PULL_POLICY, value: IfNotPresent }'
+expect_text native-steps 'name: SG_PRUNE_INTERVAL_SECONDS'
+# Only the broker gets a token; workflow-logs is off with native steps.
+render native-steps-logs "${CREDS[@]}" "${NATIVE[@]}" --set runner.nativeSteps.advertise.memory=3072Mi \
+  --set runner.workflowLogs.enabled=true --set runner.reregisterOnResize=false
+expect_text native-steps-logs '{ name: SG_TASK_MEMORY_LIMIT_MIB, value: "3072" }'
+expect_text native-steps-logs '{ name: SG_REREGISTER_ON_RESIZE, value: "false" }'
+if grep -q 'name: workflow-logs' "$OUT/native-steps-logs.yaml"; then
+  echo "::error title=helm template::scenario 'native-steps-logs' has a workflow-logs container"
+  failed=1
+fi
+if [[ $(grep -c 'mountPath: /var/run/secrets/kubernetes.io/serviceaccount' "$OUT/native-steps.yaml") -ne 1 ]]; then
+  echo "::error title=helm template::scenario 'native-steps' must mount the API token in exactly one container"
+  failed=1
+fi
+
 echo "::group::kubeconform (Kubernetes $KUBE_VERSION)"
 # ServiceMonitor is validated against the community CRDs catalog.
 kubeconform -strict -summary -output text \
@@ -144,6 +197,15 @@ reject token-only-secret 'additional properties|additionalProperties|organizatio
   --set sg.organization=o --set sg.runnerGroup=g
 reject custom-without-limits 'limits' "${CREDS[@]}" --set runner.size=custom
 reject network-policy-no-cidrs 'clusterCIDRs' "${CREDS[@]}" --set networkPolicy.enabled=true
+reject native-steps-no-advertise 'advertise' "${CREDS[@]}" --set runner.nativeSteps.enabled=true
+reject native-steps-fractional-cpu 'advertise[./]cpu' "${CREDS[@]}" "${NATIVE[@]}" \
+  --set runner.nativeSteps.advertise.cpu=1.5
+reject native-steps-memory-bytes 'advertise[./]memory' "${CREDS[@]}" "${NATIVE[@]}" \
+  --set runner.nativeSteps.advertise.memory=6442450944
+reject native-steps-bad-timeout 'startTimeout' "${CREDS[@]}" "${NATIVE[@]}" \
+  --set runner.nativeSteps.startTimeout=30
+reject native-steps-bad-pull-policy 'imagePullPolicy' "${CREDS[@]}" "${NATIVE[@]}" \
+  --set runner.nativeSteps.step.imagePullPolicy=Sometimes
 reject replicas-without-lease 'leaderElection' "${CREDS[@]}" \
   --set scaler.replicas=2 --set scaler.leaderElection.enabled=false
 echo "::endgroup::"

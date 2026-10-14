@@ -71,7 +71,8 @@ runner:
   # Scratch space for workflow runs. The run controller and every step
   # bind-mount /var/tmp/workspace from the Docker daemon they run on, i.e. the
   # dockerd container. Without a volume it lands in the container's writable
-  # layer. An emptyDir matches a VM (scratch, gone when the pod goes).
+  # layer. An emptyDir matches a VM (scratch, gone when the pod goes). Native
+  # steps use nativeSteps.workspace instead.
   workspace:
     # The kubelet evicts the pod (and with it running workflows) when the
     # workspace grows past this.
@@ -96,6 +97,10 @@ runner:
     # Nested Docker needs a privileged container for now (see docs/TODO.md).
     securityContext:
       privileged: true
+    # Extra env vars for the dockerd container (advanced/testing), e.g. turn
+    # off the nested Docker prune loop:
+    #   - { name: SG_PRUNE_INTERVAL_SECONDS, value: "0" }
+    extraEnv: []
 
   # A `workflow-logs` sidecar streaming every workflow step's output to its
   # stdout, one tagged line per output line (run controllers are skipped: they
@@ -115,6 +120,93 @@ runner:
     resources:
       requests: { cpu: 10m, memory: 32Mi }
       limits: { memory: 256Mi }
+
+  ecsAgent:
+    # Extra env vars for the ecs-agent container (advanced/testing), e.g.
+    #   - { name: ECS_IMAGE_PULL_BEHAVIOR, value: prefer-cached }
+    extraEnv: []
+
+  # Native steps (experimental): run controllers stay in the nested Docker,
+  # but each workflow step runs as its own pod on the runner's node, created by
+  # a `steps` broker container in the runner pod (k8s/docs/steps-api.md).
+  # Changes the runner pod when on:
+  #   - one runner per node (required pod anti-affinity, added to
+  #     runner.affinity), steps are pinned to it
+  #   - the runner advertises `advertise` to SG instead of dockerd's limits;
+  #     runner.size and runner.resources are ignored, dockerd gets
+  #     controllerResources
+  #   - the workspace is a PVC per pod (<pod>-workspace, a generic ephemeral
+  #     volume, gone with the pod) that the step pods mount too;
+  #     runner.workspace is ignored
+  #   - the runner pod gets a ServiceAccount (pods, pods/log and creating
+  #     Secrets in the namespace); only the steps container mounts its token
+  #   - no workflow-logs sidecar: steps are pods,
+  #     `kubectl logs -l app.kubernetes.io/component=step`, but only while a
+  #     step runs: a finished step pod is deleted once its run controller has
+  #     its result (the output is in SG)
+  nativeSteps:
+    enabled: false
+    # Required when enabled: the step capacity the runner advertises to SG,
+    # i.e. what the node has left for step pods and run controllers. Whole CPUs;
+    # memory in Mi or Gi (e.g. 6Gi, 3072Mi). A workflow reserves its run
+    # controller's 0.5 vCPU / 512 MiB plus its own setting out of this. Must
+    # not exceed the node (the agent can't advertise more than the node has),
+    # and node memory minus this must stay under 64 GiB (the agent's
+    # reservation is a uint16 of MiB; the runner refuses to start otherwise).
+    advertise:
+      cpu:
+      memory: ""
+    # The dockerd container, which only hosts run controllers now. Size the
+    # memory limit at ~512Mi per concurrent workflow run.
+    controllerResources:
+      requests: { cpu: 500m, memory: 1Gi }
+      limits: { cpu: "2", memory: 2Gi }
+    # Workspace PVC (generic ephemeral volume) at /var/tmp/workspace on dockerd,
+    # mounted by the steps. Steps share the runner's node, so ReadWriteOnce is
+    # enough.
+    workspace:
+      # Empty = the cluster's default StorageClass.
+      storageClassName: ""
+      size: 20Gi
+      accessModes: [ReadWriteOnce]
+    # A step pod that can't be scheduled for this long fails (Unschedulable).
+    schedulingTimeout: 5m
+    # A step pod still pending (pulling, creating) after this long fails.
+    startTimeout: 30m
+    # Fallback only: the broker deletes a finished step pod (and its Secrets)
+    # as soon as its run controller has read the result. One nobody read (e.g.
+    # the controller died) is deleted this long after it finished.
+    finishedTTL: 10m
+    # Scheduling of step pods (pinned to the runner's node anyway). Empty =
+    # runner.nodeSelector / runner.tolerations, so steps tolerate the runner
+    # node's taints.
+    step:
+      nodeSelector: {}
+      tolerations: []
+      # Pull policy of step images. Empty = automatic: Always for `latest` or
+      # no tag, else IfNotPresent. IfNotPresent or Never for air-gapped
+      # clusters or images preloaded on the nodes.
+      imagePullPolicy: ""
+    # The `steps` container (Go, distroless, non-root).
+    broker:
+      # Empty repository = the scaler image (it ships /sg-runner-steps).
+      image:
+        repository: ""
+        tag: ""
+        pullPolicy: IfNotPresent
+      resources:
+        requests: { cpu: 10m, memory: 32Mi }
+        limits: { memory: 256Mi }
+      extraEnv: []
+
+  # ECS keeps a runner's CPU and memory from its first registration, so a
+  # new size (runner.size, runner.resources, nativeSteps.advertise) would
+  # otherwise not show until the runner registers anew. With this on, a
+  # runner whose registered size differs from what it now advertises
+  # deregisters and registers again when its pod starts, if nothing runs on
+  # it (else it keeps the old size and logs a warning). It gets a new runner
+  # ID in SG.
+  reregisterOnResize: true
 
   # Upper bound on how long a terminating runner waits for running workflows
   # (the ecs-agent preStop drain) before it is killed.
