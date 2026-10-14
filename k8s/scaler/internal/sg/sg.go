@@ -35,7 +35,8 @@ type Credentials struct {
 	BaseAPI      string
 }
 
-// LoadCredentials reads the credentials Secret mounted as one file per key.
+// LoadCredentials reads the node token (Secret) and the runner group
+// (ConfigMap), mounted together as one file per key.
 func LoadCredentials(dir string) (Credentials, error) {
 	read := func(key string, required bool) (string, error) {
 		b, err := os.ReadFile(filepath.Join(dir, key))

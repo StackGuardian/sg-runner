@@ -15,6 +15,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 
 	"github.com/StackGuardian/sg-runner/k8s/scaler/internal/decide"
@@ -53,6 +54,12 @@ type Controller struct {
 	FailureEvents int
 	// WarnEvery rate-limits repeats of the same Warning event.
 	WarnEvery time.Duration
+	// Nudge starts placeholder pods for runner pods the cluster autoscaler
+	// won't add a node for (see kube.NudgeJob).
+	Nudge bool
+	// NudgeCooldown spaces placeholders for the same runner
+	// (DefaultNudgeCooldown when zero).
+	NudgeCooldown time.Duration
 
 	state     *decide.State
 	persisted map[string]*string
@@ -63,7 +70,25 @@ type Controller struct {
 	// lastLoop is the Unix nano time of the last loop attempt.
 	lastLoop atomic.Int64
 	ordinal  *regexp.Regexp
+	// nudges are each unschedulable runner's placeholder attempts.
+	nudges map[int]nudgeAttempt
 }
+
+// nudgeAttempt is when a runner's last placeholder started, and how many it
+// had since it became unschedulable.
+type nudgeAttempt struct {
+	at       time.Time
+	attempts int
+}
+
+// DefaultNudgeCooldown spaces placeholders for the same runner. It must
+// outlast a node's boot: a runner still Pending sooner is just waiting for
+// the node already requested.
+const DefaultNudgeCooldown = 3 * time.Minute
+
+// NudgeWarnAfter is how many placeholders a runner may need before the
+// scaler reports it as blocked.
+const NudgeWarnAfter = 2
 
 func (c *Controller) init() {
 	if c.Now == nil {
@@ -83,6 +108,12 @@ func (c *Controller) init() {
 	}
 	if c.warned == nil {
 		c.warned = map[string]time.Time{}
+	}
+	if c.nudges == nil {
+		c.nudges = map[int]nudgeAttempt{}
+	}
+	if c.NudgeCooldown == 0 {
+		c.NudgeCooldown = DefaultNudgeCooldown
 	}
 	if c.ordinal == nil {
 		c.ordinal = regexp.MustCompile(`^` + regexp.QuoteMeta(c.Kube.StatefulSet) + `-(\d+)\.`)
@@ -264,6 +295,7 @@ func (c *Controller) loop(ctx context.Context, now time.Time) (*appsv1.StatefulS
 		}
 	}
 	c.reap(ctx, sts, d.Reap, now)
+	c.nudge(ctx, sts, d.Replicas, now)
 
 	parked := 0
 	for n := range claims {
@@ -438,6 +470,133 @@ func (c *Controller) reap(ctx context.Context, sts *appsv1.StatefulSet, actions 
 			c.warn(sts, decide.Event{Type: decide.EventWarning, Reason: "ReapFailed",
 				Key:     fmt.Sprintf("ReapFailed/%d", a.Ordinal),
 				Message: fmt.Sprintf("deregistering parked runner %d failed; retrying (identity kept on %s)", a.Ordinal, a.Claim)})
+		}
+	}
+}
+
+// nudge gets nodes for awake runners whose pods the cluster autoscaler
+// refused to add a node for: a placeholder without volumes asks for one, and
+// is deleted as soon as the autoscaler accepts (TriggeredScaleUp), so the
+// runner takes the node the moment it joins. A runner still unschedulable a
+// cooldown later gets another placeholder; repeated attempts are reported.
+// Best effort: errors are logged and retried next loop.
+func (c *Controller) nudge(ctx context.Context, sts *appsv1.StatefulSet, replicas int, now time.Time) {
+	if !c.Nudge {
+		return
+	}
+	kerr := func(what string, err error) {
+		c.Metrics.KubeErrors.Inc()
+		c.Log.Error(what, "err", err)
+	}
+	sel, err := metav1.LabelSelectorAsSelector(sts.Spec.Selector)
+	if err != nil {
+		c.Log.Error("runner selector", "err", err)
+		return
+	}
+	pods, err := c.Kube.RunnerPods(ctx, sel.String())
+	if err != nil {
+		kerr("list runner pods", err)
+		return
+	}
+	jobs, err := c.Kube.NudgeJobs(ctx)
+	if err != nil {
+		kerr("list placeholder jobs", err)
+		return
+	}
+	blocked := func(n int, why string) {
+		c.warn(sts, decide.Event{Type: decide.EventWarning, Reason: "ScaleUpBlocked",
+			Key:     fmt.Sprintf("ScaleUpBlocked/%d", n),
+			Message: fmt.Sprintf("runner %d can't get a node: %s; retrying in %s", n, why, c.NudgeCooldown)})
+	}
+
+	for n, j := range jobs {
+		p := pods[n]
+		job := c.Kube.NudgeJobName(n)
+		log := c.Log.With("runner", n, "job", job)
+		remove := func() bool {
+			if err := c.Kube.DeleteNudgeJob(ctx, n); err != nil {
+				kerr("delete placeholder job", err)
+				return false
+			}
+			return true
+		}
+		if n >= replicas || p == nil || !kube.Unschedulable(p) {
+			// Placed, parked or gone: nothing left to ask for.
+			if remove() {
+				log.Info("placeholder no longer needed, deleted")
+			}
+			continue
+		}
+		reason, msg, err := c.Kube.NudgeOutcome(ctx, n, j.Created)
+		if err != nil {
+			kerr("list placeholder events", err)
+			continue
+		}
+		switch {
+		case reason == kube.EventScaleUpTriggered || j.State == kube.NudgeRunning:
+			// A node is coming (or there): free it for the runner now.
+			if !remove() {
+				continue
+			}
+			c.Metrics.Nudges.WithLabelValues("node_requested").Inc()
+			log.Info("cluster autoscaler is adding a node; placeholder deleted so the runner takes it")
+			c.Events.Eventf(sts, corev1.EventTypeNormal, "NodeRequested",
+				"runner %d: the cluster autoscaler is adding a node for job/%s; deleted the placeholder so the runner takes the node", n, job)
+		case reason == kube.EventScaleUpRefused:
+			if !remove() {
+				continue
+			}
+			c.Metrics.Nudges.WithLabelValues("refused").Inc()
+			log.Warn("cluster autoscaler refused the placeholder too", "message", msg)
+			blocked(n, "the cluster autoscaler won't add a node even without volumes ("+msg+")")
+		case j.State == kube.NudgeFailed:
+			if !remove() {
+				continue
+			}
+			c.Metrics.Nudges.WithLabelValues("refused").Inc()
+			log.Warn("no answer from the cluster autoscaler within the placeholder's deadline")
+			blocked(n, fmt.Sprintf("no node for its placeholder within %s", time.Duration(kube.NudgeDeadline)*time.Second))
+		}
+	}
+
+	for n, p := range pods {
+		if n >= replicas || !kube.Unschedulable(p) {
+			delete(c.nudges, n)
+			continue
+		}
+		if _, ok := jobs[n]; ok {
+			continue
+		}
+		last := c.nudges[n]
+		if last.attempts > 0 && now.Sub(last.at) < c.NudgeCooldown {
+			continue
+		}
+		refused, err := c.Kube.ScaleUpRefused(ctx, p)
+		if err != nil {
+			kerr("list autoscaler events", err)
+			continue
+		}
+		if !refused {
+			continue
+		}
+		if last.attempts >= NudgeWarnAfter {
+			blocked(n, fmt.Sprintf("still unschedulable after %d node requests (the new node went to another pod, or never came)", last.attempts))
+		}
+		if err := c.Kube.CreateNudgeJob(ctx, n, p); err != nil {
+			kerr("create placeholder job", err)
+			continue
+		}
+		c.nudges[n] = nudgeAttempt{at: now, attempts: last.attempts + 1}
+		c.Metrics.Nudges.WithLabelValues("started").Inc()
+		c.Log.Info("cluster autoscaler won't add a node for the runner pod; asking with a placeholder",
+			"runner", n, "job", c.Kube.NudgeJobName(n), "attempt", last.attempts+1)
+		c.Events.Eventf(sts, corev1.EventTypeNormal, "NudgingAutoscaler",
+			"runner %d can't be scheduled and the cluster autoscaler won't add a node for it (its volumes): job/%s asks for one",
+			n, c.Kube.NudgeJobName(n))
+	}
+	for n := range c.nudges {
+		if _, ok := pods[n]; !ok {
+			delete(c.nudges, n)
 		}
 	}
 }

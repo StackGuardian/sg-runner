@@ -24,7 +24,7 @@ func pvc(name string, ann map[string]string) *corev1.PersistentVolumeClaim {
 }
 
 func newKube(objs ...runtime.Object) *Kube {
-	return New(fake.NewClientset(objs...), ns, "sg-runner", "img:1", "creds")
+	return New(fake.NewClientset(objs...), ns, "sg-runner", "img:1", "creds", "cfg")
 }
 
 func TestClaims(t *testing.T) {
@@ -89,7 +89,7 @@ func TestScaleAndAnnotateStatefulSet(t *testing.T) {
 }
 
 func TestReapJobSpec(t *testing.T) {
-	k := New(nil, ns, "sg-runner", "img:1", "creds")
+	k := New(nil, ns, "sg-runner", "img:1", "creds", "cfg")
 	j := k.ReapJob(4)
 	if j.Name != "sg-runner-reap-4" || j.Labels["app"] != "sg-runner-reaper" {
 		t.Errorf("metadata %+v", j.ObjectMeta)
@@ -115,8 +115,15 @@ func TestReapJobSpec(t *testing.T) {
 		t.Errorf("mounts %+v", c.VolumeMounts)
 	}
 	if ps.Volumes[0].PersistentVolumeClaim.ClaimName != "state-sg-runner-4" ||
-		ps.Volumes[1].Secret.SecretName != "creds" || *ps.Volumes[1].Secret.DefaultMode != 0o400 {
+		*ps.Volumes[1].Projected.DefaultMode != 0o400 {
 		t.Errorf("volumes %+v", ps.Volumes)
+	}
+	// Only the token from the Secret, the rest from the ConfigMap.
+	src := ps.Volumes[1].Projected.Sources
+	wantToken := []corev1.KeyToPath{{Key: "SG_NODE_TOKEN", Path: "SG_NODE_TOKEN"}}
+	if len(src) != 2 || src[0].Secret.Name != "creds" || !reflect.DeepEqual(src[0].Secret.Items, wantToken) ||
+		src[1].ConfigMap.Name != "cfg" || src[1].ConfigMap.Items != nil {
+		t.Errorf("credential sources %+v", src)
 	}
 }
 
@@ -156,7 +163,7 @@ func TestReapJobLifecycle(t *testing.T) {
 }
 
 func TestReapJobPodOptions(t *testing.T) {
-	k := New(nil, ns, "sg-runner", "img:1", "creds")
+	k := New(nil, ns, "sg-runner", "img:1", "creds", "cfg")
 	k.ReapPod = ReapPodOptions{
 		Labels:           map[string]string{"np": "egress", "app": "hijack"},
 		ImagePullSecrets: []string{"regcred"},

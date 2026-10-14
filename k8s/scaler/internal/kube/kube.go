@@ -51,22 +51,31 @@ type Kube struct {
 	StatefulSet string
 	// Image is the runner image reap Jobs run.
 	Image string
-	// CredentialsSecret is the runner group's SG credentials Secret.
+	// CredentialsSecret holds the runner group's node token (key
+	// SG_NODE_TOKEN).
 	CredentialsSecret string
-	// ReapPod customizes reap Jobs.
+	// ConfigMap holds the runner group (SG_ORGANIZATION, SG_RUNNER_GROUP,
+	// SG_BASE_API).
+	ConfigMap string
+	// ReapPod customizes reap Jobs (and placeholder Jobs' pull secrets).
 	ReapPod ReapPodOptions
+	// NudgeImage is the placeholder Jobs' image (DefaultNudgeImage when empty).
+	NudgeImage string
 
-	claimRE *regexp.Regexp
-	jobRE   *regexp.Regexp
+	claimRE  *regexp.Regexp
+	dockerRE *regexp.Regexp
+	jobRE    *regexp.Regexp
 }
 
 // New returns the adapter for one StatefulSet.
-func New(c kubernetes.Interface, namespace, statefulSet, image, secret string) *Kube {
+func New(c kubernetes.Interface, namespace, statefulSet, image, secret, configMap string) *Kube {
 	q := regexp.QuoteMeta(statefulSet)
 	return &Kube{
-		Client: c, Namespace: namespace, StatefulSet: statefulSet, Image: image, CredentialsSecret: secret,
-		claimRE: regexp.MustCompile(`^state-` + q + `-(\d+)$`),
-		jobRE:   regexp.MustCompile(`^` + q + `-reap-(\d+)$`),
+		Client: c, Namespace: namespace, StatefulSet: statefulSet, Image: image,
+		CredentialsSecret: secret, ConfigMap: configMap,
+		claimRE:  regexp.MustCompile(`^state-` + q + `-(\d+)$`),
+		dockerRE: regexp.MustCompile(`^docker-` + q + `-(\d+)$`),
+		jobRE:    regexp.MustCompile(`^` + q + `-reap-(\d+)$`),
 	}
 }
 
@@ -156,6 +165,51 @@ func (k *Kube) Claims(ctx context.Context) (map[int]decide.Claim, error) {
 	return out, nil
 }
 
+// DockerClaims lists the ordinals that have a Docker cache PVC.
+func (k *Kube) DockerClaims(ctx context.Context) ([]int, error) {
+	list, err := k.Client.CoreV1().PersistentVolumeClaims(k.Namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	var out []int
+	for _, p := range list.Items {
+		m := k.dockerRE.FindStringSubmatch(p.Name)
+		if m == nil || p.DeletionTimestamp != nil {
+			continue
+		}
+		if n, err := strconv.Atoi(m[1]); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out, nil
+}
+
+// ScaleDeployment sets a Deployment's replicas through the scale subresource.
+func (k *Kube) ScaleDeployment(ctx context.Context, name string, replicas int) error {
+	body := fmt.Sprintf(`{"spec":{"replicas":%d}}`, replicas)
+	_, err := k.Client.AppsV1().Deployments(k.Namespace).Patch(ctx, name,
+		types.MergePatchType, []byte(body), metav1.PatchOptions{}, "scale")
+	return err
+}
+
+// CountPods counts the pods matching a label selector.
+func (k *Kube) CountPods(ctx context.Context, selector string) (int, error) {
+	list, err := k.Client.CoreV1().Pods(k.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return 0, err
+	}
+	return len(list.Items), nil
+}
+
+// ReapJobExists tells whether the reap Job of an ordinal still exists.
+func (k *Kube) ReapJobExists(ctx context.Context, n int) (bool, error) {
+	_, err := k.Client.BatchV1().Jobs(k.Namespace).Get(ctx, k.JobName(n), metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 // DeleteClaim deletes a PVC; a missing one is fine.
 func (k *Kube) DeleteClaim(ctx context.Context, name string) error {
 	err := k.Client.CoreV1().PersistentVolumeClaims(k.Namespace).Delete(ctx, name, metav1.DeleteOptions{})
@@ -233,8 +287,21 @@ func (k *Kube) ReapJob(n int) *batchv1.Job {
 					Volumes: []corev1.Volume{
 						{Name: "state", VolumeSource: corev1.VolumeSource{
 							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: k.ClaimName(n)}}},
+						// The node token and the runner group as files in one
+						// directory, as runner.sh reads them.
 						{Name: "sg-credentials", VolumeSource: corev1.VolumeSource{
-							Secret: &corev1.SecretVolumeSource{SecretName: k.CredentialsSecret, DefaultMode: ptr.To[int32](0o400)}}},
+							Projected: &corev1.ProjectedVolumeSource{
+								DefaultMode: ptr.To[int32](0o400),
+								Sources: []corev1.VolumeProjection{
+									{Secret: &corev1.SecretProjection{
+										LocalObjectReference: corev1.LocalObjectReference{Name: k.CredentialsSecret},
+										Items:                []corev1.KeyToPath{{Key: "SG_NODE_TOKEN", Path: "SG_NODE_TOKEN"}},
+									}},
+									{ConfigMap: &corev1.ConfigMapProjection{
+										LocalObjectReference: corev1.LocalObjectReference{Name: k.ConfigMap},
+									}},
+								},
+							}}},
 					},
 				},
 			},
