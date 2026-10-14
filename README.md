@@ -190,14 +190,18 @@ To revert you can just run:
 
 ## Kubernetes (prototype)
 
-> **Prototype only.** Not supported for customer use.
+> **Prototype only.** Not supported for customer use. Needs a run controller
+> release with step broker support, which StackGuardian hasn't shipped yet.
 
 [`k8s/`](k8s/README.md) runs Private Runners as Kubernetes pods, installed with
-a Helm chart ([`k8s/chart/sg-runner`](k8s/chart/sg-runner/README.md)). Each
-StatefulSet replica is one registered runner, with nested Docker, the SSM agent
-and the ECS agent as containers, and `main.sh` sourced for registration and
-network setup. A scaler ([`k8s/scaler`](k8s/scaler), Go) follows the runner
-group's queue in SG:
+a Helm chart ([`k8s/chart/sg-runner`](k8s/chart/sg-runner/README.md), Kubernetes
+1.29+). Each StatefulSet replica is one registered runner: a nested Docker
+daemon for the run controller, the SSM and ECS agents, and `main.sh` sourced
+for registration and network setup. Workflow **steps** run as their own
+Kubernetes pods, created by a step broker in the runner pod
+([`k8s/docs/native-steps.md`](k8s/docs/native-steps.md)); a guard refuses step
+containers in the nested Docker daemon. A scaler
+([`k8s/scaler`](k8s/scaler), Go) follows the runner group's queue in SG:
 
 - **Parks** idle runners: the pod stops but the runner stays registered, and
   wakes again in about 8s (a fresh registration takes about 20s).
@@ -205,23 +209,22 @@ group's queue in SG:
   the runner group's `MaxNumberOfRunners`; optional headroom keeps a warm spare.
 - **Deregisters** runners parked longer than a TTL (12h by default).
 
-Customers pick the runner size at install (`runner.size`: `small`, `medium`,
-`large` or `custom`). Tested end to end on OrbStack Kubernetes against QA with
-the earlier shell scaler; see [`k8s/README.md`](k8s/README.md) for usage,
-measurements and known gaps.
+The runner size (`runner.size`: `small`, `medium`, `large` or `custom`) sets
+the workflow capacity a runner advertises; one runner per node. See
+[`k8s/README.md`](k8s/README.md) for usage, measurements and known gaps.
 
 ### Known gaps
 
-- **Privileged pod.** Nested Docker needs it, or an equivalent set of
-  capabilities; clusters enforcing restricted Pod Security reject either.
-- **Network isolation is opt-in.** The chart's NetworkPolicy keeps workflow
-  containers away from cluster addresses and the metadata endpoint, but needs
-  an enforcing CNI and the cluster's CIDRs.
-- **No task CPU/memory limits.** The agent can't create task cgroups from its
-  container; the pod's resources are the only cap.
+- **Privileged pod.** The nested Docker daemon (run controllers) needs it;
+  clusters enforcing restricted Pod Security reject it. Workflow steps run as
+  unprivileged pods.
+- **Network isolation is opt-in.** The chart's NetworkPolicy keeps runner and
+  step pods away from cluster addresses and the metadata endpoint, but needs an
+  enforcing CNI and the cluster's CIDRs.
+- **amd64 nodes** for StackGuardian's step images.
 - **No proxy support.** `--http-proxy` isn't wired up.
-- **Unverified:** waking a runner after a long park (hours or days), and the Go
-  scaler against real SG.
+- **Unverified:** waking a runner after a long park (hours or days), the Go
+  scaler against real SG, and GKE/EKS specifics (see `k8s/docs/open-items.md`).
 - **SG credentials in the pod.** Mounted into the `ecs-agent` container and the
   scaler to set runner status and read the queue.
 - **`ecs-init` is bypassed.** Agent defaults are copied into `k8s/runner.sh` and

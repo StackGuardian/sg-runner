@@ -5,15 +5,17 @@
 ### Verify the NetworkPolicy on an enforcing CNI
 
 The chart ships an optional egress NetworkPolicy (`networkPolicy.enabled`) for
-runner and reap pods: DNS to kube-dns, everything outside `clusterCIDRs`, no
-`169.254.169.254`. Nested workflow traffic leaves through the pod IP, so it is
-covered. Not yet tested on a CNI that enforces NetworkPolicy (Calico, Cilium,
-the VPC CNI's policy mode):
+runner, step and reap pods: DNS to kube-dns, everything outside `clusterCIDRs`,
+no `169.254.169.254`. Not yet tested on a CNI that enforces NetworkPolicy
+(Calico, Cilium, the VPC CNI's policy mode):
 
-- Confirm a workflow container can't reach the Kubernetes API, other pods or
-  the metadata endpoint, and can still reach SG, AWS, VCS and registries.
-- Decide whether workflows may resolve cluster names at all; if not, block
-  cluster DNS and give `dockerd` an explicit `--dns`.
+- Confirm a step pod can't reach the Kubernetes API, other pods or the metadata
+  endpoint, and can still reach SG, AWS, VCS and registries.
+- The step broker needs the Kubernetes API: today that means an
+  `extraEgress` rule for the API endpoint (open to the whole runner pod);
+  replace it with a dedicated value.
+- Decide whether steps may resolve cluster names at all; if not, give step
+  pods their own `dnsConfig` and block cluster DNS.
 
 ### Long parking and hard kills against real SG
 
