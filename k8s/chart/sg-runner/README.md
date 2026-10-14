@@ -10,6 +10,12 @@ queue. Design and known gaps: [`k8s/README.md`](../../README.md).
 
 ## Install
 
+The chart and its images are published to GHCR (beta): the chart as
+`oci://ghcr.io/stackguardian/charts/sg-runner`, the images as
+`ghcr.io/stackguardian/sg-runner-k8s` and `ghcr.io/stackguardian/sg-runner-scaler`,
+all with the same version (the chart's defaults point at its own release's
+images). Versions are on the repository's releases (`k8s/v*` tags).
+
 Only the runner group's node token is secret. The organization, runner group
 and API URL are plain values (`sg.*`); the chart keeps them in a ConfigMap.
 
@@ -17,10 +23,14 @@ and API URL are plain values (`sg.*`); the chart keeps them in a ConfigMap.
 kubectl create namespace sg-runner
 kubectl -n sg-runner create secret generic sg-runner-credentials \
   --from-literal=SG_NODE_TOKEN=...
-helm -n sg-runner upgrade --install sg-runner ./k8s/chart/sg-runner \
+helm -n sg-runner upgrade --install sg-runner oci://ghcr.io/stackguardian/charts/sg-runner --version <v> \
   --set sg.organization=<org> --set sg.runnerGroup=<runner group> \
   --set credentials.existingSecret=sg-runner-credentials --set runner.size=medium
 ```
+
+From a checkout, `./k8s/chart/sg-runner` works the same; its images default to
+the `dev` tag, so set `image.*` and `scaler.image.*` to images you built
+(`make up` does).
 
 Or let the chart create the Secret too (`credentials.create=true`,
 `credentials.nodeToken=...`), with `--create-namespace`: one `helm install`.
@@ -165,7 +175,7 @@ stays.
 | Key | Default | Description |
 |---|---|---|
 | `nameOverride` / `fullnameOverride` | `""` | Rename resources; `fullnameOverride` also renames the StatefulSet (max 52 chars). |
-| `image.repository` / `.tag` / `.pullPolicy` | `sg-runner-k8s` / `dev` / `IfNotPresent` | Runner image; also used by reap Jobs. Empty tag = `appVersion`. |
+| `image.repository` / `.tag` / `.pullPolicy` | `ghcr.io/stackguardian/sg-runner-k8s` / `""` / `IfNotPresent` | Runner image; also used by reap Jobs. Empty tag = `appVersion` (the release's version). |
 | `imagePullSecrets` | `[]` | For runner, scaler and reap Job pods (and native steps' wrapper). Secret names or `{name: ...}` objects, mixed as you like. |
 | `sg.organization` / `sg.runnerGroup` | `""` | Required: the runner group to register into. In the `<release>-config` ConfigMap. |
 | `sg.apiUrl` | `""` | StackGuardian API; empty = `https://api.app.stackguardian.io/api/v1`. |
@@ -191,7 +201,7 @@ stays.
 | `runner.terminationGracePeriodSeconds` | `3600` | Max wait for running workflows when a runner stops. |
 | `runner.podAnnotations` / `podLabels` / `nodeSelector` / `tolerations` / `affinity` | empty | Runner pod scheduling and metadata; `nodeSelector` and `tolerations` also apply to reap Jobs. |
 | `scaler.enabled` | `true` | Scaler Deployment + RBAC. When on, the chart leaves the StatefulSet's `replicas` to it. |
-| `scaler.image.repository` / `.tag` / `.pullPolicy` | `sg-runner-scaler` / `dev` / `IfNotPresent` | Scaler image (Go, distroless, non-root). Empty repository = the runner image. |
+| `scaler.image.repository` / `.tag` / `.pullPolicy` | `ghcr.io/stackguardian/sg-runner-scaler` / `""` / `IfNotPresent` | Scaler image (Go, distroless, non-root); also the steps broker's. Empty tag = `appVersion`. |
 | `scaler.command` | `[]` | Empty = image entrypoint. |
 | `scaler.replicas` | `1` | 2 is safe with leader election; > 1 without it fails rendering. |
 | `scaler.leaderElection.enabled` | `true` | `SCALER_LEADER_ELECT`; lease `<statefulset>-scaler`. Also switches the rollout to `RollingUpdate`. |

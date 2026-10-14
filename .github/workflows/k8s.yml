@@ -7,6 +7,9 @@ name: k8s
 # kind jobs. main.sh is in the filter because the runner image bundles it.
 # If any of these jobs become required checks, note that a skipped workflow
 # leaves them pending; run it with workflow_dispatch in that case.
+#
+# Also the gate of k8s-release.yml (workflow_call): a release only publishes
+# when all of this passes.
 on:
   pull_request:
     branches: [main]
@@ -16,12 +19,15 @@ on:
       - .github/workflows/k8s.yml
       - .github/scripts/**
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
 
+# A literal prefix, not github.workflow: called from k8s-release.yml that is
+# the caller's name, and sharing the caller's group would cancel the release.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: k8s-ci-${{ github.ref }}
   cancel-in-progress: true
 
 env:

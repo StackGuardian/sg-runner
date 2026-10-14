@@ -1,0 +1,221 @@
+name: k8s-release
+
+# Publishes the Kubernetes runner (beta, GHCR): the runner and scaler images
+# (linux/amd64 + linux/arm64, with build provenance), the Helm chart as an OCI
+# artifact, and a GitHub release.
+#
+#   git tag k8s/v0.9.0 && git push origin k8s/v0.9.0   # publish 0.9.0
+#   workflow_dispatch (version input)                   # dry run: builds, pushes nothing
+#
+# The version (tag minus `k8s/v`) is the image tag, the chart version and the
+# chart's appVersion. Nothing published is ever overwritten: an existing image
+# tag or chart version fails the run.
+on:
+  push:
+    tags: ["k8s/v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to build (dry run, nothing is pushed)
+        default: 0.0.0-dryrun
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k8s-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      push: ${{ steps.version.outputs.push }}
+      registry: ${{ steps.version.outputs.registry }}
+    steps:
+      - name: Version from the tag, or the dry run's input
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          if [[ $GITHUB_EVENT_NAME == push ]]; then
+            version=${GITHUB_REF_NAME#k8s/v}
+            push=true
+          else
+            version=$INPUT_VERSION
+            push=false
+          fi
+          # SemVer without build metadata: `+` isn't valid in an image tag.
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [[ ! $version =~ $semver ]]; then
+            echo "::error title=version::'$version' isn't a SemVer version (X.Y.Z or X.Y.Z-pre)"
+            exit 1
+          fi
+          {
+            echo "version=$version"
+            echo "push=$push"
+            # Registry paths must be lowercase.
+            echo "registry=ghcr.io/${OWNER,,}"
+          } >>"$GITHUB_OUTPUT"
+          echo "### k8s release $version (push: $push)" >>"$GITHUB_STEP_SUMMARY"
+
+  # The whole k8s CI: Go, chart, images, kind smoke.
+  ci:
+    name: ci
+    uses: ./.github/workflows/k8s.yml
+
+  images:
+    name: image (${{ matrix.image }})
+    needs: [version, ci]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - image: runner
+            name: sg-runner-k8s
+            context: .
+            file: k8s/Dockerfile
+          - image: scaler
+            name: sg-runner-scaler
+            context: k8s/scaler
+            file: k8s/scaler/Dockerfile
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      PUSH: ${{ needs.version.outputs.push }}
+      IMAGE: ${{ needs.version.outputs.registry }}/${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Log in to GHCR
+        if: env.PUSH == 'true'
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Refuse to overwrite ${{ env.IMAGE }}:${{ env.VERSION }}
+        if: env.PUSH == 'true'
+        run: |
+          if docker manifest inspect "$IMAGE:$VERSION" >/dev/null 2>&1; then
+            echo "::error title=image exists::$IMAGE:$VERSION is already published"
+            exit 1
+          fi
+      - name: Build (and push on a tag)
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ env.PUSH == 'true' }}
+          outputs: ${{ env.PUSH != 'true' && 'type=cacheonly' || '' }}
+          tags: ${{ env.IMAGE }}:${{ env.VERSION }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=Apache-2.0
+          # Provenance comes from the attestation below.
+          provenance: false
+          cache-from: type=gha,scope=${{ matrix.image }}
+      - name: Attest build provenance
+        if: env.PUSH == 'true'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      - name: Summary
+        run: |
+          if [[ $PUSH == true ]]; then
+            echo "- \`$IMAGE:$VERSION\` (\`${{ steps.build.outputs.digest }}\`)" >>"$GITHUB_STEP_SUMMARY"
+          else
+            echo "- dry run: built \`$IMAGE:$VERSION\` for linux/amd64 + linux/arm64, not pushed" >>"$GITHUB_STEP_SUMMARY"
+          fi
+
+  chart:
+    name: chart
+    needs: [version, images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      PUSH: ${{ needs.version.outputs.push }}
+      CHARTS: oci://${{ needs.version.outputs.registry }}/charts
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.3.0
+      - name: Package
+        run: |
+          helm package k8s/chart/sg-runner --version "$VERSION" --app-version "$VERSION" -d "$RUNNER_TEMP"
+          # The packaged chart's defaults point at this release's images.
+          helm template sg-runner "$RUNNER_TEMP/sg-runner-$VERSION.tgz" \
+            --set credentials.existingSecret=x --set sg.organization=o --set sg.runnerGroup=g \
+            | grep -E '^\s+image: ' | sort -u
+      - name: Log in to GHCR
+        if: env.PUSH == 'true'
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Refuse to overwrite sg-runner ${{ env.VERSION }}
+        if: env.PUSH == 'true'
+        run: |
+          if helm show chart "$CHARTS/sg-runner" --version "$VERSION" >/dev/null 2>&1; then
+            echo "::error title=chart exists::$CHARTS/sg-runner $VERSION is already published"
+            exit 1
+          fi
+      - name: Push
+        if: env.PUSH == 'true'
+        run: helm push "$RUNNER_TEMP/sg-runner-$VERSION.tgz" "$CHARTS"
+      - name: Upload the packaged chart
+        uses: actions/upload-artifact@v7
+        with:
+          name: sg-runner-chart-${{ env.VERSION }}
+          path: ${{ runner.temp }}/sg-runner-${{ env.VERSION }}.tgz
+          retention-days: 7
+
+  release:
+    name: GitHub release
+    needs: [version, chart]
+    if: needs.version.outputs.push == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      REGISTRY: ${{ needs.version.outputs.registry }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Create the release
+        run: |
+          prerelease=()
+          [[ $VERSION == *-* ]] && prerelease=(--prerelease)
+          cat >"$RUNNER_TEMP/notes.md" <<EOF
+          Kubernetes runner $VERSION (beta).
+
+          Install the chart:
+
+          \`\`\`sh
+          helm install sg-runner oci://$REGISTRY/charts/sg-runner --version $VERSION
+          \`\`\`
+
+          Images (linux/amd64, linux/arm64, with build provenance):
+
+          - \`$REGISTRY/sg-runner-k8s:$VERSION\`
+          - \`$REGISTRY/sg-runner-scaler:$VERSION\`
+          EOF
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "Kubernetes runner $VERSION" --notes-file "$RUNNER_TEMP/notes.md" "${prerelease[@]}"

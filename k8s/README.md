@@ -56,20 +56,26 @@ deregistered, the hook fails and keeps that runner's PVCs, and `make nuke`
 stops before deleting the namespace: deleting the PVC without deregistering
 would leave a dead runner in the runner group.
 
-Outside OrbStack, install the chart directly. Only the node token is a
-Secret; the runner group is plain values. Label the namespace where Pod
-Security is enforced (runner pods are privileged):
+Outside OrbStack, install the published chart (GHCR, beta; its defaults use
+the images of the same release). Only the node token is a Secret; the runner
+group is plain values. Label the namespace where Pod Security is enforced
+(runner pods are privileged):
 
 ```sh
 kubectl create namespace sg-runner
 kubectl label namespace sg-runner pod-security.kubernetes.io/enforce=privileged
 kubectl -n sg-runner create secret generic sg-runner-credentials \
   --from-literal=SG_NODE_TOKEN=...
-helm upgrade --install sg-runner k8s/chart/sg-runner -n sg-runner \
+helm upgrade --install sg-runner oci://ghcr.io/stackguardian/charts/sg-runner --version <v> \
+  -n sg-runner \
   --set sg.organization=<org> --set sg.runnerGroup=<runner group> \
   --set credentials.existingSecret=sg-runner-credentials \
   --set runner.size=medium
 ```
+
+The chart in this repo (`k8s/chart/sg-runner`) installs the same way; its
+default images carry the `dev` tag, so point `image.*` and `scaler.image.*` at
+images you built (`make up` uses the local `:dev` builds).
 
 ### Choosing the runner size
 
@@ -233,6 +239,20 @@ make lint test                       # repo root: shellcheck + bats (main.sh, k8
 (cd k8s/scaler && go vet ./... && go test ./...)
 helm lint --strict k8s/chart/sg-runner --set credentials.existingSecret=x
 ```
+
+## Releasing
+
+`.github/workflows/k8s-release.yml` publishes to GHCR: push a tag
+`k8s/vX.Y.Z` (SemVer, optionally `-pre`) on `main` after the merge. After the
+full k8s CI (`k8s.yml`) passes, it pushes the runner and scaler images
+(`ghcr.io/stackguardian/sg-runner-k8s`, `sg-runner-scaler`, linux/amd64 and
+arm64, with build provenance) and the chart
+(`oci://ghcr.io/stackguardian/charts/sg-runner`), all as version `X.Y.Z` (the
+chart's appVersion too), and creates the GitHub release with the install
+command. An existing image tag or chart version fails the run instead of
+being overwritten. A dry run (`workflow_dispatch` with a `version`) builds
+and packages everything and pushes nothing. After the first publish, make
+the three GHCR packages public once in the org's package settings.
 
 ## Known gaps
 

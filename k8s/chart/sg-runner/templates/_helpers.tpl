@@ -149,14 +149,10 @@ Runner image reference; the scaler also uses it for reap Jobs.
 {{- end }}
 
 {{/*
-Scaler image: its own repository/tag when set, the runner image otherwise.
+Scaler image reference (the steps broker's too, unless set apart).
 */}}
 {{- define "sg-runner.scalerImage" -}}
-{{- if .Values.scaler.image.repository }}
 {{- printf "%s:%s" .Values.scaler.image.repository (default .Chart.AppVersion .Values.scaler.image.tag | toString) }}
-{{- else }}
-{{- include "sg-runner.image" . }}
-{{- end }}
 {{- end }}
 
 {{/*
