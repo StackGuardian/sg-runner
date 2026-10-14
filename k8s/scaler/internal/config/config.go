@@ -27,10 +27,16 @@ type Config struct {
 	StatefulSet       string
 	Image             string
 	CredentialsSecret string
+	ConfigMap         string
 	CredentialsDir    string
 	Namespace         string
 	MetricsAddr       string
 	LeaderElect       bool
+	// Nudge starts placeholder pods when the cluster autoscaler won't add a
+	// node for a runner pod; NudgeImage is their image.
+	Nudge         bool
+	NudgeImage    string
+	NudgeCooldown time.Duration
 	// ReapPod is extra pod settings for reap Jobs.
 	ReapPod kube.ReapPodOptions
 	// MinRaised reports a SCALER_MIN below 1 (MinGiven) raised to 1.
@@ -71,6 +77,7 @@ func Load(getenv func(string) string) (Config, error) {
 		StatefulSet:       str("SCALER_STATEFULSET", "sg-runner"),
 		Image:             str("SCALER_IMAGE", "sg-runner-k8s:dev"),
 		CredentialsSecret: str("SCALER_CREDENTIALS_SECRET", "sg-runner-credentials"),
+		ConfigMap:         str("SCALER_CONFIGMAP", "sg-runner-config"),
 		CredentialsDir:    str("SG_CREDENTIALS_DIR", "/etc/sg-runner/credentials"),
 		MetricsAddr:       str("SCALER_METRICS_ADDR", ":9090"),
 		Rules: decide.Config{
@@ -101,6 +108,16 @@ func Load(getenv func(string) string) (Config, error) {
 	default:
 		errs = append(errs, fmt.Sprintf("SCALER_LEADER_ELECT=%q: want true or false", v))
 	}
+
+	switch v := strings.ToLower(str("SCALER_NUDGE", "true")); v {
+	case "true", "1", "yes":
+		c.Nudge = true
+	case "false", "0", "no":
+	default:
+		errs = append(errs, fmt.Sprintf("SCALER_NUDGE=%q: want true or false", v))
+	}
+	c.NudgeImage = str("SCALER_NUDGE_IMAGE", kube.DefaultNudgeImage)
+	c.NudgeCooldown = secs("SCALER_NUDGE_COOLDOWN", 180, 30)
 
 	c.ReapPod, errs = reapPod(str, errs)
 

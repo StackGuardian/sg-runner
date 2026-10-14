@@ -102,7 +102,7 @@ func (e *env) newController(s SG) *Controller {
 			SettleTimeout: 5 * time.Minute, ParkTTL: 12 * time.Hour},
 		Interval: 15 * time.Second,
 		SG:       s,
-		Kube:     kube.New(e.client, ns, "sg-runner", "img:1", "creds"),
+		Kube:     kube.New(e.client, ns, "sg-runner", "img:1", "creds", "cfg"),
 		Events:   e.events,
 		Metrics:  metrics.New(),
 		Log:      slog.New(slog.NewTextHandler(e.logs, nil)),

@@ -30,6 +30,7 @@ type Metrics struct {
 
 	ScaleEvents   *prometheus.CounterVec
 	Reaps         *prometheus.CounterVec
+	Nudges        *prometheus.CounterVec
 	StatusChanges *prometheus.CounterVec
 	SGErrors      prometheus.Counter
 	KubeErrors    prometheus.Counter
@@ -59,6 +60,8 @@ func New() *Metrics {
 			Help: "Replica changes by direction (out, in)."}, []string{"direction"}),
 		Reaps: prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: ns, Name: "reaps_total",
 			Help: "Reap steps by result (started, succeeded, failed)."}, []string{"result"}),
+		Nudges: prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: ns, Name: "autoscaler_nudges_total",
+			Help: "Placeholder pods asking the cluster autoscaler for a node, by result (started, node_requested, refused)."}, []string{"result"}),
 		StatusChanges: prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: ns, Name: "runner_status_changes_total",
 			Help: "Runner status changes through SG by reason and result."}, []string{"reason", "result"}),
 		SGErrors: prometheus.NewCounter(prometheus.CounterOpts{Namespace: ns, Name: "sg_api_errors_total",
@@ -72,13 +75,16 @@ func New() *Metrics {
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		m.Queued, m.ReservedPct, m.FreePct, m.Replicas, m.Awake, m.Parked, m.Max, m.Stuck, m.Unconnected,
 		m.Settling, m.Leader, m.ConsecutiveFailures,
-		m.ScaleEvents, m.Reaps, m.StatusChanges, m.SGErrors, m.KubeErrors, m.LoopDuration,
+		m.ScaleEvents, m.Reaps, m.Nudges, m.StatusChanges, m.SGErrors, m.KubeErrors, m.LoopDuration,
 	)
 	for _, d := range []string{"out", "in"} {
 		m.ScaleEvents.WithLabelValues(d)
 	}
 	for _, r := range []string{"started", "succeeded", "failed"} {
 		m.Reaps.WithLabelValues(r)
+	}
+	for _, r := range []string{"started", "node_requested", "refused"} {
+		m.Nudges.WithLabelValues(r)
 	}
 	return m
 }

@@ -1,6 +1,10 @@
 // sg-runner-scaler sizes the sg-runner StatefulSet from the runner group's
 // state in StackGuardian, parks idle runners and deregisters runners parked
 // for too long. See k8s/README.md, "Autoscaling".
+//
+// `sg-runner-scaler teardown` instead deregisters every runner and deletes
+// their PVCs: the Helm chart's pre-delete hook, so `helm uninstall` leaves
+// nothing behind.
 package main
 
 import (
@@ -33,12 +37,17 @@ import (
 	"github.com/StackGuardian/sg-runner/k8s/scaler/internal/kube"
 	"github.com/StackGuardian/sg-runner/k8s/scaler/internal/metrics"
 	"github.com/StackGuardian/sg-runner/k8s/scaler/internal/sg"
+	"github.com/StackGuardian/sg-runner/k8s/scaler/internal/teardown"
 )
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
 	klog.SetSlogLogger(log.With("source", "client-go"))
+	run := run
+	if len(os.Args) > 1 && os.Args[1] == "teardown" {
+		run = runTeardown
+	}
 	if err := run(log); err != nil {
 		log.Error("exiting", "err", err)
 		os.Exit(1)
@@ -58,18 +67,7 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
-	restCfg, err := rest.InClusterConfig()
-	if err != nil {
-		// Out of cluster (development): the usual kubeconfig.
-		restCfg, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-			clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{}).ClientConfig()
-		if err != nil {
-			return err
-		}
-	}
-	restCfg.Timeout = 15 * time.Second
-	restCfg.UserAgent = "sg-runner-scaler"
-	client, err := kubernetes.NewForConfig(restCfg)
+	client, err := kubeClient()
 	if err != nil {
 		return err
 	}
@@ -83,8 +81,9 @@ func run(log *slog.Logger) error {
 	defer broadcaster.Shutdown()
 	recorder := broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "sg-runner-scaler"})
 
-	k := kube.New(client, cfg.Namespace, cfg.StatefulSet, cfg.Image, cfg.CredentialsSecret)
+	k := kube.New(client, cfg.Namespace, cfg.StatefulSet, cfg.Image, cfg.CredentialsSecret, cfg.ConfigMap)
 	k.ReapPod = cfg.ReapPod
+	k.NudgeImage = cfg.NudgeImage
 	ctrl := &controller.Controller{
 		Config:   cfg.Rules,
 		Interval: cfg.Interval,
@@ -93,7 +92,9 @@ func run(log *slog.Logger) error {
 		Events:   recorder,
 		Metrics:  m,
 		Log:      log,
+		Nudge:    cfg.Nudge,
 	}
+	ctrl.NudgeCooldown = cfg.NudgeCooldown
 
 	var leading atomic.Bool
 	srv := serve(cfg, m, ctrl, &leading, log)
@@ -152,6 +153,51 @@ func run(log *slog.Logger) error {
 		return errors.New("lost the leader lease")
 	}
 	return nil
+}
+
+// runTeardown is the pre-delete hook: deregister every runner, delete PVCs.
+// It runs until done or until the Job's activeDeadlineSeconds stops it.
+func runTeardown(log *slog.Logger) error {
+	cfg, err := config.Load(nil)
+	if err != nil {
+		return err
+	}
+	client, err := kubeClient()
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	k := kube.New(client, cfg.Namespace, cfg.StatefulSet, cfg.Image, cfg.CredentialsSecret, cfg.ConfigMap)
+	k.ReapPod = cfg.ReapPod
+	td := &teardown.Teardown{
+		Kube:             k,
+		ScalerDeployment: os.Getenv("TEARDOWN_SCALER_DEPLOYMENT"),
+		ScalerSelector:   os.Getenv("TEARDOWN_SCALER_SELECTOR"),
+		RunnerSelector:   os.Getenv("TEARDOWN_RUNNER_SELECTOR"),
+		Log:              log,
+	}
+	if td.RunnerSelector == "" || (td.ScalerDeployment != "" && td.ScalerSelector == "") {
+		return errors.New("teardown needs TEARDOWN_RUNNER_SELECTOR, and TEARDOWN_SCALER_SELECTOR with TEARDOWN_SCALER_DEPLOYMENT")
+	}
+	return td.Run(ctx)
+}
+
+// kubeClient connects in cluster, or with the usual kubeconfig out of
+// cluster (development).
+func kubeClient() (kubernetes.Interface, error) {
+	restCfg, err := rest.InClusterConfig()
+	if err != nil {
+		restCfg, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+			clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{}).ClientConfig()
+		if err != nil {
+			return nil, err
+		}
+	}
+	restCfg.Timeout = 15 * time.Second
+	restCfg.UserAgent = "sg-runner-scaler"
+	return kubernetes.NewForConfig(restCfg)
 }
 
 func identity() (string, error) {

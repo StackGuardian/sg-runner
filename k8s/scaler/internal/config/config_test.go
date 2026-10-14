@@ -19,8 +19,10 @@ func TestDefaults(t *testing.T) {
 	if c.Interval != 15*time.Second || r.Min != 1 || r.Max != 10 || r.HeadroomPct != 0 ||
 		r.IdleAfter != 60*time.Second || r.ParkTTL != 43200*time.Second || r.StuckAfter != 180*time.Second ||
 		r.SettleTimeout != 300*time.Second || c.StatefulSet != "sg-runner" || c.Image != "sg-runner-k8s:dev" ||
-		c.CredentialsSecret != "sg-runner-credentials" || c.CredentialsDir != "/etc/sg-runner/credentials" ||
-		c.MetricsAddr != ":9090" || !c.LeaderElect || c.Namespace != "sg-runner" || c.MinRaised {
+		c.CredentialsSecret != "sg-runner-credentials" || c.ConfigMap != "sg-runner-config" ||
+		c.CredentialsDir != "/etc/sg-runner/credentials" ||
+		c.MetricsAddr != ":9090" || !c.LeaderElect || c.Namespace != "sg-runner" || c.MinRaised ||
+		!c.Nudge || c.NudgeImage != "registry.k8s.io/pause:3.10" || c.NudgeCooldown != 180*time.Second {
 		t.Errorf("defaults %+v", c)
 	}
 }
