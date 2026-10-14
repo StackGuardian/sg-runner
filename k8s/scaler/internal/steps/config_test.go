@@ -35,7 +35,7 @@ func TestConfigDefaults(t *testing.T) {
 		c.RunnerPodName != "sg-runner-0" || c.RunnerPodUID != types.UID("uid-0") || c.NodeName != "node-a" ||
 		c.Namespace != "sg" || len(c.StepLabels) != 0 || len(c.StepNodeSelector) != 0 || len(c.StepTolerations) != 0 ||
 		c.SchedulingTimeout != 5*time.Minute || c.StartTimeout != 30*time.Minute || c.FinishedTTL != time.Hour ||
-		c.DrainedMarker != "/var/run/sg-runner-drained" || c.BrokerImage != "" || c.BrokerImagePullPolicy != "" ||
+		c.GuardSocket != "/run/sg-guard/sg-steps-guard.sock" || c.BrokerImage != "" || c.BrokerImagePullPolicy != "" ||
 		c.BrokerImagePullSecrets != nil || c.StepImagePullPolicy != "" {
 		t.Errorf("defaults %+v", c)
 	}
@@ -47,7 +47,7 @@ func TestConfigOverrides(t *testing.T) {
 		"STEP_LABELS":        `{"app.kubernetes.io/name":"sg-runner"}`,
 		"STEP_NODE_SELECTOR": `{"pool":"steps"}`,
 		"STEP_TOLERATIONS":   `[{"key":"dedicated","operator":"Exists","effect":"NoSchedule"}]`,
-		"SCHEDULING_TIMEOUT": "90s", "START_TIMEOUT": "1h", "FINISHED_TTL": "1m", "DRAINED_MARKER": "/d",
+		"SCHEDULING_TIMEOUT": "90s", "START_TIMEOUT": "1h", "FINISHED_TTL": "1m", "GUARD_SOCKET": "/g/x.sock",
 		"STEP_IMAGE_PULL_POLICY": "Never", "BROKER_IMAGE": "reg/scaler:1", "BROKER_IMAGE_PULL_POLICY": "Always",
 		"BROKER_IMAGE_PULL_SECRETS": "regcred, other ,",
 	})))
@@ -58,7 +58,7 @@ func TestConfigOverrides(t *testing.T) {
 		c.StepLabels["app.kubernetes.io/name"] != "sg-runner" || c.StepNodeSelector["pool"] != "steps" ||
 		len(c.StepTolerations) != 1 || c.StepTolerations[0].Key != "dedicated" ||
 		c.SchedulingTimeout != 90*time.Second || c.StartTimeout != time.Hour || c.FinishedTTL != time.Minute ||
-		c.DrainedMarker != "/d" || c.StepImagePullPolicy != corev1.PullNever || c.BrokerImage != "reg/scaler:1" ||
+		c.GuardSocket != "/g/x.sock" || c.StepImagePullPolicy != corev1.PullNever || c.BrokerImage != "reg/scaler:1" ||
 		c.BrokerImagePullPolicy != corev1.PullAlways || strings.Join(c.BrokerImagePullSecrets, ",") != "regcred,other" {
 		t.Errorf("overrides %+v", c)
 	}
@@ -85,6 +85,7 @@ func TestConfigInvalid(t *testing.T) {
 		"toleration unknown":  {"STEP_TOLERATIONS": `[{"keyy":"a"}]`},
 		"bad pull policy":     {"STEP_IMAGE_PULL_POLICY": "never"},
 		"zero start timeout":  {"START_TIMEOUT": "0s"},
+		"one socket for both": {"GUARD_SOCKET": "/run/sg-steps/steps.sock"},
 		"bad broker policy":   {"BROKER_IMAGE_PULL_POLICY": "sometimes"},
 		"bad pull secret":     {"BROKER_IMAGE_PULL_SECRETS": "Not_A_Name"},
 	} {
