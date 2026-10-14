@@ -76,7 +76,8 @@ secret: ## Create the namespace and the node token Secret from .env
 		| $(KUBECTL) create secret generic $(SECRET) --from-env-file=/dev/stdin \
 			--dry-run=client -o yaml | $(KUBECTL) apply -f -
 
-# IMAGE is split into repository and tag for the chart. HELM_ARGS go last, e.g.
+# IMAGE and SCALER_BUILD_IMAGE are split into repository and tag for the chart:
+# the local builds, not the chart's published defaults. HELM_ARGS go last, e.g.
 #   make up HELM_ARGS="--set runner.size=medium ..."
 HELM_ARGS ?=
 up: ## Install or upgrade the chart (registers on first start)
@@ -88,6 +89,8 @@ up: ## Install or upgrade the chart (registers on first start)
 		--set-string sg.apiUrl="$${SG_BASE_API:-}" \
 		--set image.repository=$(firstword $(subst :, ,$(IMAGE))) \
 		--set image.tag=$(lastword $(subst :, ,$(IMAGE))) \
+		--set scaler.image.repository=$(firstword $(subst :, ,$(SCALER_BUILD_IMAGE))) \
+		--set scaler.image.tag=$(lastword $(subst :, ,$(SCALER_BUILD_IMAGE))) \
 		$(HELM_ARGS)
 
 status: ## Show runner pods and state PVCs (a PVC without a pod is a parked runner)

@@ -12,9 +12,10 @@ fullnameOverride: ""
 
 # Runner image (register, dockerd, ssm-agent, ecs-agent; reap Jobs too).
 image:
-  repository: sg-runner-k8s
-  # Empty = the chart's appVersion.
-  tag: dev
+  repository: ghcr.io/stackguardian/sg-runner-k8s
+  # Empty = the chart's appVersion (the release's version in a published
+  # chart).
+  tag: ""
   pullPolicy: IfNotPresent
 
 # Secret names or {name: ...} objects, e.g. [regcred, {name: other}].
@@ -174,11 +175,12 @@ scaler:
   enabled: true
 
   # The scaler's own image (Go, distroless, non-root; build with
-  # `make build-scaler`). Empty repository = the runner image.
+  # `make build-scaler`). It also ships the steps broker
+  # (runner.steps.broker.image defaults to it).
   image:
-    repository: sg-runner-scaler
+    repository: ghcr.io/stackguardian/sg-runner-scaler
     # Empty = the chart's appVersion.
-    tag: dev
+    tag: ""
     pullPolicy: IfNotPresent
   # Empty = the image's entrypoint.
   command: []

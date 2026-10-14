@@ -67,6 +67,7 @@
 | Native steps: GKE | Nudge placeholder sized for steps (`advertise`), PD attach and node pinning on multi-node clusters, NetworkPolicy enforcement. |
 | Native steps: hardening | ValidatingAdmissionPolicy on what the runner's ServiceAccount may create; symlink-safe mount checks. |
 | Native steps: RWX workspace | Steps on any node, autoscaler adds nodes for steps; needs an RWX storage class. |
+| Image and chart distribution on Amazon ECR Public | Move image and chart distribution to Amazon ECR Public (AWS-native, OIDC role, public.ecr.aws alias); GHCR is the beta choice. |
 | Scaler doc for operators | Metrics reference, Event reasons, alert suggestions (StuckQueue, RunnerNotConnected, SGUnreachable). |
 
 ## Caveats (current behavior to be aware of)

@@ -133,7 +133,12 @@ expect_count defaults '{ name: SG_TASK_CPU_LIMIT, value: "2" }' 2
 expect_count defaults '{ name: SG_TASK_MEMORY_LIMIT_MIB, value: "4096" }' 2
 expect_count defaults '{ name: SG_DOCKERD_OVERHEAD_MIB, value: "0" }' 2
 expect_text defaults 'verbs: ["create", "get", "list", "watch", "patch", "delete"]'
-expect_text defaults '{ name: BROKER_IMAGE, value: "sg-runner-scaler:dev" }'
+# Published images by default, tagged with the chart's appVersion ("dev" in
+# git; the release workflow sets the version).
+expect_text defaults 'image: ghcr.io/stackguardian/sg-runner-k8s:dev'
+expect_text defaults 'image: ghcr.io/stackguardian/sg-runner-scaler:dev'
+expect_text defaults '{ name: BROKER_IMAGE, value: "ghcr.io/stackguardian/sg-runner-scaler:dev" }'
+expect_text defaults '{ name: SCALER_IMAGE, value: "ghcr.io/stackguardian/sg-runner-k8s:dev" }'
 expect_text defaults '{ name: BROKER_IMAGE_PULL_POLICY, value: "IfNotPresent" }'
 expect_text defaults '{ name: FINISHED_TTL, value: "1h" }'
 expect_text defaults '{ name: GUARD_SOCKET, value: /run/sg-guard/sg-steps-guard.sock }'

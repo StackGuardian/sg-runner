@@ -378,7 +378,21 @@
           "type": "boolean"
         },
         "image": {
-          "$ref": "#/definitions/image"
+          "allOf": [
+            {
+              "$ref": "#/definitions/image"
+            },
+            {
+              "required": [
+                "repository"
+              ],
+              "properties": {
+                "repository": {
+                  "minLength": 1
+                }
+              }
+            }
+          ]
         },
         "command": {
           "type": "array",

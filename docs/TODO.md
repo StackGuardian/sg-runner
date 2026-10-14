@@ -38,3 +38,9 @@ Spike results on OrbStack (k8s 1.36, cri-dockerd, arm64):
 Next: test `hostUsers: false` (with `procMount: Unmasked`) on containerd 2.x
 or CRI-O, kernel 6.3+, and Sysbox on a cluster where it can be installed.
 Both keep root inside the pod unprivileged on the node.
+
+### Move image and chart distribution to Amazon ECR Public
+
+Move image and chart distribution to Amazon ECR Public (AWS-native, OIDC
+role, public.ecr.aws alias); GHCR is the beta choice
+(`.github/workflows/k8s-release.yml`).
