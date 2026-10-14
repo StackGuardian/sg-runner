@@ -3,7 +3,8 @@
 # built images and checks what can be checked without StackGuardian: the
 # scaler starts and is ready, finds SG unreachable and leaks no credentials,
 # the runner's register init container fails as expected, the scaler's
-# RBAC is as narrow as intended, and `helm uninstall` leaves no PVCs behind.
+# RBAC is as narrow as intended, the native steps broker runs steps as pods
+# with the chart's runner RBAC, and `helm uninstall` leaves no PVCs behind.
 #
 # sg.apiUrl is http://127.0.0.1:9 (discard port on the pod's own loopback):
 # nothing ever reaches StackGuardian, and registration fails before any AWS
@@ -14,6 +15,9 @@
 #
 # The images must exist locally (RUNNER_IMAGE, SCALER_IMAGE); the cluster
 # must exist already (kind create cluster --name "$CLUSTER").
+#
+# CONTROLLER_REPO (optional, local runs): an sg-run-controller checkout whose
+# unit/test_step_broker_live.py then runs against the broker too.
 set -euo pipefail
 
 CLUSTER=${CLUSTER:-sg-runner-ci}
@@ -32,6 +36,16 @@ MAX_API_ATTEMPTS=3
 # Distinctive, so finding it in any log means a credential leaked.
 TOKEN=ci-dummy-node-token-6f1d3c9a
 SA=system:serviceaccount:$NS:$SCALER
+# Native steps: the chart's runner ServiceAccount, the broker's test pod.
+RUNNER_SA=system:serviceaccount:$NS:$STS
+STEPS_POD=steps-smoke
+STEPS_SOCK=/var/tmp/workspace/.sg-runner/steps.sock
+# A run's workspace as a run controller would lay it out.
+STEPS_RUN=/var/tmp/workspace/orgs/ci/wfruns/r1
+STEP_IMAGE=alpine:3.20
+# The broker's FINISHED_GRACE in the test pod, in seconds.
+STEPS_FINISHED_GRACE=2
+CONTROLLER_REPO=${CONTROLLER_REPO:-}
 
 # Only ever a kind cluster: never a real or shared context.
 [[ $CONTEXT == kind-* ]] || { echo "refusing to use context '$CONTEXT' (not kind-*)"; exit 2; }
@@ -151,6 +165,8 @@ cmd_run() {
   can "create pods/exec" no
   endstep
 
+  native_steps
+
   step "helm uninstall deregisters and deletes every runner's PVCs"
   # The pre-delete hook parks the runner, runs a reap Job against its state
   # PVC (never registered here: nothing to deregister), then deletes the PVCs.
@@ -189,14 +205,296 @@ register_finished() {
   [[ -n $REGISTER_LOG && $REGISTER_LOG != "unable to retrieve container logs"* ]]
 }
 
-can() { # <verb resource [flags]> <yes|no>
-  local got
+can() { # <verb resource [flags]> <yes|no> [service account]
+  local got as=${3:-$SA}
   # shellcheck disable=SC2086 # $1 is a verb plus resource plus flags
-  got=$(k auth can-i $1 --as="$SA" 2>/dev/null || true)
+  got=$(k auth can-i $1 --as="$as" 2>/dev/null || true)
   if [[ $got != "$2" ]]; then
-    fail "scaler can-i '$1': got '$got', want '$2'"
+    fail "${as##*:} can-i '$1': got '$got', want '$2'"
   fi
   echo "can-i $1: $got"
+}
+
+# Native steps. The runner pod never gets past register without SG, so the
+# broker runs in a test pod of its own with the chart's runner ServiceAccount
+# (which also checks the chart's RBAC), next to a client container laid out
+# like the runner's dockerd: the workspace PVC at /var/tmp/workspace, the
+# broker's socket below it.
+native_steps() {
+  step "native steps: chart upgrade, broker test pod"
+  helm --kube-context "$CONTEXT" -n "$NS" upgrade "$RELEASE" "$CHART" --reuse-values \
+    --set runner.nativeSteps.enabled=true \
+    --set runner.nativeSteps.advertise.cpu=1 --set runner.nativeSteps.advertise.memory=1Gi
+  steps_pod_manifest | k apply -f -
+  k wait --for=condition=Ready "pod/$STEPS_POD" --timeout="${TIMEOUT}s"
+  kc mkdir -p "$STEPS_RUN/shared-workspace"
+  endstep
+
+  step "native steps: runner RBAC"
+  can "create pods" yes "$RUNNER_SA"
+  can "delete pods" yes "$RUNNER_SA"
+  can "get pods --subresource=log" yes "$RUNNER_SA"
+  can "create secrets" yes "$RUNNER_SA"
+  can "get secrets" no "$RUNNER_SA"
+  can "list secrets" no "$RUNNER_SA"
+  can "create pods --subresource=exec" no "$RUNNER_SA"
+  can "patch statefulsets.apps/$STS" no "$RUNNER_SA"
+  endstep
+
+  step "native steps: API"
+  local out id
+  out=$(api GET /healthz)
+  [[ $(jq -r .api <<<"$out") == v1 ]] || fail "healthz: $out"
+  echo "healthz: $out"
+
+  local code
+  for code in 0 1 11 12; do
+    id=$(create_step "[\"sh\",\"-c\",\"exit $code\"]")
+    expect_state "$id" exited "$code"
+  done
+
+  # Args reach the container as is: the kubelet would expand $(FOO). Logs
+  # are read while the step still exists.
+  # shellcheck disable=SC2016 # literal $(FOO) on purpose
+  id=$(create_step '["echo","[$(FOO)]"]')
+  out=$(api GET "/v1/steps/$id/logs?follow=1" | cut -d' ' -f2-)
+  # shellcheck disable=SC2016
+  [[ $out == '[$(FOO)]' ]] || fail "args: want [\$(FOO)] in the logs, got: $out"
+  echo "args kept literal: $out"
+  expect_state "$id" exited 0
+
+  # Env from the step's Secret, a workspace write, log lines in order.
+  # shellcheck disable=SC2016 # $FOO for the step's shell
+  id=$(create_step '["sh","-c","echo env=$FOO; echo hi >/mnt/sg_workspace/out.txt; echo done"]')
+  out=$(api GET "/v1/steps/$id/logs?follow=1" | cut -d' ' -f2-)
+  [[ $out == $'env=bar\ndone' ]] || fail "step logs: $out"
+  echo "logs: $(tr '\n' ' ' <<<"$out")"
+  expect_state "$id" exited 0
+  [[ $(kc cat "$STEPS_RUN/shared-workspace/out.txt") == hi ]] \
+    || fail "the step's workspace write isn't visible to the client"
+  echo "workspace write visible to the client"
+
+  # Gone right after a client got the terminal state; the state stays.
+  until_ok "step pod $id and its Secret deleted" step_gone "$id"
+  [[ $(api GET "/v1/steps/$id" | jq -r .exitCode) == 0 ]] || fail "deleted step $id lost its exit code"
+  echo "step $id deleted after its result was read, exit code still served"
+
+  expect_error InvalidMount POST /v1/steps "$(step_json '["true"]' '"mounts":[{"source":"/var/tmp/workspace","target":"/w"}]')"
+  expect_error InvalidMount POST /v1/steps "$(step_json '["true"]' "\"mounts\":[{\"source\":\"$STEPS_RUN/../r2/x\",\"target\":\"/w\"}]")"
+  expect_error InvalidMount POST /v1/steps "$(step_json '["true"]' '"mounts":[{"source":"/var/tmp/workspace/orgs/ci/wfruns/r2/x","target":"/w"}]')"
+  expect_error InvalidEnv POST /v1/steps "$(step_json '["true"]' '"env":{"BAD KEY":"x"}')"
+  expect_error NotFound GET "/v1/steps/kube-apiserver-$CLUSTER-control-plane"
+
+  id=$(STEP_IMAGE=nonexistent.invalid/nope:1 create_step '["true"]')
+  expect_state "$id" failed "" 'ErrImagePull|ImagePullBackOff'
+  id=$(create_step '["true"]' '"memoryMiB":9999999')
+  expect_state "$id" failed "" Unschedulable
+
+  # TERM trapped: the step exits 143 itself within the grace.
+  id=$(create_step '["sh","-c","trap \"echo got TERM; exit 143\" TERM; while true; do sleep 1; done"]')
+  until_ok "step $id running" step_running "$id"
+  api POST "/v1/steps/$id/stop" '{"graceSeconds":30}' >/dev/null
+  expect_state "$id" exited 143
+  endstep
+
+  if [[ -n $CONTROLLER_REPO ]]; then
+    controller_live_test
+  fi
+
+  step "native steps: cleanup"
+  # The drain marker releases the broker (it ignores SIGTERM until then).
+  kc touch /run/sg-runner/sg-runner-drained
+  k delete pod "$STEPS_POD" --timeout=60s
+  k delete pvc "$STEPS_POD-workspace" --timeout=60s
+  # Step pods and Secrets are owned by the test pod.
+  until_ok "step pods gone" steps_all_gone
+  helm --kube-context "$CONTEXT" -n "$NS" upgrade "$RELEASE" "$CHART" --reuse-values \
+    --set runner.nativeSteps.enabled=false
+  # The runner's own workspace PVC (generic ephemeral) goes with its pod.
+  until_ok "PVC $STS-0-workspace gone" runner_workspace_gone
+  echo "native steps cleaned up"
+  endstep
+}
+
+steps_pod_manifest() {
+  cat <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: $STEPS_POD-workspace
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 64Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $STEPS_POD
+spec:
+  serviceAccountName: $STS
+  automountServiceAccountToken: false
+  terminationGracePeriodSeconds: 120
+  containers:
+    - name: steps
+      image: $SCALER_IMAGE
+      imagePullPolicy: Never
+      command: [/sg-runner-steps]
+      args: [serve]
+      env:
+        - name: RUNNER_POD_NAME
+          valueFrom: { fieldRef: { fieldPath: metadata.name } }
+        - name: RUNNER_POD_UID
+          valueFrom: { fieldRef: { fieldPath: metadata.uid } }
+        - name: NODE_NAME
+          valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+        - name: NAMESPACE
+          valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+        - { name: SOCKET_PATH, value: /run/sg-steps/steps.sock }
+        - { name: WORKSPACES_DIR, value: /var/tmp/workspace }
+        - { name: WORKSPACE_CLAIM, value: $STEPS_POD-workspace }
+        - name: STEP_LABELS
+          value: '{"app.kubernetes.io/name":"sg-runner","app.kubernetes.io/instance":"$RELEASE","app.kubernetes.io/component":"step"}'
+        - { name: SCHEDULING_TIMEOUT, value: 20s }
+        - { name: START_TIMEOUT, value: 60s }
+        - { name: FINISHED_GRACE, value: ${STEPS_FINISHED_GRACE}s }
+        - { name: FINISHED_TTL, value: 1m }
+        - { name: DRAINED_MARKER, value: /run/sg-runner/sg-runner-drained }
+      lifecycle:
+        preStop:
+          exec:
+            command: [/sg-runner-steps, wait-drained]
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: { drop: [ALL] }
+        seccompProfile: { type: RuntimeDefault }
+      volumeMounts:
+        - { name: socket, mountPath: /run/sg-steps }
+        - { name: drained, mountPath: /run/sg-runner, readOnly: true }
+        - { name: api-access, mountPath: /var/run/secrets/kubernetes.io/serviceaccount, readOnly: true }
+    - name: client
+      image: python:3.11-alpine
+      # PID 1 ignores SIGTERM without a handler: trap it, or deleting the pod
+      # waits out the grace period.
+      command: [sh, -c, 'trap "exit 0" TERM; apk add --no-cache curl >/dev/null && touch /tmp/ready; sleep infinity & wait']
+      readinessProbe:
+        exec: { command: [test, -e, /tmp/ready] }
+        periodSeconds: 2
+      volumeMounts:
+        - { name: workspace, mountPath: /var/tmp/workspace }
+        - { name: socket, mountPath: /var/tmp/workspace/.sg-runner }
+        - { name: drained, mountPath: /run/sg-runner }
+  volumes:
+    - name: workspace
+      persistentVolumeClaim: { claimName: $STEPS_POD-workspace }
+    - name: socket
+      emptyDir: {}
+    - name: drained
+      emptyDir: {}
+    # As the chart's steps container gets it.
+    - name: api-access
+      projected:
+        defaultMode: 0444
+        sources:
+          - serviceAccountToken: { path: token, expirationSeconds: 3607 }
+          - configMap:
+              name: kube-root-ca.crt
+              items: [{ key: ca.crt, path: ca.crt }]
+          - downwardAPI:
+              items:
+                - path: namespace
+                  fieldRef: { apiVersion: v1, fieldPath: metadata.namespace }
+EOF
+}
+
+# In the client container.
+kc() { k exec "$STEPS_POD" -c client -- "$@"; }
+
+# Calls the broker; prints the body, fails on a curl error (not on a 4xx).
+api() { # <method> <path> [json body]
+  local args=(curl -sS --unix-socket "$STEPS_SOCK" -X "$1" "http://broker$2")
+  [[ -n ${3:-} ]] && args+=(-H 'Content-Type: application/json' -d "$3")
+  kc "${args[@]}"
+}
+
+step_json() { # <args json> [extra fields]
+  echo "{\"name\":\"ci-r1-step\",\"org\":\"/orgs/ci\",\"run\":\"/wfruns/r1\",\"stepIdx\":0,
+    \"image\":\"$STEP_IMAGE\",\"args\":$1,\"env\":{\"FOO\":\"bar\"},
+    \"mounts\":[{\"source\":\"$STEPS_RUN/shared-workspace\",\"target\":\"/mnt/sg_workspace\",\"readOnly\":false}],
+    \"cpuShares\":64,\"memoryMiB\":64,\"timeoutSeconds\":300${2:+,$2}}"
+}
+
+create_step() { # <args json> [extra fields] -> id
+  local out id
+  out=$(api POST /v1/steps "$(step_json "$@")")
+  id=$(jq -r '.id // empty' <<<"$out")
+  [[ -n $id ]] || fail "create step: $out"
+  echo "$id"
+}
+
+# Waits for a terminal state and checks it.
+expect_state() { # <id> <exited|failed> <exit code or ""> [reason regex]
+  local id=$1 want=$2 code=$3 reason=${4:-} st
+  until_ok "step $id terminal" step_terminal "$id"
+  st=$STEP_STATE
+  [[ $(jq -r .state <<<"$st") == "$want" ]] || fail "step $id: want $want, got $st"
+  if [[ -n $code ]]; then
+    [[ $(jq -r .exitCode <<<"$st") == "$code" ]] || fail "step $id: want exit code $code, got $st"
+  fi
+  if [[ -n $reason ]]; then
+    [[ $(jq -r .reason <<<"$st") =~ ^($reason)$ ]] || fail "step $id: want reason $reason, got $st"
+  fi
+  echo "step $id: $(jq -c '{state, exitCode, reason}' <<<"$st")"
+}
+
+step_terminal() {
+  STEP_STATE=$(api GET "/v1/steps/$1") || return 1
+  [[ $(jq -r .state <<<"$STEP_STATE") =~ ^(exited|failed)$ ]]
+}
+
+step_running() {
+  [[ $(api GET "/v1/steps/$1" | jq -r .state) == running ]]
+}
+
+step_gone() {
+  [[ -z $(k get "pod/$1" "secret/$1-env" -o name --ignore-not-found 2>/dev/null) ]]
+}
+
+steps_all_gone() {
+  [[ -z $(k get pods,secrets -l app.kubernetes.io/component=step -o name 2>/dev/null) ]]
+}
+
+runner_workspace_gone() {
+  [[ -z $(k get pvc "$STS-0-workspace" -o name --ignore-not-found 2>/dev/null) ]]
+}
+
+expect_error() { # <reason> <method> <path> [json body]
+  local want=$1 out
+  shift
+  out=$(api "$@")
+  [[ $(jq -r .reason <<<"$out" 2>/dev/null) == "$want" ]] || fail "$1 $2: want $want, got $out"
+  echo "$1 $2: $want"
+}
+
+# The run controller's live broker test (unit/test_step_broker_live.py) from a
+# local sg-run-controller checkout, in the client container.
+controller_live_test() {
+  step "native steps: run controller live test"
+  local test=$CONTROLLER_REPO/unit/test_step_broker_live.py
+  [[ -f $test ]] || fail "CONTROLLER_REPO is set, but $test doesn't exist"
+  kc mkdir -p /tmp/controller/unit
+  tar -C "$CONTROLLER_REPO" -cf - src/run_controller unit/test_step_broker_live.py \
+    | k exec -i "$STEPS_POD" -c client -- tar -C /tmp/controller -xf -
+  kc pip install -q --root-user-action=ignore --disable-pip-version-check docker==6.0.1 requests==2.31.0 'urllib3<2' pytest
+  kc sh -c "cd /tmp/controller && STEP_BROKER_SOCKET=$STEPS_SOCK STEP_BROKER_WORKSPACES_DIR=/var/tmp/workspace \
+    STEP_BROKER_IMAGE=$STEP_IMAGE STEP_BROKER_FINISHED_GRACE=$STEPS_FINISHED_GRACE \
+    PYTHONPATH=src:src/run_controller python -m pytest -q unit/test_step_broker_live.py"
+  endstep
 }
 
 cmd_diag() {
@@ -208,6 +506,10 @@ cmd_diag() {
   k logs "deployment/$SCALER" --all-containers --prefix >"$dir/scaler.log" 2>&1 || true
   k logs "$STS-0" --all-containers --prefix >"$dir/runner-0.log" 2>&1 || true
   k logs "$STS-0" -c register --previous >"$dir/runner-0-register-previous.log" 2>&1 || true
+  # Native steps: the broker test pod and its step pods.
+  k logs "$STEPS_POD" --all-containers --prefix >"$dir/steps-smoke.log" 2>&1 || true
+  k get pods,secrets -l app.kubernetes.io/component=step -o wide >"$dir/step-pods.txt" 2>&1 || true
+  k describe pods -l app.kubernetes.io/component=step >"$dir/step-pods-describe.txt" 2>&1 || true
   helm --kube-context "$CONTEXT" -n "$NS" get all "$RELEASE" >"$dir/helm-release.txt" 2>&1 || true
   kubectl --context "$CONTEXT" get nodes -o wide >"$dir/nodes.txt" 2>&1 || true
   # Only dummy values in this cluster, but keep secret data out regardless.
