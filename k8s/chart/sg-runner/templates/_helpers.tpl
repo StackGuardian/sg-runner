@@ -110,14 +110,35 @@ A label map as a selector string: k1=v1,k2=v2 (sorted).
 {{- end }}
 
 {{/*
-imagePullSecrets names, comma-separated.
+imagePullSecrets names, comma-separated. Entries are Secret names or
+{name: ...} objects, mixed as you like.
 */}}
 {{- define "sg-runner.pullSecretNames" -}}
 {{- $names := list }}
 {{- range .Values.imagePullSecrets }}
-{{- $names = append $names (kindIs "string" . | ternary . .name) }}
+{{- if kindIs "string" . }}
+{{- $names = append $names . }}
+{{- else }}
+{{- $names = append $names .name }}
+{{- end }}
 {{- end }}
 {{- join "," $names }}
+{{- end }}
+
+{{/*
+imagePullSecrets as a pod spec takes them ({name: ...} each), for every pod
+the chart renders.
+*/}}
+{{- define "sg-runner.imagePullSecrets" -}}
+{{- $refs := list }}
+{{- range splitList "," (include "sg-runner.pullSecretNames" .) }}
+{{- with . }}
+{{- $refs = append $refs (dict "name" .) }}
+{{- end }}
+{{- end }}
+{{- with $refs }}
+{{- toYaml . }}
+{{- end }}
 {{- end }}
 
 {{/*

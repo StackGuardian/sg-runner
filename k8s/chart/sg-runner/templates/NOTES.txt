@@ -47,8 +47,8 @@ Native steps (experimental): one runner per node, advertising {{ .Values.runner.
 Each workflow step runs as a pod on its runner's node:
   kubectl -n {{ $ns }} get pods -l app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=step
   kubectl -n {{ $ns }} logs -f <step pod>
-Only while a step runs: a finished step pod is deleted once its run controller
-has the result (the output is in SG).
+Finished step pods stay for {{ .Values.runner.nativeSteps.finishedTTL }}, labelled with their outcome:
+  kubectl -n {{ $ns }} get pods -l app.kubernetes.io/component=step -L sg-runner.stackguardian.io/outcome
 The steps broker in each runner pod creates them:
   kubectl -n {{ $ns }} logs -f {{ $sts }}-0 -c steps
 {{- end }}

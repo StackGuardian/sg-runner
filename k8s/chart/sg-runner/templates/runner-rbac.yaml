@@ -23,7 +23,8 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["create", "get", "list", "watch", "delete"]
+    # patch: the outcome label on finished step pods.
+    verbs: ["create", "get", "list", "watch", "patch", "delete"]
   # Step output, for the run controllers.
   - apiGroups: [""]
     resources: ["pods/log"]

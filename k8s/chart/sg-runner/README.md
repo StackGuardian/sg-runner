@@ -163,15 +163,25 @@ What changes in the runner pod:
   volume created and deleted with the pod) instead of an `emptyDir`;
   `runner.workspace` is ignored.
 - **API access.** The runner pod gets a ServiceAccount (`<statefulset>`) with a
-  Role for pods (create, get, list, watch, delete), `pods/log` (get) and
-  Secrets (create, delete only: never read back). Pod-level token automount
-  stays off; only the `steps` container mounts a token.
+  Role for pods (create, get, list, watch, patch, delete), `pods/log` (get)
+  and Secrets (create, delete only: never read back). Pod-level token
+  automount stays off; only the `steps` container mounts a token.
 - **Logs**: steps are pods, so the `workflow-logs` sidecar isn't rendered:
-  `kubectl logs -l app.kubernetes.io/component=step`, but only while a step
-  runs. Finished step pods don't stay around: the broker deletes each one
-  (and its Secrets) as soon as its run controller has read the result, and
-  the output is in SG. `finishedTTL` only catches finished steps nobody read
-  (e.g. the controller died).
+  `kubectl logs -l app.kubernetes.io/component=step`. Finished step pods stay
+  for `finishedTTL` (1h), labelled with their outcome; their Secrets (env,
+  registry credentials) are deleted as soon as they finish:
+  `kubectl get pods -l app.kubernetes.io/component=step -L sg-runner.stackguardian.io/outcome`.
+- **Exit codes 11 and 12** (approval required, completed early) are outcomes,
+  not failures: the broker runs each step through a small wrapper (an init
+  container from the broker image copies it in) so those pods end
+  `Completed`. To wrap a step it reads the image's ENTRYPOINT/CMD from its
+  registry (the image config only, no layers). If that fails, the step runs
+  unwrapped, and exits 11/12 then show as `Error` (the run's result is the
+  same; annotation `sg-runner.stackguardian.io/not-wrapped-reason` says why).
+  So the `steps` container calls registries over HTTPS, which the
+  NetworkPolicy's egress allows like any other external destination.
+  Wrapped step pods pull the broker image with `imagePullSecrets`
+  (`BROKER_IMAGE_PULL_SECRETS`).
 - **NetworkPolicy** covers step pods too (`app.kubernetes.io/component:
   step`). It also blocks the Kubernetes API, which the broker needs: allow the
   API server's endpoint (`kubectl get endpoints kubernetes`) with
@@ -185,7 +195,7 @@ What changes in the runner pod:
 |---|---|---|
 | `nameOverride` / `fullnameOverride` | `""` | Rename resources; `fullnameOverride` also renames the StatefulSet (max 52 chars). |
 | `image.repository` / `.tag` / `.pullPolicy` | `sg-runner-k8s` / `dev` / `IfNotPresent` | Runner image; also used by reap Jobs. Empty tag = `appVersion`. |
-| `imagePullSecrets` | `[]` | For runner, scaler and reap Job pods. |
+| `imagePullSecrets` | `[]` | For runner, scaler and reap Job pods (and native steps' wrapper). Secret names or `{name: ...}` objects, mixed as you like. |
 | `sg.organization` / `sg.runnerGroup` | `""` | Required: the runner group to register into. In the `<release>-config` ConfigMap. |
 | `sg.apiUrl` | `""` | StackGuardian API; empty = `https://api.app.stackguardian.io/api/v1`. |
 | `credentials.existingSecret` | `""` | Secret with key `SG_NODE_TOKEN` (the runner group's node token); other keys are ignored. |
@@ -208,10 +218,10 @@ What changes in the runner pod:
 | `runner.nativeSteps.advertise.cpu` / `.memory` | empty | Required when enabled: what the runner advertises to SG. Whole CPUs; `<n>Mi` or `<n>Gi`. |
 | `runner.nativeSteps.controllerResources` | 500m / 1Gi, limits 2 / 2Gi | dockerd resources (run controllers only); ~512Mi per concurrent run. |
 | `runner.nativeSteps.workspace.size` / `.storageClassName` / `.accessModes` | `20Gi` / `""` / `[ReadWriteOnce]` | Workspace PVC per pod (`<pod>-workspace`). Empty class = cluster default. |
-| `runner.nativeSteps.schedulingTimeout` / `startTimeout` / `finishedTTL` | `5m` / `30m` / `10m` | Step pod fails if unschedulable / still pending this long. `finishedTTL` is a fallback: finished step pods are deleted once their result is read, ones nobody read after this. |
+| `runner.nativeSteps.schedulingTimeout` / `startTimeout` / `finishedTTL` | `5m` / `30m` / `1h` | Step pod fails if unschedulable / still pending this long. Finished step pods are kept for `finishedTTL`, then deleted; their Secrets go when they finish. |
 | `runner.nativeSteps.step.nodeSelector` / `.tolerations` | empty | Step pod scheduling; empty = `runner.nodeSelector` / `runner.tolerations`. |
 | `runner.nativeSteps.step.imagePullPolicy` | `""` | `STEP_IMAGE_PULL_POLICY`. Empty = automatic (`Always` for `latest` or no tag, else `IfNotPresent`); `IfNotPresent` / `Never` for air-gapped clusters or preloaded images. |
-| `runner.nativeSteps.broker.image.repository` / `.tag` / `.pullPolicy` | `""` / `""` / `IfNotPresent` | `steps` container image; empty repository = the scaler image. |
+| `runner.nativeSteps.broker.image.repository` / `.tag` / `.pullPolicy` | `""` / `""` / `IfNotPresent` | `steps` container image, also the step pods' wrapper init container (`BROKER_IMAGE`, `BROKER_IMAGE_PULL_POLICY`); empty repository = the scaler image. |
 | `runner.nativeSteps.broker.resources` | 10m / 32Mi, limit 256Mi | |
 | `runner.nativeSteps.broker.extraEnv` | `[]` | Extra env vars for the broker. |
 | `runner.reregisterOnResize` | `true` | `SG_REREGISTER_ON_RESIZE` on the register init container: register an idle runner again when its registered size differs from what it now advertises ([Runner size](#runner-size)). |

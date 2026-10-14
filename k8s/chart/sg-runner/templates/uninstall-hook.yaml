@@ -100,9 +100,9 @@ spec:
     spec:
       serviceAccountName: {{ $name }}
       restartPolicy: Never
-      {{- with .Values.imagePullSecrets }}
+      {{- with include "sg-runner.imagePullSecrets" . }}
       imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
+        {{- . | nindent 8 }}
       {{- end }}
       {{- with $s.podSecurityContext }}
       securityContext:

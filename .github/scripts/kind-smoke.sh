@@ -43,8 +43,17 @@ STEPS_SOCK=/var/tmp/workspace/.sg-runner/steps.sock
 # A run's workspace as a run controller would lay it out.
 STEPS_RUN=/var/tmp/workspace/orgs/ci/wfruns/r1
 STEP_IMAGE=alpine:3.20
-# The broker's FINISHED_GRACE in the test pod, in seconds.
-STEPS_FINISHED_GRACE=2
+# Finished step pods are kept this long in the test pod (the broker's GC
+# sweeps every minute).
+STEPS_FINISHED_TTL=90s
+# A registry host only the node's containerd knows (a hosts.toml mirror to
+# Docker Hub): the node pulls it, the broker can't read its config, so the
+# step runs unwrapped. (An image only `kind load`ed doesn't do: the kubelet
+# re-pulls images it has no pull record for.)
+MIRROR_HOST=ci-local.invalid
+UNWRAPPED_STEP_IMAGE=$MIRROR_HOST/library/$STEP_IMAGE
+OUTCOME_LABEL=sg-runner.stackguardian.io/outcome
+WRAPPED_ANNOTATION=sg-runner.stackguardian.io/wrapped
 CONTROLLER_REPO=${CONTROLLER_REPO:-}
 
 # Only ever a kind cluster: never a real or shared context.
@@ -225,6 +234,16 @@ native_steps() {
   helm --kube-context "$CONTEXT" -n "$NS" upgrade "$RELEASE" "$CHART" --reuse-values \
     --set runner.nativeSteps.enabled=true \
     --set runner.nativeSteps.advertise.cpu=1 --set runner.nativeSteps.advertise.memory=1Gi
+  local node
+  for node in $(kind get nodes --name "$CLUSTER"); do
+    docker exec -i "$node" sh -c "mkdir -p /etc/containerd/certs.d/$MIRROR_HOST \
+      && cat >/etc/containerd/certs.d/$MIRROR_HOST/hosts.toml" <<EOF
+server = "https://registry-1.docker.io"
+
+[host."https://registry-1.docker.io"]
+  capabilities = ["pull", "resolve"]
+EOF
+  done
   steps_pod_manifest | k apply -f -
   k wait --for=condition=Ready "pod/$STEPS_POD" --timeout="${TIMEOUT}s"
   kc mkdir -p "$STEPS_RUN/shared-workspace"
@@ -247,11 +266,32 @@ native_steps() {
   [[ $(jq -r .api <<<"$out") == v1 ]] || fail "healthz: $out"
   echo "healthz: $out"
 
-  local code
+  # 11 (approval required) and 12 (completed early) are outcomes: the
+  # wrapper makes those pods end Completed. Finished pods stay, labelled.
+  local code first=""
   for code in 0 1 11 12; do
     id=$(create_step "[\"sh\",\"-c\",\"exit $code\"]")
     expect_state "$id" exited "$code"
+    : "${first:=$id}"
+    case $code in
+      0) expect_pod "$id" Succeeded Completed succeeded true ;;
+      1) expect_pod "$id" Failed Error failed true ;;
+      11) expect_pod "$id" Succeeded Completed approval-required true ;;
+      12) expect_pod "$id" Succeeded Completed completed-early true ;;
+    esac
   done
+  until_ok "Secret $id-env deleted" secret_gone "$id"
+  [[ -n $(k get "pod/$id" -o name --ignore-not-found) ]] || fail "step pod $id is gone already"
+  echo "step $id: Secret deleted, pod kept"
+
+  # No image config to read (the broker can't reach that registry): runs
+  # unwrapped, so exit 11 stays a failed container.
+  id=$(STEP_IMAGE=$UNWRAPPED_STEP_IMAGE create_step '["sh","-c","exit 11"]')
+  expect_state "$id" exited 11
+  expect_pod "$id" Failed Error approval-required false
+  out=$(k get "pod/$id" -o json | jq -r '.metadata.annotations["sg-runner.stackguardian.io/not-wrapped-reason"] // empty')
+  [[ -n $out ]] || fail "unwrapped step pod $id has no not-wrapped-reason"
+  echo "not wrapped: ${out:0:120}"
 
   # Args reach the container as is: the kubelet would expand $(FOO). Logs
   # are read while the step still exists.
@@ -274,11 +314,6 @@ native_steps() {
     || fail "the step's workspace write isn't visible to the client"
   echo "workspace write visible to the client"
 
-  # Gone right after a client got the terminal state; the state stays.
-  until_ok "step pod $id and its Secret deleted" step_gone "$id"
-  [[ $(api GET "/v1/steps/$id" | jq -r .exitCode) == 0 ]] || fail "deleted step $id lost its exit code"
-  echo "step $id deleted after its result was read, exit code still served"
-
   expect_error InvalidMount POST /v1/steps "$(step_json '["true"]' '"mounts":[{"source":"/var/tmp/workspace","target":"/w"}]')"
   expect_error InvalidMount POST /v1/steps "$(step_json '["true"]' "\"mounts\":[{\"source\":\"$STEPS_RUN/../r2/x\",\"target\":\"/w\"}]")"
   expect_error InvalidMount POST /v1/steps "$(step_json '["true"]' '"mounts":[{"source":"/var/tmp/workspace/orgs/ci/wfruns/r2/x","target":"/w"}]')"
@@ -295,6 +330,11 @@ native_steps() {
   until_ok "step $id running" step_running "$id"
   api POST "/v1/steps/$id/stop" '{"graceSeconds":30}' >/dev/null
   expect_state "$id" exited 143
+
+  # Kept for FINISHED_TTL, then deleted by the GC; the state stays.
+  until_ok "step pod $first deleted after FINISHED_TTL" step_gone "$first"
+  [[ $(api GET "/v1/steps/$first" | jq -r .exitCode) == 0 ]] || fail "deleted step $first lost its exit code"
+  echo "step $first deleted after FINISHED_TTL, exit code still served"
   endstep
 
   if [[ -n $CONTROLLER_REPO ]]; then
@@ -358,8 +398,10 @@ spec:
           value: '{"app.kubernetes.io/name":"sg-runner","app.kubernetes.io/instance":"$RELEASE","app.kubernetes.io/component":"step"}'
         - { name: SCHEDULING_TIMEOUT, value: 20s }
         - { name: START_TIMEOUT, value: 60s }
-        - { name: FINISHED_GRACE, value: ${STEPS_FINISHED_GRACE}s }
-        - { name: FINISHED_TTL, value: 1m }
+        - { name: FINISHED_TTL, value: $STEPS_FINISHED_TTL }
+        # Its own image, for the step pods' wrapper init container.
+        - { name: BROKER_IMAGE, value: $SCALER_IMAGE }
+        - { name: BROKER_IMAGE_PULL_POLICY, value: Never }
         - { name: DRAINED_MARKER, value: /run/sg-runner/sg-runner-drained }
       lifecycle:
         preStop:
@@ -465,6 +507,26 @@ step_gone() {
   [[ -z $(k get "pod/$1" "secret/$1-env" -o name --ignore-not-found 2>/dev/null) ]]
 }
 
+secret_gone() {
+  [[ -z $(k get "secret/$1-env" -o name --ignore-not-found 2>/dev/null) ]]
+}
+
+# A finished step pod as the broker leaves it.
+expect_pod() { # <id> <phase> <container reason> <outcome> <wrapped>
+  local got want="$2 $3 $4 $5"
+  until_ok "step pod $1 labelled" step_labelled "$1"
+  got=$(k get "pod/$1" -o json | jq -r --arg l "$OUTCOME_LABEL" --arg a "$WRAPPED_ANNOTATION" '
+    [.status.phase,
+     (.status.containerStatuses[] | select(.name == "step") | .state.terminated.reason),
+     .metadata.labels[$l], .metadata.annotations[$a]] | join(" ")')
+  [[ $got == "$want" ]] || fail "step pod $1: want '$want' (phase reason outcome wrapped), got '$got'"
+  echo "step pod $1: $got"
+}
+
+step_labelled() {
+  k get "pod/$1" -o json 2>/dev/null | jq -e --arg l "$OUTCOME_LABEL" '.metadata.labels[$l] // empty' >/dev/null
+}
+
 steps_all_gone() {
   [[ -z $(k get pods,secrets -l app.kubernetes.io/component=step -o name 2>/dev/null) ]]
 }
@@ -492,7 +554,7 @@ controller_live_test() {
     | k exec -i "$STEPS_POD" -c client -- tar -C /tmp/controller -xf -
   kc pip install -q --root-user-action=ignore --disable-pip-version-check docker==6.0.1 requests==2.31.0 'urllib3<2' pytest
   kc sh -c "cd /tmp/controller && STEP_BROKER_SOCKET=$STEPS_SOCK STEP_BROKER_WORKSPACES_DIR=/var/tmp/workspace \
-    STEP_BROKER_IMAGE=$STEP_IMAGE STEP_BROKER_FINISHED_GRACE=$STEPS_FINISHED_GRACE \
+    STEP_BROKER_IMAGE=$STEP_IMAGE \
     PYTHONPATH=src:src/run_controller python -m pytest -q unit/test_step_broker_live.py"
   endstep
 }

@@ -17,6 +17,7 @@ image:
   tag: dev
   pullPolicy: IfNotPresent
 
+# Secret names or {name: ...} objects, e.g. [regcred, {name: other}].
 imagePullSecrets: []
 
 # The runner group to register into. Not secret: the chart puts these in a
@@ -141,9 +142,8 @@ runner:
   #   - the runner pod gets a ServiceAccount (pods, pods/log and creating
   #     Secrets in the namespace); only the steps container mounts its token
   #   - no workflow-logs sidecar: steps are pods,
-  #     `kubectl logs -l app.kubernetes.io/component=step`, but only while a
-  #     step runs: a finished step pod is deleted once its run controller has
-  #     its result (the output is in SG)
+  #     `kubectl logs -l app.kubernetes.io/component=step`; finished ones stay
+  #     for finishedTTL, labelled with their outcome
   nativeSteps:
     enabled: false
     # Required when enabled: the step capacity the runner advertises to SG,
@@ -173,10 +173,9 @@ runner:
     schedulingTimeout: 5m
     # A step pod still pending (pulling, creating) after this long fails.
     startTimeout: 30m
-    # Fallback only: the broker deletes a finished step pod (and its Secrets)
-    # as soon as its run controller has read the result. One nobody read (e.g.
-    # the controller died) is deleted this long after it finished.
-    finishedTTL: 10m
+    # Finished step pods are kept for this long, then deleted; their Secrets
+    # are deleted when they finish.
+    finishedTTL: 1h
     # Scheduling of step pods (pinned to the runner's node anyway). Empty =
     # runner.nodeSelector / runner.tolerations, so steps tolerate the runner
     # node's taints.

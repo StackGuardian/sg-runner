@@ -147,7 +147,8 @@ render native-steps "${CREDS[@]}" "${NATIVE[@]}" \
   --set 'runner.ecsAgent.extraEnv[0].value=prefer-cached' \
   --set 'runner.dockerd.extraEnv[0].name=SG_PRUNE_INTERVAL_SECONDS' \
   --set-string 'runner.dockerd.extraEnv[0].value=0' \
-  --set runner.nativeSteps.step.imagePullPolicy=IfNotPresent
+  --set runner.nativeSteps.step.imagePullPolicy=IfNotPresent \
+  --set 'imagePullSecrets[0].name=regcred' --set 'imagePullSecrets[1].name=other'
 expect_kind native-steps ServiceAccount
 expect_kind native-steps Role
 expect_kind native-steps RoleBinding
@@ -159,6 +160,11 @@ expect_text native-steps '{ name: SG_TASK_MEMORY_LIMIT_MIB, value: "6144" }'
 expect_text native-steps 'topologyKey: kubernetes.io/hostname'
 expect_count native-steps '{ name: SG_TASK_CPU_LIMIT, value: "4" }' 2
 expect_count native-steps '{ name: SG_DOCKERD_OVERHEAD_MIB, value: "0" }' 2
+expect_text native-steps 'verbs: ["create", "get", "list", "watch", "patch", "delete"]'
+expect_text native-steps '{ name: BROKER_IMAGE, value: "sg-runner-scaler:dev" }'
+expect_text native-steps '{ name: BROKER_IMAGE_PULL_POLICY, value: "IfNotPresent" }'
+expect_text native-steps '{ name: FINISHED_TTL, value: "1h" }'
+expect_text native-steps '{ name: BROKER_IMAGE_PULL_SECRETS, value: "regcred,other" }'
 expect_text native-steps '{ name: STEP_IMAGE_PULL_POLICY, value: IfNotPresent }'
 expect_text native-steps 'name: SG_PRUNE_INTERVAL_SECONDS'
 # Only the broker gets a token; workflow-logs is off with native steps.
@@ -174,6 +180,15 @@ if [[ $(grep -c 'mountPath: /var/run/secrets/kubernetes.io/serviceaccount' "$OUT
   echo "::error title=helm template::scenario 'native-steps' must mount the API token in exactly one container"
   failed=1
 fi
+
+# imagePullSecrets as plain names and {name:} objects, mixed: every pod gets
+# {name:} refs, the scaler and the broker the names.
+render pull-secrets-mixed "${CREDS[@]}" "${NATIVE[@]}" \
+  --set-json 'imagePullSecrets=["plain",{"name":"obj"}]'
+expect_count pull-secrets-mixed '- name: plain' 3
+expect_count pull-secrets-mixed '- name: obj' 3
+expect_text pull-secrets-mixed '{ name: BROKER_IMAGE_PULL_SECRETS, value: "plain,obj" }'
+expect_count pull-secrets-mixed 'value: "plain,obj"' 3
 
 echo "::group::kubeconform (Kubernetes $KUBE_VERSION)"
 # ServiceMonitor is validated against the community CRDs catalog.
@@ -206,6 +221,7 @@ reject native-steps-bad-timeout 'startTimeout' "${CREDS[@]}" "${NATIVE[@]}" \
   --set runner.nativeSteps.startTimeout=30
 reject native-steps-bad-pull-policy 'imagePullPolicy' "${CREDS[@]}" "${NATIVE[@]}" \
   --set runner.nativeSteps.step.imagePullPolicy=Sometimes
+reject pull-secret-empty-name 'imagePullSecrets' "${CREDS[@]}" --set-json 'imagePullSecrets=[{"name":""}]'
 reject replicas-without-lease 'leaderElection' "${CREDS[@]}" \
   --set scaler.replicas=2 --set scaler.leaderElection.enabled=false
 echo "::endgroup::"
