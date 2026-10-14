@@ -1,7 +1,8 @@
 #!/usr/bin/env bats
 #
 # Unit tests for the pure helpers of k8s/runner.sh: agent sizing (CPU
-# affinity, reserved memory) and reading the registration in ecs.config.
+# affinity, reserved memory), re-registering on a size change, and reading the
+# registration in ecs.config.
 
 setup() {
   load "${BATS_TEST_DIRNAME}/../helpers/load.bash"
@@ -35,6 +36,14 @@ setup() {
   run cpu_affinity_list 16
   assert_success
   assert_output ""
+}
+
+@test "cpu_affinity_list pins to the advertised CPUs out of a whole node" {
+  # Native steps: ecs-agent has no CPU limit, so it sees the node's CPUs.
+  fake_cpus_allowed "0-15"
+  run cpu_affinity_list 4
+  assert_success
+  assert_output "0,1,2,3"
 }
 
 #}}}: cpu_affinity_list
@@ -82,7 +91,202 @@ setup() {
   assert_output --partial "exceeds 65535MiB"
 }
 
+@test "size_agent_memory advertises the native steps capacity in full" {
+  # Native steps: advertise 6Gi on a 16 GiB node, nothing kept for dockerd.
+  fake_mem_total_mib 16384
+  SG_TASK_MEMORY_LIMIT_MIB=6144 SG_DOCKERD_OVERHEAD_MIB=0 size_agent_memory >/dev/null
+  assert_equal "$ECS_RESERVED_MEMORY" "10240"
+
+  SG_TASK_MEMORY_LIMIT_MIB=6144 SG_DOCKERD_OVERHEAD_MIB=0 run size_agent_memory
+  assert_output --partial "6144 of 16384"
+}
+
+@test "size_agent_memory advertises the whole node when native steps ask for more" {
+  fake_mem_total_mib 8192
+  SG_TASK_MEMORY_LIMIT_MIB=12288 SG_DOCKERD_OVERHEAD_MIB=0 size_agent_memory >/dev/null
+  assert_equal "$ECS_RESERVED_MEMORY" "0"
+}
+
+@test "size_agent_memory accepts a native steps reservation right at the uint16 limit" {
+  # 65535 MiB reserved still fits; one more doesn't.
+  fake_mem_total_mib $((65535 + 4096))
+  SG_TASK_MEMORY_LIMIT_MIB=4096 SG_DOCKERD_OVERHEAD_MIB=0 size_agent_memory >/dev/null
+  assert_equal "$ECS_RESERVED_MEMORY" "65535"
+
+  SG_TASK_MEMORY_LIMIT_MIB=4095 SG_DOCKERD_OVERHEAD_MIB=0 run size_agent_memory
+  assert_failure
+  assert_output --partial "exceeds 65535MiB"
+}
+
 #}}}: size_agent_memory
+
+#{{{ advertised_resources
+
+@test "advertised_resources matches the dockerd limits minus dockerd overhead" {
+  # small: 2 CPUs / 4Gi on an 8-CPU 16 GiB node.
+  fake_cpus_allowed "0-7"
+  fake_mem_total_mib 16384
+  SG_TASK_CPU_LIMIT=2 SG_TASK_MEMORY_LIMIT_MIB=4096 run advertised_resources
+  assert_success
+  assert_output "2048 3840"
+}
+
+@test "advertised_resources takes native steps capacity in full" {
+  fake_cpus_allowed "0-15"
+  fake_mem_total_mib 16384
+  SG_TASK_CPU_LIMIT=4 SG_TASK_MEMORY_LIMIT_MIB=6144 SG_DOCKERD_OVERHEAD_MIB=0 run advertised_resources
+  assert_success
+  assert_output "4096 6144"
+}
+
+@test "advertised_resources caps at the node" {
+  fake_cpus_allowed "0-1"
+  fake_mem_total_mib 2048
+  SG_TASK_CPU_LIMIT=4 SG_TASK_MEMORY_LIMIT_MIB=4096 run advertised_resources
+  assert_success
+  assert_output "2048 2048"
+}
+
+@test "advertised_resources without limits is the whole node" {
+  fake_cpus_allowed "0-3"
+  fake_mem_total_mib 8192
+  unset SG_TASK_CPU_LIMIT SG_TASK_MEMORY_LIMIT_MIB
+  run advertised_resources
+  assert_success
+  assert_output "4096 8192"
+}
+
+@test "advertised_resources fails where the agent would refuse the reservation" {
+  fake_cpus_allowed "0-7"
+  fake_mem_total_mib 131072
+  SG_TASK_CPU_LIMIT=2 SG_TASK_MEMORY_LIMIT_MIB=4096 run advertised_resources
+  assert_failure
+}
+
+#}}}: advertised_resources
+
+#{{{ resized_while_idle / cmd_register
+
+# Usage: fake_runner_group <http status> <cpu> <memory> <running> [runner id]
+# The runner group as SG returns it: this runner's container instance among
+# others, and a secret that must never be printed.
+fake_runner_group() {
+  local instance
+  instance=$(jq -nc --arg r "${5:-abc123-runner}" --argjson cpu "$2" --argjson mem "$3" --argjson run "$4" \
+    '{runnerId: $r, status: "ACTIVE", runningTasksCount: $run, pendingTasksCount: 0,
+      registeredResources: [{name: "CPU", type: "INTEGER", integerValue: $cpu},
+        {name: "MEMORY", type: "INTEGER", integerValue: $mem},
+        {name: "PORTS", type: "STRINGSET", stringSetValue: ["22"]}]}')
+  export MOCK_CURL_OUTPUT="HTTP/1.1 $1 OK
+Content-Type: application/json
+
+{\"msg\":{\"RunnerToken\":\"runner-group-secret-6f1d\",\"ContainerInstances\":[{\"runnerId\":\"other-runner\"},$instance]}}"
+}
+
+setup_registered_runner() {
+  echo 'ECS_INSTANCE_ATTRIBUTES={"sg_runner_id":"abc123-runner"}' >"$ECS_CONFIG_DIR/ecs.config"
+  export SG_NODE_TOKEN=token SG_ORGANIZATION=org SG_RUNNER_GROUP=group
+  # Advertises 2048 / 3840 (small on an 8-CPU 16 GiB node).
+  fake_cpus_allowed "0-7"
+  fake_mem_total_mib 16384
+  export SG_TASK_CPU_LIMIT=2 SG_TASK_MEMORY_LIMIT_MIB=4096
+  is_registered() { return 0; }
+  deregister_runner() { echo "deregister called"; rm -f "$ECS_CONFIG_DIR/ecs.config"; }
+  # Stands in for the fresh registration that follows.
+  load_sg_credentials() { echo "fresh registration"; exit 0; }
+}
+
+@test "cmd_register keeps a registration of the same size" {
+  setup_registered_runner
+  fake_runner_group 200 2048 3840 0
+  run cmd_register
+  assert_success
+  assert_output --partial "Already registered"
+  refute_output --partial "deregister called"
+  refute_output --partial "fresh registration"
+  refute_output --partial "runner-group-secret"
+}
+
+@test "cmd_register registers an idle runner of another size again" {
+  setup_registered_runner
+  fake_runner_group 200 1024 1792 0
+  run cmd_register
+  assert_success
+  assert_output --partial "Registered CPU/memory 1024/1792, now 2048/3840:"
+  assert_output --partial "re-registering"
+  assert_output --partial "deregister called"
+  assert_output --partial "fresh registration"
+  refute_output --partial "runner-group-secret"
+}
+
+@test "cmd_register keeps the old size while tasks run" {
+  setup_registered_runner
+  fake_runner_group 200 1024 1792 2
+  run cmd_register
+  assert_success
+  assert_output --partial "2 task(s) running or pending, keeping the old size"
+  refute_output --partial "deregister called"
+  refute_output --partial "fresh registration"
+}
+
+@test "cmd_register keeps the registration when SG can't be read" {
+  setup_registered_runner
+  fake_runner_group 500 1024 1792 0
+  run cmd_register
+  assert_success
+  assert_output --partial "failed (500)"
+  assert_output --partial "Can't read the registered size from SG"
+  refute_output --partial "deregister called"
+  refute_output --partial "runner-group-secret"
+
+  export MOCK_CURL_OUTPUT=""
+  run cmd_register
+  assert_success
+  assert_output --partial "Can't read the registered size from SG"
+  refute_output --partial "deregister called"
+}
+
+@test "cmd_register keeps the registration when its instance isn't listed" {
+  setup_registered_runner
+  fake_runner_group 200 1024 1792 0 someone-else
+  run cmd_register
+  assert_success
+  assert_output --partial "Can't read the registered size from SG"
+  refute_output --partial "deregister called"
+}
+
+@test "cmd_register keeps the registration without registered resources" {
+  setup_registered_runner
+  export MOCK_CURL_OUTPUT='HTTP/1.1 200 OK
+
+{"msg":{"ContainerInstances":[{"runnerId":"abc123-runner","runningTasksCount":0}]}}'
+  run cmd_register
+  assert_success
+  assert_output --partial "Can't read the registered size from SG"
+  refute_output --partial "deregister called"
+}
+
+@test "cmd_register keeps the registration when deregistering fails" {
+  setup_registered_runner
+  fake_runner_group 200 1024 1792 0
+  deregister_runner() { return 1; }
+  run cmd_register
+  assert_success
+  assert_output --partial "Could not deregister"
+  refute_output --partial "fresh registration"
+}
+
+@test "cmd_register skips the size check when opted out" {
+  setup_registered_runner
+  fake_runner_group 200 1024 1792 0
+  SG_REREGISTER_ON_RESIZE=false run cmd_register
+  assert_success
+  assert_output --partial "Already registered"
+  refute_output --partial "deregister called"
+  assert [ -z "$(mock_calls curl)" ]
+}
+
+#}}}: resized_while_idle / cmd_register
 
 #{{{ load_ecs_config / configured_runner_id
 

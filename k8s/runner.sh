@@ -96,10 +96,61 @@ is_registered() {
   [[ -s "$ECS_CONFIG_DIR/ecs.config" && -s "$SSM_REGISTRATION_FILE" ]]
 }
 
+registered_resources() { #{{{
+  # Prints "<cpu units> <memory MiB> <running + pending tasks>" of this
+  # runner's ECS container instance as SG reports it. The response holds
+  # secrets (the group's runner token): only these numbers leave here.
+  local runner_id
+  runner_id="$(configured_runner_id)"
+  validate_runner_id "$runner_id" >/dev/null 2>&1 || return 1
+  sg_api GET "" | jq -er --arg r "$runner_id" '
+    first(.msg.ContainerInstances[]? | select(.runnerId == $r))
+    | [(.registeredResources[]? | select(.name == "CPU") | .integerValue),
+       (.registeredResources[]? | select(.name == "MEMORY") | .integerValue),
+       ((.runningTasksCount // 0) + (.pendingTasksCount // 0))]
+    | select(length == 3 and all(type == "number"))
+    | map(tostring) | join(" ")' 2>/dev/null
+}
+#}}}: registered_resources
+
+resized_while_idle() { #{{{
+  # ECS keeps a container instance's resources from its first registration:
+  # an agent restarted with a new size still offers the old one. True when
+  # this runner's registration has another size than the agent will advertise
+  # and nothing runs on it, so it can register again. Never fails the
+  # registration: anything unknown keeps the existing one.
+  [[ "${SG_REREGISTER_ON_RESIZE:-true}" == "true" ]] || return 1
+  local want got cpu mem tasks
+  if ! want="$(advertised_resources)"; then
+    info "Can't tell the advertised size;" "keeping the registration"
+    return 1
+  fi
+  if ! got="$(registered_resources)" || [[ -z "$got" ]]; then
+    info "Can't read the registered size from SG;" "keeping the registration"
+    return 1
+  fi
+  read -r cpu mem tasks <<<"$got"
+  [[ "$cpu $mem" == "$want" ]] && return 1
+  if ((tasks > 0)); then
+    info "Registered CPU/memory $cpu/$mem, now ${want/ //}:" "$tasks task(s) running or pending, keeping the old size"
+    return 1
+  fi
+  info "Registered CPU/memory $cpu/$mem, now ${want/ //}:" "re-registering"
+}
+#}}}: resized_while_idle
+
 cmd_register() { #{{{
   if is_registered; then
-    info "Already registered, reusing state from" "$ECS_CONFIG_DIR/ecs.config"
-    return 0
+    if ! resized_while_idle; then
+      info "Already registered, reusing state from" "$ECS_CONFIG_DIR/ecs.config"
+      return 0
+    fi
+    # As cmd_reap: deregister through SG and wipe the identity. If that
+    # fails, keep the registration rather than block the runner.
+    if ! (deregister_runner); then
+      info "Could not deregister;" "keeping the old registration"
+      return 0
+    fi
   fi
   if [[ -s "$ECS_CONFIG_DIR/ecs.config" || -s "$SSM_REGISTRATION_FILE" ]]; then
     die "Partial registration state found." "Deregister and wipe the PVC before retrying."
@@ -250,47 +301,99 @@ load_ecs_config() { #{{{
 }
 #}}}: load_ecs_config
 
-size_agent_memory() { #{{{
+mem_total_mib() {
+  echo $(($(awk '/^MemTotal:/ {print $2}' "$MEMINFO_FILE") / 1024))
+}
+
+reserved_memory_mib() { #{{{
   # The agent advertises MemTotal from /proc/meminfo, which is the whole node.
   # Tasks run inside the dockerd container, so advertise its limit (downward
-  # API) minus dockerd's own overhead, by reserving the difference.
+  # API) minus dockerd's own overhead, by reserving the difference. With native
+  # steps the limit is the chart's nativeSteps.advertise and the overhead 0.
+  # More than the node advertises the node.
+  # Prints the reservation; fails without a numeric limit (1, nothing printed)
+  # or when the agent can't take it (2).
   local limit="${SG_TASK_MEMORY_LIMIT_MIB:-}" total available reserved
-  [[ "$limit" =~ ^[0-9]+$ ]] || return 0
+  [[ "$limit" =~ ^[0-9]+$ ]] || return 1
 
-  total=$(($(awk '/^MemTotal:/ {print $2}' "$MEMINFO_FILE") / 1024))
+  total=$(mem_total_mib)
   available=$((limit - SG_DOCKERD_OVERHEAD_MIB))
   reserved=$((total > available ? total - available : 0))
+  echo "$reserved"
   # The agent parses this as uint16: anything larger silently becomes 0, which
   # would advertise the whole node again.
-  if ((reserved > 65535)); then
-    die "Can't size agent memory:" "reservation of ${reserved}MiB exceeds 65535MiB"
+  ((reserved <= 65535)) || return 2
+}
+#}}}: reserved_memory_mib
+
+size_agent_memory() { #{{{
+  local reserved rc=0 total
+  reserved=$(reserved_memory_mib) || rc=$?
+  ((rc == 1)) && return 0
+  if ((rc == 2)); then
+    die "Can't size agent memory:" "reservation of ${reserved}MiB exceeds 65535MiB (advertise more memory or use a smaller node)"
   fi
+  total=$(mem_total_mib)
   export ECS_RESERVED_MEMORY="$reserved"
   info "Advertising memory (MiB):" "$((total - reserved)) of $total"
 }
 #}}}: size_agent_memory
 
-cpu_affinity_list() { #{{{
-  # Usage: cpu_affinity_list <n>
-  # Prints the first n CPUs this process may run on as a taskset list, or
-  # nothing if n already covers all of them.
-  local n="$1" range first last cpu allowed=0 cpus=() ranges=()
+allowed_cpus() { #{{{
+  # Prints the CPUs this process may run on, space-separated.
+  local range first last cpu cpus=() ranges=()
   IFS=, read -ra ranges <<<"$(awk '/^Cpus_allowed_list:/ {print $2}' "$PROC_STATUS_FILE")"
   for range in "${ranges[@]}"; do
     first="${range%-*}"
     last="${range#*-}"
     for ((cpu = first; cpu <= last; cpu++)); do
-      allowed=$((allowed + 1))
-      ((${#cpus[@]} < n)) && cpus+=("$cpu")
+      cpus+=("$cpu")
     done
   done
-  ((n >= allowed)) && return 0
+  echo "${cpus[*]}"
+}
+#}}}: allowed_cpus
+
+cpu_affinity_list() { #{{{
+  # Usage: cpu_affinity_list <n>
+  # Prints the first n CPUs this process may run on as a taskset list, or
+  # nothing if n already covers all of them.
+  local n="$1" cpus=()
+  read -ra cpus <<<"$(allowed_cpus)"
+  ((n >= ${#cpus[@]})) && return 0
   (
     IFS=,
-    echo "${cpus[*]}"
+    echo "${cpus[*]:0:n}"
   )
 }
 #}}}: cpu_affinity_list
+
+agent_cpu_list() { #{{{
+  # The CPUs cmd_ecs_agent pins the agent to (SG_TASK_CPU_LIMIT of them), or
+  # nothing to leave it on all of them.
+  [[ "${SG_TASK_CPU_LIMIT:-}" =~ ^[0-9]+$ ]] || return 0
+  cpu_affinity_list "$SG_TASK_CPU_LIMIT"
+}
+#}}}: agent_cpu_list
+
+advertised_resources() { #{{{
+  # Prints "<cpu units> <memory MiB>" as the ECS agent started by
+  # cmd_ecs_agent registers them: NumCPU of its CPU set x 1024, and MemTotal
+  # minus ECS_RESERVED_MEMORY. Fails when the agent wouldn't start (memory
+  # reservation too large).
+  local cpu_list cpus=() reserved=0 rc=0
+  cpu_list="$(agent_cpu_list)"
+  if [[ -n "$cpu_list" ]]; then
+    IFS=, read -ra cpus <<<"$cpu_list"
+  else
+    read -ra cpus <<<"$(allowed_cpus)"
+  fi
+  reserved=$(reserved_memory_mib) || rc=$?
+  ((rc == 2)) && return 1
+  ((rc == 1)) && reserved=0
+  echo "$((${#cpus[@]} * 1024)) $(($(mem_total_mib) - reserved))"
+}
+#}}}: advertised_resources
 
 cmd_ecs_agent() { #{{{
   wait_for "ecs.config" test -s "$ECS_CONFIG_DIR/ecs.config"
@@ -312,15 +415,15 @@ cmd_ecs_agent() { #{{{
   # The agent advertises runtime.NumCPU() x 1024 units. NumCPU follows CPU
   # affinity, not the cgroup quota, so pin the agent to as many CPUs as the
   # dockerd container's limit allows.
-  local cpu_list=""
-  if [[ "${SG_TASK_CPU_LIMIT:-}" =~ ^[0-9]+$ ]]; then
-    cpu_list="$(cpu_affinity_list "$SG_TASK_CPU_LIMIT")"
-  fi
+  local cpu_list
+  cpu_list="$(agent_cpu_list)"
   reactivate_when_registered &
 
   if [[ -n "$cpu_list" ]]; then
     info "Advertising CPUs:" "$SG_TASK_CPU_LIMIT (agent pinned to $cpu_list)"
     exec taskset -c "$cpu_list" ecs-agent
+  elif [[ -n "${SG_TASK_CPU_LIMIT:-}" ]]; then
+    info "Advertising CPUs:" "all this node allows (limit $SG_TASK_CPU_LIMIT)"
   fi
   exec ecs-agent
 }
@@ -402,13 +505,15 @@ cmd_reap() { #{{{
 sg_api() { #{{{
   # Usage: sg_api <method> <path> [payload]
   # Calls the runner group's SG API with the node token and prints the
-  # response. Subshell: api_call exits on an empty response.
+  # response. Subshell: api_call exits on an empty response. A failure logs
+  # only a string message: the runner group's body holds secrets.
   local method="$1" path="$2" payload="${3:-}"
   (
     if ! api_call "$method" \
       "${SG_BASE_API}/orgs/${SG_ORGANIZATION}/runnergroups/${SG_RUNNER_GROUP}/${path}" \
       "$payload"; then
-      info "SG API $method $path failed ($status_code):" "$message" >&2
+      info "SG API $method $path failed ($status_code):" \
+        "$(jq -r '[.msg, .message] | map(strings) | first // "no message"' <<<"$response" 2>/dev/null)" >&2
       exit 1
     fi
     printf '%s' "$response"
