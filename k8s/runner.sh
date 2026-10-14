@@ -14,6 +14,7 @@
 #   wait-drained  dockerd/ssm-agent preStop: outlive the drain
 #   deregister  run via `kubectl exec -i`; reads SG credentials from stdin
 #   reap        scaler Job: deregister a runner parked too long, from its PVC
+#   workflow-logs  opt-in sidecar: workflow step output, tagged with its run
 #
 # main.sh is sourced for the API, config and network helpers; its
 # BASH_SOURCE guard keeps main() from running.
@@ -56,6 +57,14 @@ SG_PRUNE_INTERVAL_SECONDS="${SG_PRUNE_INTERVAL_SECONDS:-14400}"
 SG_PRUNE_UNTIL="${SG_PRUNE_UNTIL:-24h}"
 SG_PRUNE_IMAGES_ABOVE_PCT="${SG_PRUNE_IMAGES_ABOVE_PCT:-70}"
 DOCKER_DATA_ROOT="${DOCKER_DATA_ROOT:-/var/lib/docker}"
+
+# workflow-logs sidecar: "text" lines or "json" objects, one per output line;
+# [SG_DEBUG] lines only with SG_WORKFLOW_LOGS_DEBUG=true.
+SG_WORKFLOW_LOGS_FORMAT="${SG_WORKFLOW_LOGS_FORMAT:-text}"
+SG_WORKFLOW_LOGS_DEBUG="${SG_WORKFLOW_LOGS_DEBUG:-false}"
+# Containers being followed (one directory each), so a container listed at
+# start and also seen starting is followed once.
+FOLLOWED_DIR="${FOLLOWED_DIR:-/tmp/sg-workflow-logs}"
 
 # What the agent sizing reads; overridable so tests can feed fake files.
 PROC_STATUS_FILE="${PROC_STATUS_FILE:-/proc/self/status}"
@@ -374,9 +383,16 @@ cmd_deregister() { #{{{
 #}}}: cmd_deregister
 
 cmd_reap() { #{{{
-  # One-off Job the scaler starts for a runner parked longer than its TTL: the
-  # pod is gone, so deregister using the identity on the mounted state PVC.
+  # One-off Job the scaler (parked longer than its TTL) or the uninstall hook
+  # starts: the pod is gone, so deregister using the identity on the mounted
+  # state PVC.
   load_sg_credentials_from_dir
+  # Never registered (registration failed, or already deregistered and
+  # wiped): nothing in SG to remove, and the PVC can go.
+  if [[ ! -s "$ECS_CONFIG_DIR/ecs.config" ]]; then
+    info "Not registered:" "nothing to deregister"
+    return 0
+  fi
   deregister_runner
 }
 #}}}: cmd_reap
@@ -496,6 +512,101 @@ cmd_wait_drained() { #{{{
 }
 #}}}: cmd_wait_drained
 
+container_log_tags() { #{{{
+  # Usage: container_log_tags <task-arn|mount sources>
+  # Prints "run workflow" for a step (user) container, "-" where unknown, or
+  # fails for a run controller (admin) container, an ECS task: it relays its
+  # steps' output, so following it too would print every step line twice.
+  # Steps mount their run's workspace, .../wfs/<workflow>/wfruns/<run>/...
+  # No env is read: it holds the run's credentials.
+  local task_arn sources run="-" wf="-"
+  IFS='|' read -r task_arn sources <<<"$1"
+  [[ -z "$task_arn" ]] || return 1
+  [[ "$sources" =~ /wfruns/([^/[:space:]]+) ]] && run="${BASH_REMATCH[1]}"
+  [[ "$sources" =~ /wfs/([^/[:space:]]+)/wfruns/ ]] && wf="${BASH_REMATCH[1]}"
+  echo "$run $wf"
+}
+#}}}: container_log_tags
+
+format_log_lines() { #{{{
+  # Usage: format_log_lines <run> <workflow>
+  # Reads `docker logs -t` lines ("<time> <message>") on stdin and writes each
+  # as one tagged line or JSON object: one write per line, so concurrent
+  # containers interleave by line, never mid-line. [SG_DEBUG] lines only with
+  # SG_WORKFLOW_LOGS_DEBUG=true.
+  local run="$1" wf="$2" debug=false line time msg
+  [[ "${SG_WORKFLOW_LOGS_DEBUG:-}" == "true" ]] && debug=true
+  if [[ "$SG_WORKFLOW_LOGS_FORMAT" == "json" ]]; then
+    jq -Rc --unbuffered --arg run "$run" --arg wf "$wf" --argjson debug "$debug" '
+      index(" ") as $i
+      | (if $i then {time: .[:$i], msg: .[$i + 1:]} else {time: null, msg: .} end)
+      | select($debug or (.msg | startswith("[SG_DEBUG]") | not))
+      | . + {role: "user", run: $run, workflow: $wf}'
+    return
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    time="${line%% *}"
+    msg="${line#* }"
+    [[ "$line" == *" "* ]] || { time="-" msg="$line"; }
+    [[ "$debug" == "true" || "$msg" != "[SG_DEBUG]"* ]] || continue
+    printf '%s role=user run=%s workflow=%s | %s\n' "$time" "$run" "$wf" "$msg"
+  done
+}
+#}}}: format_log_lines
+
+follow_container() { #{{{
+  # Usage: follow_container <id> [since]
+  # Streams one step container's output until it exits.
+  local id="$1" since="${2:-}" inspect tags
+  mkdir -p "$FOLLOWED_DIR"
+  mkdir "$FOLLOWED_DIR/$id" 2>/dev/null || return 0
+  # Gone already, or a run controller: nothing to follow.
+  if ! inspect="$(docker inspect --format \
+    '{{index .Config.Labels "com.amazonaws.ecs.task-arn"}}|{{range .Mounts}}{{.Source}} {{end}}' \
+    "$id" 2>/dev/null)" || ! tags="$(container_log_tags "$inspect")"; then
+    rmdir "$FOLLOWED_DIR/$id"
+    return 0
+  fi
+  # The CLI's own error for a container removed before it attached (--rm
+  # and done within moments) isn't workflow output.
+  # shellcheck disable=SC2086 # tags is "run workflow"
+  docker logs --follow --timestamps ${since:+--since "$since"} "$id" 2>&1 |
+    grep --line-buffered -v '^Error response from daemon: No such container' |
+    format_log_lines $tags
+  rmdir "$FOLLOWED_DIR/$id" 2>/dev/null
+}
+#}}}: follow_container
+
+cmd_workflow_logs() { #{{{
+  # Opt-in sidecar: every workflow step's output on this container's stdout,
+  # so `kubectl logs -c workflow-logs` and the cluster's log pipeline see it.
+  # Run controllers are skipped (they relay their steps' output). Containers
+  # already running when it starts (a sidecar restart) are followed from now,
+  # not replayed.
+  local since id time events_pid
+  wait_for "dockerd" docker info
+  since="$(date +%s)"
+  info "Streaming workflow step logs, format" "$SG_WORKFLOW_LOGS_FORMAT, debug $SG_WORKFLOW_LOGS_DEBUG"
+
+  docker events --since "$since" --filter type=container --filter event=start \
+    --format '{{.ID}} {{.Time}}' |
+    while read -r id time; do
+      follow_container "$id" "$time" &
+    done &
+  events_pid=$!
+  for id in $(docker ps -q --no-trunc); do
+    follow_container "$id" "$since" &
+  done
+
+  # In the background and waited on, so SIGTERM ends it at once (after the
+  # preStop wait-drained). If dockerd goes away, events ends: exit and let
+  # the kubelet restart the sidecar.
+  trap 'exit 0' TERM INT
+  wait "$events_pid"
+}
+#}}}: cmd_workflow_logs
+
+
 # Only dispatch when executed directly; sourcing exposes the functions (tests).
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   case "${1:-}" in
@@ -507,8 +618,9 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   wait-drained) cmd_wait_drained ;;
   deregister) cmd_deregister ;;
   reap) cmd_reap ;;
+  workflow-logs) cmd_workflow_logs ;;
   *)
-    echo "Usage: $(basename "$0") register|dockerd|ssm-agent|ecs-agent|drain|wait-drained|deregister|reap" >&2
+    echo "Usage: $(basename "$0") register|dockerd|ssm-agent|ecs-agent|drain|wait-drained|deregister|reap|workflow-logs" >&2
     exit 2
     ;;
   esac
