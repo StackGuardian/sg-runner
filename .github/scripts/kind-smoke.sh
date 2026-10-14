@@ -3,8 +3,9 @@
 # built images and checks what can be checked without StackGuardian: the
 # scaler starts and is ready, finds SG unreachable and leaks no credentials,
 # the runner's register init container fails as expected, the scaler's
-# RBAC is as narrow as intended, the native steps broker runs steps as pods
-# with the chart's runner RBAC, and `helm uninstall` leaves no PVCs behind.
+# RBAC is as narrow as intended, the runner pod's steps broker is a native
+# sidecar and dockerd is guarded by it, the broker runs steps as pods with
+# the chart's runner RBAC, and `helm uninstall` leaves no PVCs behind.
 #
 # sg.apiUrl is http://127.0.0.1:9 (discard port on the pod's own loopback):
 # nothing ever reaches StackGuardian, and registration fails before any AWS
@@ -124,6 +125,19 @@ cmd_run() {
   k logs "deployment/$SCALER" --tail=20
   endstep
 
+  step "runner pod: steps broker sidecar, guarded dockerd"
+  # The register init container fails here, so neither ever runs: check the
+  # spec and the image instead.
+  local policy
+  policy=$(k get "statefulset/$STS" \
+    -o jsonpath='{.spec.template.spec.initContainers[?(@.name=="steps")].restartPolicy}')
+  [[ $policy == Always ]] || fail "the steps container isn't a native sidecar (restartPolicy '$policy')"
+  echo "steps: init container with restartPolicy Always"
+  docker run --rm --entrypoint grep "$RUNNER_IMAGE" -q -- '--authorization-plugin=' /opt/sg-runner/runner.sh \
+    || fail "the runner image's dockerd doesn't use the authorization plugin"
+  echo "runner image: dockerd starts with --authorization-plugin"
+  endstep
+
   step "runner StatefulSet exists, register init container fails"
   k get "statefulset/$STS"
   until_ok "a finished run of the register init container of $STS-0" register_finished
@@ -181,9 +195,9 @@ cmd_run() {
   # PVC (never registered here: nothing to deregister), then deletes the PVCs.
   k get pvc
   helm --kube-context "$CONTEXT" -n "$NS" uninstall "$RELEASE" --timeout "${TIMEOUT}s"
-  local left
-  left=$(k get pvc,statefulset,deployment,job -o name 2>&1)
-  [[ -z $left ]] || fail "left behind after helm uninstall: $left"
+  # The workspace PVC (generic ephemeral) goes with its pod, through the
+  # garbage collector: give it a moment.
+  until_ok "nothing left after helm uninstall" nothing_left
   echo "nothing left after helm uninstall"
   endstep
 
@@ -230,10 +244,7 @@ can() { # <verb resource [flags]> <yes|no> [service account]
 # like the runner's dockerd: the workspace PVC at /var/tmp/workspace, the
 # broker's socket below it.
 native_steps() {
-  step "native steps: chart upgrade, broker test pod"
-  helm --kube-context "$CONTEXT" -n "$NS" upgrade "$RELEASE" "$CHART" --reuse-values \
-    --set runner.nativeSteps.enabled=true \
-    --set runner.nativeSteps.advertise.cpu=1 --set runner.nativeSteps.advertise.memory=1Gi
+  step "native steps: broker test pod"
   local node
   for node in $(kind get nodes --name "$CLUSTER"); do
     docker exec -i "$node" sh -c "mkdir -p /etc/containerd/certs.d/$MIRROR_HOST \
@@ -337,21 +348,28 @@ EOF
   echo "step $first deleted after FINISHED_TTL, exit code still served"
   endstep
 
+  step "native steps: dockerd guard"
+  # As dockerd asks it (the authorization plugin protocol): a step container
+  # (labelled with its run) is refused, a run controller allowed.
+  [[ $(guard /Plugin.Activate '{}' | jq -c .Implements) == '["authz"]' ]] \
+    || fail "the guard doesn't activate as an authz plugin"
+  out=$(guard /AuthZPlugin.AuthZReq "$(authz_req '{"Image":"alpine","Labels":{"wfrunId":"r1"}}')")
+  [[ $(jq -r .Allow <<<"$out") == false ]] || fail "the guard allowed a step container: $out"
+  echo "step container refused: $(jq -r .Msg <<<"$out")"
+  out=$(guard /AuthZPlugin.AuthZReq "$(authz_req '{"Image":"controller","Labels":{"com.amazonaws.ecs.task-arn":"x"}}')")
+  [[ $(jq -r .Allow <<<"$out") == true ]] || fail "the guard refused a run controller: $out"
+  echo "run controller allowed"
+  endstep
+
   if [[ -n $CONTROLLER_REPO ]]; then
     controller_live_test
   fi
 
   step "native steps: cleanup"
-  # The drain marker releases the broker (it ignores SIGTERM until then).
-  kc touch /run/sg-runner/sg-runner-drained
   k delete pod "$STEPS_POD" --timeout=60s
   k delete pvc "$STEPS_POD-workspace" --timeout=60s
   # Step pods and Secrets are owned by the test pod.
   until_ok "step pods gone" steps_all_gone
-  helm --kube-context "$CONTEXT" -n "$NS" upgrade "$RELEASE" "$CHART" --reuse-values \
-    --set runner.nativeSteps.enabled=false
-  # The runner's own workspace PVC (generic ephemeral) goes with its pod.
-  until_ok "PVC $STS-0-workspace gone" runner_workspace_gone
   echo "native steps cleaned up"
   endstep
 }
@@ -392,6 +410,7 @@ spec:
         - name: NAMESPACE
           valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
         - { name: SOCKET_PATH, value: /run/sg-steps/steps.sock }
+        - { name: GUARD_SOCKET, value: /run/sg-guard/sg-steps-guard.sock }
         - { name: WORKSPACES_DIR, value: /var/tmp/workspace }
         - { name: WORKSPACE_CLAIM, value: $STEPS_POD-workspace }
         - name: STEP_LABELS
@@ -402,11 +421,10 @@ spec:
         # Its own image, for the step pods' wrapper init container.
         - { name: BROKER_IMAGE, value: $SCALER_IMAGE }
         - { name: BROKER_IMAGE_PULL_POLICY, value: Never }
-        - { name: DRAINED_MARKER, value: /run/sg-runner/sg-runner-drained }
-      lifecycle:
-        preStop:
-          exec:
-            command: [/sg-runner-steps, wait-drained]
+      readinessProbe:
+        exec: { command: [/sg-runner-steps, healthcheck] }
+        periodSeconds: 2
+        timeoutSeconds: 6
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -417,7 +435,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       volumeMounts:
         - { name: socket, mountPath: /run/sg-steps }
-        - { name: drained, mountPath: /run/sg-runner, readOnly: true }
+        - { name: guard, mountPath: /run/sg-guard }
         - { name: api-access, mountPath: /var/run/secrets/kubernetes.io/serviceaccount, readOnly: true }
     - name: client
       image: python:3.11-alpine
@@ -430,13 +448,14 @@ spec:
       volumeMounts:
         - { name: workspace, mountPath: /var/tmp/workspace }
         - { name: socket, mountPath: /var/tmp/workspace/.sg-runner }
-        - { name: drained, mountPath: /run/sg-runner }
+        # Where dockerd would find the guard.
+        - { name: guard, mountPath: /run/docker/plugins }
   volumes:
     - name: workspace
       persistentVolumeClaim: { claimName: $STEPS_POD-workspace }
     - name: socket
       emptyDir: {}
-    - name: drained
+    - name: guard
       emptyDir: {}
     # As the chart's steps container gets it.
     - name: api-access
@@ -452,6 +471,17 @@ spec:
                 - path: namespace
                   fieldRef: { apiVersion: v1, fieldPath: metadata.namespace }
 EOF
+}
+
+# Calls the guard's plugin API; prints the body.
+guard() { # <path> <json body>
+  kc curl -sS --unix-socket /run/docker/plugins/sg-steps-guard.sock -X POST \
+    -H 'Content-Type: application/json' -d "$2" "http://guard$1"
+}
+
+authz_req() { # <container create body>
+  jq -nc --arg b "$(printf '%s' "$1" | base64 | tr -d '\n')" \
+    '{User: "", RequestMethod: "POST", RequestUri: "/v1.47/containers/create", RequestBody: $b}'
 }
 
 # In the client container.
@@ -511,28 +541,33 @@ secret_gone() {
   [[ -z $(k get "secret/$1-env" -o name --ignore-not-found 2>/dev/null) ]]
 }
 
-# A finished step pod as the broker leaves it.
+# A finished step pod as the broker leaves it. Polled as a whole: the broker
+# labels the pod once its container has terminated, which can be a moment
+# before the kubelet updates the pod's phase.
 expect_pod() { # <id> <phase> <container reason> <outcome> <wrapped>
-  local got want="$2 $3 $4 $5"
-  until_ok "step pod $1 labelled" step_labelled "$1"
-  got=$(k get "pod/$1" -o json | jq -r --arg l "$OUTCOME_LABEL" --arg a "$WRAPPED_ANNOTATION" '
-    [.status.phase,
-     (.status.containerStatuses[] | select(.name == "step") | .state.terminated.reason),
-     .metadata.labels[$l], .metadata.annotations[$a]] | join(" ")')
-  [[ $got == "$want" ]] || fail "step pod $1: want '$want' (phase reason outcome wrapped), got '$got'"
+  local got="" want="$2 $3 $4 $5" deadline=$((SECONDS + TIMEOUT))
+  until got=$(pod_outcome "$1") && [[ $got == "$want" ]]; do
+    ((SECONDS < deadline)) \
+      || fail "step pod $1: want '$want' (phase reason outcome wrapped), last seen '$got' after ${TIMEOUT}s"
+    sleep 2
+  done
   echo "step pod $1: $got"
 }
 
-step_labelled() {
-  k get "pod/$1" -o json 2>/dev/null | jq -e --arg l "$OUTCOME_LABEL" '.metadata.labels[$l] // empty' >/dev/null
+pod_outcome() { # <id> -> "phase reason outcome wrapped"
+  k get "pod/$1" -o json 2>/dev/null | jq -r --arg l "$OUTCOME_LABEL" --arg a "$WRAPPED_ANNOTATION" '
+    [.status.phase,
+     ((.status.containerStatuses // [])[] | select(.name == "step") | .state.terminated.reason // ""),
+     .metadata.labels[$l] // "", .metadata.annotations[$a] // ""] | join(" ")'
 }
 
 steps_all_gone() {
   [[ -z $(k get pods,secrets -l app.kubernetes.io/component=step -o name 2>/dev/null) ]]
 }
 
-runner_workspace_gone() {
-  [[ -z $(k get pvc "$STS-0-workspace" -o name --ignore-not-found 2>/dev/null) ]]
+nothing_left() {
+  LEFT=$(k get pvc,statefulset,deployment,job -o name 2>&1)
+  [[ -z $LEFT ]] || { echo "left: $LEFT"; return 1; }
 }
 
 expect_error() { # <reason> <method> <path> [json body]

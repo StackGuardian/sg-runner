@@ -206,49 +206,48 @@ as "ctx" and the file mode as "mode".
 {{- end }}
 
 {{/*
-Resources of the dockerd container: a size preset or runner.resources, plus the
-workspace's ephemeral-storage request. Workflows run inside dockerd, and the ECS
-agent advertises these limits (SG_TASK_* on ecs-agent). With native steps only
-run controllers do: runner.nativeSteps.controllerResources, and the workspace is
-a PVC.
+Runner size: what the runner advertises to SG (cpu, memory) and the dockerd
+container's resources (only run controllers run there). A preset or, with
+size=custom, runner.advertise and runner.controllerResources. Prints YAML.
 */}}
-{{- define "sg-runner.dockerdResources" -}}
-{{- if .Values.runner.nativeSteps.enabled }}
-{{- toYaml (default dict .Values.runner.nativeSteps.controllerResources) }}
-{{- else }}
+{{- define "sg-runner.size" -}}
 {{- $presets := dict
-  "small" (dict "requests" (dict "cpu" "1" "memory" "2Gi") "limits" (dict "cpu" "2" "memory" "4Gi"))
-  "medium" (dict "requests" (dict "cpu" "2" "memory" "4Gi") "limits" (dict "cpu" "4" "memory" "8Gi"))
-  "large" (dict "requests" (dict "cpu" "4" "memory" "8Gi") "limits" (dict "cpu" "8" "memory" "16Gi"))
+  "small" (dict "cpu" 2 "memory" "4Gi" "resources" (dict "requests" (dict "cpu" "500m" "memory" "1Gi") "limits" (dict "cpu" "2" "memory" "2Gi")))
+  "medium" (dict "cpu" 4 "memory" "8Gi" "resources" (dict "requests" (dict "cpu" "1" "memory" "2Gi") "limits" (dict "cpu" "4" "memory" "4Gi")))
+  "large" (dict "cpu" 8 "memory" "16Gi" "resources" (dict "requests" (dict "cpu" "2" "memory" "4Gi") "limits" (dict "cpu" "8" "memory" "8Gi")))
 }}
 {{- $size := .Values.runner.size }}
-{{- $res := dict }}
 {{- if eq $size "custom" }}
-{{- $res = deepCopy (default dict .Values.runner.resources) }}
+{{- $a := default dict .Values.runner.advertise }}
+{{- $res := default dict .Values.runner.controllerResources }}
+{{- if not (and $a.cpu $a.memory) }}
+{{- fail "runner.size=custom needs runner.advertise.cpu (whole CPUs) and .memory (Mi or Gi): what the runner advertises to SG for workflows" }}
+{{- end }}
 {{- $limits := default dict $res.limits }}
 {{- if not (and $limits.cpu $limits.memory) }}
-{{- fail "runner.size=custom needs runner.resources.limits.cpu and .memory: without limits the runner advertises the whole node to SG" }}
+{{- fail "runner.size=custom needs runner.controllerResources.limits.cpu and .memory: the run controllers' room" }}
 {{- end }}
+{{- toYaml (dict "cpu" $a.cpu "memory" $a.memory "resources" $res) }}
 {{- else if hasKey $presets $size }}
-{{- $res = deepCopy (get $presets $size) }}
+{{- toYaml (get $presets $size) }}
 {{- else }}
 {{- fail (printf "runner.size must be small, medium, large or custom, got %q" $size) }}
-{{- end }}
-{{- with .Values.runner.workspace.request }}
-{{- $requests := default dict $res.requests }}
-{{- $_ := set $requests "ephemeral-storage" . }}
-{{- $_ := set $res "requests" $requests }}
-{{- end }}
-{{- toYaml $res }}
 {{- end }}
 {{- end }}
 
 {{/*
-Native steps: the steps broker image, runner.nativeSteps.broker.image when its
-repository is set, the scaler image otherwise (it ships /sg-runner-steps).
+Resources of the dockerd container (run controllers only).
+*/}}
+{{- define "sg-runner.dockerdResources" -}}
+{{- toYaml (include "sg-runner.size" . | fromYaml).resources }}
+{{- end }}
+
+{{/*
+The steps broker image, runner.steps.broker.image when its repository is set,
+the scaler image otherwise (it ships /sg-runner-steps).
 */}}
 {{- define "sg-runner.brokerImage" -}}
-{{- $img := .Values.runner.nativeSteps.broker.image }}
+{{- $img := .Values.runner.steps.broker.image }}
 {{- if $img.repository }}
 {{- printf "%s:%s" $img.repository (default .Chart.AppVersion $img.tag | toString) }}
 {{- else }}
@@ -257,64 +256,44 @@ repository is set, the scaler image otherwise (it ships /sg-runner-steps).
 {{- end }}
 
 {{/*
-Native steps: runner.nativeSteps.advertise.memory (<n>Mi or <n>Gi) in MiB, what
-the ECS agent advertises (SG_TASK_MEMORY_LIMIT_MIB). Fails rendering without
-advertise.cpu and .memory.
+The advertised memory (<n>Mi or <n>Gi) in MiB, what the ECS agent advertises
+(SG_TASK_MEMORY_LIMIT_MIB).
 */}}
 {{- define "sg-runner.advertiseMemoryMiB" -}}
-{{- $a := default dict .Values.runner.nativeSteps.advertise }}
-{{- if not (and $a.cpu $a.memory) }}
-{{- fail "runner.nativeSteps.enabled needs runner.nativeSteps.advertise.cpu (whole CPUs) and .memory (Mi or Gi): what the runner advertises to SG for workflows" }}
-{{- end }}
-{{- $m := toString $a.memory }}
+{{- $m := toString (include "sg-runner.size" . | fromYaml).memory }}
 {{- if regexMatch "^[1-9][0-9]*Gi$" $m }}
 {{- mul (trimSuffix "Gi" $m | atoi) 1024 }}
 {{- else if regexMatch "^[1-9][0-9]*Mi$" $m }}
 {{- trimSuffix "Mi" $m | atoi }}
 {{- else }}
-{{- fail (printf "runner.nativeSteps.advertise.memory must be <n>Mi or <n>Gi, got %q" $m) }}
+{{- fail (printf "runner.advertise.memory must be <n>Mi or <n>Gi, got %q" $m) }}
 {{- end }}
 {{- end }}
 
 {{/*
-Runner pod affinity: runner.affinity, plus with native steps a required pod
-anti-affinity term (one runner per node: steps run on the runner's node and
-mount its RWO workspace), appended to any terms of the user's own.
+Runner pod affinity: runner.affinity plus a required pod anti-affinity term
+(one runner per node: steps run on the runner's node and mount its RWO
+workspace), appended to any terms of the user's own.
 */}}
 {{- define "sg-runner.runnerAffinity" -}}
 {{- $aff := deepCopy (default dict .Values.runner.affinity) }}
-{{- if .Values.runner.nativeSteps.enabled }}
 {{- $selector := include "sg-runner.selectorLabels" (dict "ctx" . "component" "runner") | fromYaml }}
 {{- $term := dict "topologyKey" "kubernetes.io/hostname" "labelSelector" (dict "matchLabels" $selector) }}
 {{- $anti := default dict $aff.podAntiAffinity }}
 {{- $required := default list $anti.requiredDuringSchedulingIgnoredDuringExecution }}
 {{- $_ := set $anti "requiredDuringSchedulingIgnoredDuringExecution" (append $required $term) }}
 {{- $_ := set $aff "podAntiAffinity" $anti }}
-{{- end }}
-{{- with $aff }}
-{{- toYaml . }}
-{{- end }}
+{{- toYaml $aff }}
 {{- end }}
 
 {{/*
-What the ECS agent advertises (runner.sh sizes the agent from it): the dockerd
-limits, or with native steps runner.nativeSteps.advertise. On ecs-agent and the
-register init container, which re-registers a runner whose size changed.
+What the ECS agent advertises (runner.sh sizes the agent from it), with
+nothing kept back for dockerd: steps run as pods next to the runner. On
+ecs-agent and the register init container, which re-registers a runner whose
+size changed.
 */}}
 {{- define "sg-runner.advertiseEnv" -}}
-{{- if .Values.runner.nativeSteps.enabled -}}
-# Steps run as pods next to the runner, not in dockerd: advertise
-# what the node has for them, with nothing kept back for dockerd.
-- { name: SG_TASK_CPU_LIMIT, value: {{ .Values.runner.nativeSteps.advertise.cpu | quote }} }
+- { name: SG_TASK_CPU_LIMIT, value: {{ (include "sg-runner.size" . | fromYaml).cpu | quote }} }
 - { name: SG_TASK_MEMORY_LIMIT_MIB, value: {{ include "sg-runner.advertiseMemoryMiB" . | quote }} }
 - { name: SG_DOCKERD_OVERHEAD_MIB, value: "0" }
-{{- else -}}
-# Rounded up to whole CPUs.
-- name: SG_TASK_CPU_LIMIT
-  valueFrom:
-    resourceFieldRef: { containerName: dockerd, resource: limits.cpu, divisor: '1' }
-- name: SG_TASK_MEMORY_LIMIT_MIB
-  valueFrom:
-    resourceFieldRef: { containerName: dockerd, resource: limits.memory, divisor: 1Mi }
-{{- end }}
 {{- end }}

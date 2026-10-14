@@ -1,8 +1,7 @@
-{{- if .Values.runner.nativeSteps.enabled }}
 {{- $name := include "sg-runner.runnerName" . }}
 {{- $component := dict "ctx" . "component" "runner" }}
-# The steps broker's identity (native steps). Only the broker container mounts
-# a token for it.
+# The steps broker's identity. Only the broker container mounts a token for
+# it.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -47,4 +46,3 @@ subjects:
   - kind: ServiceAccount
     name: {{ $name }}
     namespace: {{ .Release.Namespace }}
-{{- end }}

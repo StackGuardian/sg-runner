@@ -2,22 +2,26 @@
 
 > **Status: prototype.** Not supported, not documented for customers.
 
-Runs Private Runners as pods. Each StatefulSet replica is one registered
-runner: it stands in for the VM that `main.sh register` normally prepares. A
-scaler parks idle runners (pod stopped, registration kept, woken again in
+Runs Private Runners as pods (Kubernetes ≥ 1.29). Each StatefulSet replica is
+one registered runner on a node of its own: it stands in for the VM that
+`main.sh register` normally prepares. Run controllers run in the pod's nested
+Docker; each workflow step runs as a pod of its own on the runner's node,
+created by the `steps` broker sidecar ([`docs/steps-api.md`](docs/steps-api.md)).
+A scaler parks idle runners (pod stopped, registration kept, woken again in
 seconds) and wakes or adds runners when workflows queue.
 
 | Component | Where | What |
 |---|---|---|
 | Runner image | [`Dockerfile`](Dockerfile), [`runner.sh`](runner.sh) | nested `dockerd`, SSM agent, ECS agent; `runner.sh` sources `main.sh` |
-| Scaler image | [`scaler/`](scaler) (Go) | sizes the StatefulSet from SG's queue, parks, wakes and reaps runners |
+| Scaler image | [`scaler/`](scaler) (Go) | sizes the StatefulSet from SG's queue, parks, wakes and reaps runners; also ships the steps broker (`/sg-runner-steps`) |
 | Helm chart | [`chart/sg-runner`](chart/sg-runner/README.md) | runner StatefulSet, scaler, credentials, optional NetworkPolicy and PDB |
 
 ## How it maps to a VM
 
 | VM (`main.sh` + `ecs-anywhere-install.sh`) | Pod                                                      |
 |--------------------------------------------|----------------------------------------------------------|
-| `systemd` + `dockerd`                       | `dockerd` container (privileged, nested Docker)           |
+| `systemd` + `dockerd`                       | `dockerd` container (privileged, nested Docker, run controllers only; guarded by the broker's authorization plugin) |
+| workflow step containers                    | step pods on the runner's node (`steps` sidecar)          |
 | `amazon-ssm-agent` service                  | `ssm-agent` container                                     |
 | `ecs-init` → `ecs-agent` container          | `ecs-agent` container, env loaded from `ecs.config`       |
 | `register` (API + SSM activation)           | `register` init container, skipped if state exists        |
@@ -71,15 +75,16 @@ helm upgrade --install sg-runner k8s/chart/sg-runner -n sg-runner \
 
 Every workflow reserves 0.5 vCPU / 512 MiB for its run controller plus its own
 resource setting (default 0.5 vCPU / 1 GiB), so a default workflow takes
-1 vCPU / 1.5 GiB. `runner.size` picks the `dockerd` container's limits, which
-is what the runner advertises:
+1 vCPU / 1.5 GiB. `runner.size` picks what the runner advertises (step pods
+and run controllers together; the node needs it free) and the `dockerd`
+container's resources, which only hold the run controllers:
 
-| `runner.size` | Limits | Default workflows at once |
+| `runner.size` | Advertised | Default workflows at once |
 |---|---|---|
 | `small` (default) | 2 vCPU / 4Gi | 2 |
 | `medium` | 4 vCPU / 8Gi | 4 |
 | `large` | 8 vCPU / 16Gi | 8 |
-| `custom` | `runner.resources` (limits required) | |
+| `custom` | `runner.advertise` + `runner.controllerResources` (required) | |
 
 The runner must be larger than the largest workflow (its setting plus
 0.5 vCPU / 512 MiB), or that workflow stays queued; the scaler then warns
@@ -90,14 +95,12 @@ Image versions are pinned as build args in `Dockerfile` (`ECS_AGENT_VERSION`,
 `linux/amd64` and `linux/arm64` on a dedicated buildx builder and keeps only
 the build cache; `PUSH=1 REGISTRY=<registry/namespace>` pushes the result.
 
-## Workflow logs
+## Workflow steps
 
-Opt-in (`runner.workflowLogs.enabled=true`): a `workflow-logs` sidecar
-(`runner.sh workflow-logs`) follows every workflow step container through
-the shared Docker socket and writes its output to stdout, tagged with run and
-workflow; `[SG_DEBUG]` lines only with `runner.workflowLogs.debug=true`.
-Details in the
-[chart README](chart/sg-runner/README.md#workflow-logs).
+Steps are pods (`app.kubernetes.io/component=step`), so `kubectl logs` shows
+their output; finished ones stay for `runner.steps.finishedTTL`, labelled with
+their outcome. Details in the
+[chart README](chart/sg-runner/README.md#how-a-runner-runs-workflows).
 
 ## Docker cleanup
 
@@ -240,13 +243,15 @@ helm lint --strict k8s/chart/sg-runner --set credentials.existingSecret=x
 - **Network isolation is opt-in.** Workflow containers can resolve cluster DNS
   and reach the Kubernetes API (verified). The chart's NetworkPolicy
   (`networkPolicy.enabled`, with the cluster's CIDRs) blocks cluster ranges and
-  the metadata endpoint for runner and reap pods; it needs a CNI that enforces
-  NetworkPolicy and isn't tested on one yet.
-- **Workspaces are scratch.** `/var/tmp/workspace` is an `emptyDir` on
-  `dockerd` (`runner.workspace.sizeLimit`, default 20Gi): a run doesn't
-  survive a pod restart, and a workspace past the limit gets the pod evicted.
+  the metadata endpoint for runner, step and reap pods; it needs a CNI that
+  enforces NetworkPolicy and isn't tested on one yet. The steps broker needs
+  the Kubernetes API: allow its endpoint in `networkPolicy.extraEgress`.
+- **Workspaces are scratch.** `/var/tmp/workspace` is a PVC per runner pod
+  (`<pod>-workspace`, generic ephemeral, `runner.steps.workspace.size`,
+  default 20Gi), deleted with the pod: a run doesn't survive a pod restart.
 - **Task cgroup limits off** (`ECS_ENABLE_TASK_CPU_MEM_LIMIT=false`): the agent
-  can't create task cgroups from its container. Size the pod's resources instead.
+  can't create task cgroups from its container. Run controllers share the
+  `dockerd` container's limits; steps get their own pod requests and limits.
 - **No proxy support** yet (`--http-proxy` path not wired).
 - **Workflows bigger than a runner pod never run.** A workflow reserves
   0.5 vCPU / 512 MiB plus its own resource setting; if that exceeds the

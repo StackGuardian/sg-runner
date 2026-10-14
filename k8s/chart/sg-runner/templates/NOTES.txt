@@ -1,6 +1,6 @@
 {{- $sts := include "sg-runner.runnerName" . -}}
 {{- $ns := .Release.Namespace -}}
-sg-runner {{ .Chart.Version }} installed as StatefulSet {{ $ns }}/{{ $sts }} ({{ if .Values.runner.nativeSteps.enabled }}native steps{{ else }}size: {{ .Values.runner.size }}{{ end }}).
+sg-runner {{ .Chart.Version }} installed as StatefulSet {{ $ns }}/{{ $sts }} (size: {{ .Values.runner.size }}).
 
 Runner group: {{ .Values.sg.organization }}/{{ .Values.sg.runnerGroup }}. Each replica registers one runner on its
 first start.
@@ -41,23 +41,20 @@ running workflows, so pass a --timeout that covers them:
 uninstall.deregister=false: `helm uninstall` keeps the PVCs, and runners stay
 registered in SG as parked.
 {{- end }}
-{{- if .Values.runner.nativeSteps.enabled }}
+{{- $size := include "sg-runner.size" . | fromYaml }}
 
-Native steps (experimental): one runner per node, advertising {{ .Values.runner.nativeSteps.advertise.cpu }} CPU / {{ .Values.runner.nativeSteps.advertise.memory }}.
+One runner per node, advertising {{ $size.cpu }} CPU / {{ $size.memory }} for workflows.
 Each workflow step runs as a pod on its runner's node:
   kubectl -n {{ $ns }} get pods -l app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=step
   kubectl -n {{ $ns }} logs -f <step pod>
-Finished step pods stay for {{ .Values.runner.nativeSteps.finishedTTL }}, labelled with their outcome:
+Finished step pods stay for {{ .Values.runner.steps.finishedTTL }}, labelled with their outcome:
   kubectl -n {{ $ns }} get pods -l app.kubernetes.io/component=step -L sg-runner.stackguardian.io/outcome
 The steps broker in each runner pod creates them:
   kubectl -n {{ $ns }} logs -f {{ $sts }}-0 -c steps
-{{- end }}
 {{- if .Values.networkPolicy.enabled }}
 
 NetworkPolicy {{ $sts }} only takes effect with a CNI that enforces it.
-{{- if .Values.runner.nativeSteps.enabled }}
 It blocks the Kubernetes API too, which the steps broker needs: allow the API
 server's endpoint (`kubectl get endpoints kubernetes`) in
 networkPolicy.extraEgress. That opens it to everything in the runner pod.
-{{- end }}
 {{- end }}
