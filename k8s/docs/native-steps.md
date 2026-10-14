@@ -53,24 +53,40 @@ runner pod (StatefulSet)                               step pods (same node)
 - The broker (`sg-runner-steps`, in the scaler image) builds the step pod
   itself, from a fixed template:
   - env in a Secret (`envFrom`), registry credentials in a pull Secret;
-  - the step's command as `args` (the image's ENTRYPOINT is kept, as with
-    Docker), `$` escaped so the kubelet never expands `$(VAR)`;
+  - started through `sg-step-wrapper` (below): the container's command is
+    the wrapper followed by the image's ENTRYPOINT and the step's command (or
+    the image's CMD), as Docker would run them; `$` is escaped so the kubelet
+    never expands `$(VAR)`;
   - CPU request = Docker CPU shares / 1024, no CPU limit (Docker's shares were
     a weight); memory request = limit;
   - each Docker bind mount becomes a `subPath` of the runner's workspace PVC;
     sources outside the run's own directory are rejected;
   - pinned to the runner's node (required node affinity), owned by the runner
     pod, no service account token, `RuntimeDefault` seccomp, unprivileged.
-- **Finished steps are deleted** (pod and Secrets) 10s (`FINISHED_GRACE`)
-  after the controller has read the result and its log stream has closed.
-  Their output is in SG's run log; `kubectl logs` works only while a step
-  runs. The broker keeps the result in memory for an hour. Steps nobody read
-  (controller gone) are deleted after `FINISHED_TTL`.
+- **Exit codes 11 and 12 end `Completed`.** SG's step images exit 11 to ask
+  for approval and 12 to finish the run early; Kubernetes would show both as
+  `Failed` / `Error`. An init container copies `sg-step-wrapper` (a static
+  binary from the broker's image) into the step pod, and the step runs under
+  it as PID 1: it forwards signals, reaps zombies (like `docker run --init`),
+  and turns 11 and 12 into exit 0 with the real code in the container's
+  termination message, which the broker reports to the controller. Other
+  codes pass through, so real failures still show `Error`. To build that
+  command the broker reads the image's ENTRYPOINT and CMD from its registry
+  (manifest and config only, never layers; the step's own registry
+  credentials; cached 10 min). If that fails the step runs unwrapped, exactly
+  as before (annotation `sg-runner.stackguardian.io/wrapped: "false"` with the
+  reason), and 11/12 show as `Error` for that step only.
+- **Finished steps stay** for `finishedTTL` (1h), labelled with their outcome
+  (`sg-runner.stackguardian.io/outcome`: `succeeded`, `approval-required`,
+  `completed-early`, `failed`, `stopped`), then are deleted. Their env and
+  pull Secrets (the run's credentials) are deleted as soon as they finish.
+  `kubectl get pods -l app.kubernetes.io/component=step -L
+  sg-runner.stackguardian.io/outcome` shows what happened.
 - **Drain.** The broker's preStop waits for the runner's drain marker and it
   ignores SIGTERM until then: run controllers keep their steps running through
   a runner shutdown.
-- **RBAC.** The runner's ServiceAccount can create, read and delete pods, read
-  pod logs, and create and delete Secrets. It can't read or list Secrets (the
+- **RBAC.** The runner's ServiceAccount can create, read, patch (the outcome
+  label) and delete pods, read pod logs, and create and delete Secrets. It can't read or list Secrets (the
   node token is one) or exec into pods. The token is mounted in the broker
   container only.
 
@@ -104,15 +120,16 @@ an RWX prerequisite (Filestore, EFS, NFS) and slower small-file I/O.
 
 ## Known behaviour and limits
 
-- **Steps that exit non-zero show as `Failed` / `Error`**, including SG's
-  signal codes 11 (approval required) and 12 (finish the run early).
-  Kubernetes sets the phase from the exit code and nothing can patch it.
-  Mitigated by deleting finished steps ~10s after their result is read.
-  Monitoring on failed pods must exclude `app.kubernetes.io/component=step`.
-  Real fixes, later: a wrapper in the step pod that maps 11/12 to 0 and
-  reports the code through the termination message (needs each image's
-  ENTRYPOINT/CMD from the registry), or step images signalling approval and
-  early finish without exit codes (an SG-wide contract change).
+- **Step processes aren't PID 1.** The wrapper is; a step that relied on
+  PID 1's signal semantics (e.g. ignoring SIGTERM) now stops on SIGTERM, as
+  under `docker run --init`.
+- **Unwrapped steps** (registry config not readable, e.g. a registry the
+  broker can't reach) still show `Failed` / `Error` for exit 11/12; their
+  outcome label is right regardless. Monitoring on failed pods should use the
+  outcome label for step pods.
+- **Registry access.** The broker calls each step image's registry once per
+  10 minutes per image (HTTPS); the first step with a new image waits up to
+  20s for that lookup.
 - **Architecture.** SG's step images are amd64-only. Nested Docker could run
   them on arm64 under emulation; the kubelet refuses to pull them. On arm64
   nodes they must be preloaded with `runner.nativeSteps.step.imagePullPolicy:

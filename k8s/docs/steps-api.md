@@ -73,7 +73,7 @@ when it runs.
 | `org`, `run` | The controller's `orgId` and `workflowRunId` (the Docker labels `orgId` / `wfrunId`). Required. The run's workspace is `WORKSPACES_DIR + org + run` |
 | `stepIdx` | Integer, for labels and names |
 | `image` | Required. Pull policy `Always` when the tag is `latest` or absent, else `IfNotPresent` |
-| `args` | Optional. Overrides the image's CMD and keeps its ENTRYPOINT (Docker's `command=`). The broker puts it in the container's `args` and escapes `$` as `$$`, so the kubelet never expands `$(VAR)`. `null`/absent = the image's CMD |
+| `args` | Optional. Overrides the image's CMD and keeps its ENTRYPOINT (Docker's `command=`). A wrapped step gets it after the ENTRYPOINT in the container's `command`, an unwrapped one in its `args` (see [Step wrapper](#step-wrapper)); either way `$` is escaped as `$$`, so the kubelet never expands `$(VAR)`. `null`/absent/empty = the image's CMD |
 | `env` | Map. Keys must match `[-._a-zA-Z0-9]+` (`InvalidEnv`); total size of keys and values ≤ 1,000,000 bytes (`EnvTooLarge`). Goes into a Secret, loaded with `envFrom` |
 | `mounts` | Each `source` must be strictly under the run's workspace after path cleaning (no `..`, not the workspace itself, not the workspace root): `InvalidMount` otherwise. Becomes a `subPath` of the runner's workspace claim at `target` |
 | `cpuShares` | Docker CPU shares; CPU **request** = `cpuShares/1024` cores (millicores rounded up, minimum 1m). No CPU limit |
@@ -95,7 +95,7 @@ when it runs.
 |---|---|---|
 | `pending` | Scheduling, pulling, creating the container | `null` |
 | `running` | Container running | `null` |
-| `exited` | Container terminated (any code, including OOMKilled = 137 with reason `OOMKilled`) | int |
+| `exited` | Container terminated (any code, including OOMKilled = 137 with reason `OOMKilled`; for a wrapped step 11 and 12 as the step exited, see [Step wrapper](#step-wrapper)) | int |
 | `failed` | The step never ran or was lost; `reason` says why (below) | `null` |
 
 `failed` reasons: `Unschedulable` (longer than `SCHEDULING_TIMEOUT`),
@@ -105,20 +105,19 @@ it stays `pending` until BackOff), `InvalidImageName`, `ErrImageNeverPull`,
 `DeadlineExceeded`, `PodDeleted` (pod deleted without a stop).
 `CreateContainerConfigError` is transient (`pending`) until `START_TIMEOUT`.
 
-A terminal state (`exited` or `failed`), once a GET returned it, is the step's
-for good, and the broker keeps returning it for 1 hour after the pod is gone.
-The pod and its Secrets go `FINISHED_GRACE` (10s) after a GET first returned
-that state, or when the step's last open log stream closes after that. Logs
-stay readable in the grace, for a log stream that opens late (a step that
-ended before it opened) or reconnects; after it they are gone unless a stream
-is still open. A stopped step whose pod is
-gone before a client got a terminal state returns the last state the broker
-saw (`exited`, its code or 137).
+A terminal state (`exited` or `failed`) is the step's for good once the broker
+saw it (on a GET, a stop or its sweep): later GETs return it from memory, also
+after the pod is gone, for 1 hour after the pod's deletion. The pod itself
+stays `FINISHED_TTL` (1h) after it ended, its logs readable, labeled with its
+outcome; its Secrets go as soon as it's terminal (see
+[Retention](#retention-and-garbage-collection)). A stopped step whose pod is
+gone before the broker saw it end returns the last state the broker saw
+(`exited`, its code or 137).
 
-The broker keeps all this in memory: after a broker restart a deleted step is
-`404`. A client that already got the terminal state keeps it; one that asked
-for a stop treats `404` as `exited` with 137; any other treats it as
-`failed`/`PodDeleted`.
+The broker keeps all this in memory: after a broker restart a step whose pod
+is gone is `404`. A client that already got the terminal state keeps it; one
+that asked for a stop treats `404` as `exited` with 137; any other treats it
+as `failed`/`PodDeleted`.
 
 ### `GET /v1/steps/{id}/logs?follow=1[&sinceTime=<RFC3339Nano>]`
 
@@ -139,8 +138,8 @@ pod with that grace period: SIGTERM, SIGKILL after the grace. `202`, or `404`.
 ### `DELETE /v1/steps/{id}`
 
 Best effort cleanup of a step: deletes the pod and its Secrets. `204` (also
-when already gone). A finished step's pod goes anyway once a GET returned its
-terminal state (see above).
+when already gone). A finished step's pod goes anyway `FINISHED_TTL` after it
+ended (see [Retention](#retention-and-garbage-collection)).
 
 ## What the broker creates per step
 
@@ -150,26 +149,75 @@ terminal state (see above).
   (UID from the downward API, `blockOwnerDeletion` unset), labels from
   `STEP_LABELS` plus `app.kubernetes.io/component: step`,
   `sg-runner.stackguardian.io/runner: <runner pod>` and
-  `sg-runner.stackguardian.io/run: <sanitized, ≤63, with a short hash>`;
-  annotations with the raw `org`, `run`, `stepIdx` and `name`.
-- Pod spec: one container `step`; `restartPolicy: Never`;
+  `sg-runner.stackguardian.io/run: <sanitized, ≤63, with a short hash>`, and
+  once terminal `sg-runner.stackguardian.io/outcome` (below); annotations with
+  the raw `org`, `run`, `stepIdx` (`sg-runner.stackguardian.io/step-idx`) and
+  `name`, and `sg-runner.stackguardian.io/wrapped: "true"` or `"false"` (then
+  with `sg-runner.stackguardian.io/not-wrapped-reason`).
+- Pod spec: container `step`; `restartPolicy: Never`;
   `terminationGracePeriodSeconds: 30`; `automountServiceAccountToken: false`;
   `enableServiceLinks: false`; `seccompProfile: RuntimeDefault`;
   `privileged: false`; required node affinity `matchFields metadata.name =
   NODE_NAME`; `STEP_NODE_SELECTOR` / `STEP_TOLERATIONS`; image pull secrets
   `<id>-pull` when present; volume `workspace` = PVC `WORKSPACE_CLAIM`, one
   `volumeMount` per mount with `subPath = WORKSPACE_SUBPATH_PREFIX +
-  (source relative to WORKSPACES_DIR)`.
+  (source relative to WORKSPACES_DIR)`; termination message
+  `/dev/termination-log` (policy `File`).
+- A wrapped step also gets the init container `sg-wrapper-install` (image
+  `BROKER_IMAGE`, pull policy `BROKER_IMAGE_PULL_POLICY`, command
+  `/sg-step-wrapper install /sg-wrapper/sg-step-wrapper`, UID/GID 65532,
+  non-root, read-only root filesystem, no privilege escalation, all
+  capabilities dropped, requests 10m CPU / 16Mi memory, limit 64Mi), the
+  emptyDir `sg-wrapper` (64Mi) mounted read-write there and read-only at
+  `/sg-wrapper` in `step`, and `BROKER_IMAGE_PULL_SECRETS` among its image
+  pull secrets.
 
-## Garbage collection
+## Step wrapper
 
-Finished steps go `FINISHED_GRACE` after a client got their terminal state, or
-when their last log stream closes after that (see `GET /v1/steps/{id}`). Every minute the broker also:
+A pod whose container exits non-zero ends `Failed`, but StackGuardian steps
+exit 11 (approval required) and 12 (finished early) on purpose. So steps run
+under `sg-step-wrapper`, an init process (like `tini` / `docker run --init`)
+from the broker's image:
 
-- deletes step pods (and their Secrets) that are terminal, that no client read
-  (their controller is gone), have no open log stream and finished more than
-  `FINISHED_TTL` ago, keeping their final state for 1 hour like a read one;
-- retries deletions of read steps that failed;
+- The broker reads the step image's config (the manifest and config blob for
+  its own platform, `linux/amd64` or the first linux image of an index
+  without it; never the layers) with the request's `registryAuth` when it is
+  for the image's registry, else anonymously; 20s timeout, cached 10 minutes
+  per image.
+- The step's `command` is `["/sg-wrapper/sg-step-wrapper", "--",
+  <ENTRYPOINT...>, <args, or the image's CMD when args are absent or
+  empty...>]` (no `args`), each element with `$` escaped as `$$`.
+- The wrapper runs that as its child (looked up in `PATH`), forwards SIGTERM,
+  SIGINT, SIGHUP, SIGQUIT, SIGUSR1 and SIGUSR2, reaps zombies, and leaves
+  stdio alone. A child exit of 11 or 12 writes `sg-exit-code=<n>` to
+  `/dev/termination-log` and exits 0, so the pod ends `Completed`; any other
+  code is its own, a signal 128+n; a command it can't run is 126 or 127.
+- `GET` reports a wrapped pod's exit 0 with exactly that termination message
+  as `exited` with 11 or 12. Nothing else is read from the message.
+
+A step runs unwrapped, exactly as without the wrapper (its 11 and 12 then end
+the pod `Failed`), when `BROKER_IMAGE` is unset, the lookup fails, or neither
+the image nor the request has anything to run. The broker logs a warning and
+annotates the pod `wrapped: "false"` with the reason (no Event: the broker
+can't create Events).
+
+## Retention and garbage collection
+
+A step is finished once the broker sees it terminal (on a GET, a stop's
+follow-up, or its sweep every minute). It then, once:
+
+- labels the pod `sg-runner.stackguardian.io/outcome`: `succeeded` (exit 0),
+  `approval-required` (11), `completed-early` (12), `failed` (any other code,
+  or `failed`), `stopped` (a client stopped it, whatever the code); a pod
+  that has the label keeps it;
+- deletes its Secrets: they hold credentials, and the container has its env.
+
+Every minute the broker also:
+
+- deletes finished step pods `FINISHED_TTL` (1h) after they ended
+  (`finishedAt`, else when the broker first saw them terminal), read or not,
+  unless a log stream is open; their final state stays for GETs 1 hour after;
+- retries finishing (label, Secrets) that failed;
 - deletes, by name, the Secrets of steps whose pod went without the broker
   (a stop, or someone else);
 - forgets steps gone for over an hour.
@@ -177,6 +225,13 @@ when their last log stream closes after that (see `GET /v1/steps/{id}`). Every m
 It never lists or reads Secrets (that returns their data, and the runner's
 node token shares the namespace): step Secrets go by name with their step,
 or with the runner pod that owns them (ownerReference), like step pods.
+
+## RBAC
+
+The broker's ServiceAccount, in its namespace: pods `create`, `get`, `list`,
+`delete`, `patch` (the outcome label); `pods/log` `get`; secrets `create`,
+`delete`. The registry lookup needs no RBAC (it uses the request's
+`registryAuth`).
 
 ## Broker configuration (env)
 
@@ -193,8 +248,10 @@ or with the runner pod that owns them (ownerReference), like step pods.
 | `STEP_IMAGE_PULL_POLICY` | empty | `Always`, `IfNotPresent` or `Never` for every step pod (e.g. images preloaded on the node, air-gapped clusters); empty = `Always` for a `latest` or absent tag, else `IfNotPresent` |
 | `SCHEDULING_TIMEOUT` | `5m` | Go duration |
 | `START_TIMEOUT` | `30m` | Go duration |
-| `FINISHED_TTL` | `10m` | Go duration |
-| `FINISHED_GRACE` | `10s` | Go duration, `0` or more: how long a step's pod (and its logs) stays after a GET first returned its terminal state |
+| `FINISHED_TTL` | `1h` | Go duration: how long a finished step's pod stays after it ended |
+| `BROKER_IMAGE` | empty | The broker's own image (has `/sg-step-wrapper`) for the wrapper's init container; empty = steps run unwrapped |
+| `BROKER_IMAGE_PULL_POLICY` | empty | `Always`, `IfNotPresent` or `Never` for that init container; empty = the cluster's default |
+| `BROKER_IMAGE_PULL_SECRETS` | empty | Comma-separated pull Secrets for `BROKER_IMAGE`, added to wrapped step pods |
 | `DRAINED_MARKER` | `/var/run/sg-runner-drained` | File the runner's drain creates when done (see below). The chart mounts the runner's `/var/run` read-only at `/run/sg-runner` in the broker and sets `/run/sg-runner/sg-runner-drained` |
 
 ## Lifecycle in the runner pod

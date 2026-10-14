@@ -62,7 +62,6 @@
 | `sg-net` bypass (known) | Workflow containers run on Docker's default bridge, so `main.sh`'s `DOCKER-USER` DROP rules for `sg-net` never apply to them, on VMs too. Known and parked. |
 | Native steps: SG release of the run controller change | sg-run-controller branch `feat/k8s-run-controller` (`step_broker.py` + one line in `external.py`). Until it ships, native steps run only with an overlaid controller image (testing.md plan 8). |
 | Native steps: drift and policy-discovery runs | Not tested; their workspace directories (`shared-workspace-drift`, `-discovery`) differ from a normal run's. |
-| Native steps: `Failed`/`Error` for exit 11/12 | Mitigated (finished step pods deleted ~10s after the result is read). Real fix: a wrapper mapping 11/12 to 0 with the code in the termination message, or SG step images signalling approval without exit codes. |
 | Native steps: NetworkPolicy and the broker | The policy's cluster-CIDR exclusion blocks the broker's API access; needs a dedicated value instead of the `extraEgress` workaround. |
 | Native steps: GKE | Nudge placeholder sized for steps (`advertise`), PD attach and node pinning on multi-node clusters, NetworkPolicy enforcement. |
 | Native steps: hardening | ValidatingAdmissionPolicy on what the runner's ServiceAccount may create; symlink-safe mount checks. |

@@ -20,7 +20,7 @@
 | `helm uninstall` hook | Go unit tests (fake clientset); kind smoke with a fake API | Stops the scaler, parks, reaps every state PVC (never-registered ones succeed), deletes PVCs and Jobs; a failed reap keeps that runner's PVCs and fails the hook |
 | Native steps: broker on a real cluster | OrbStack, `curl` over the socket from `dockerd` | Exit codes 0/1/11/12, `$(VAR)` stays literal, workspace writes visible, mounts outside the run rejected, bad image fails at once, Unschedulable after the timeout, stop keeps the step's exit code (143), 503,329/503,329 log lines at ~1 MiB/s across rotations, runner SA can't read Secrets or exec |
 | Native steps: controller client | OrbStack, client inside the controller image in nested `dockerd`, real broker | Both observation paths (exited / wait), failing exit, bad image → `AdminJobException`, cancel via `stop_container` (graceful and SIGKILL), `DockerLogger` relays step output |
-| Native steps end to end | QA, OrbStack, QA controller image + broker client overlaid ([plan 8](#8-native-steps-end-to-end-runbook)) | Scenarios 1–9, 11, 12, 14 pass: plan/apply, approval + resume, exit 12 (output of a 1s step kept), exit 3, cancel, step timeout, bad image, command override/env/workspace, two concurrent runs isolated, drain mid-step, step pods gone with their runner pod and ~10s after their result is read, nothing runs in `dockerd` |
+| Native steps end to end | QA, OrbStack, QA controller image + broker client overlaid ([plan 8](#8-native-steps-end-to-end-runbook)) | Scenarios 1–9, 11, 12, 14 pass: plan/apply, approval + resume, exit 12 (output of a 1s step kept), exit 3, cancel, step timeout, bad image, command override/env/workspace, two concurrent runs isolated, drain mid-step, step pods gone with their runner pod, nothing runs in `dockerd`. Scenario 15 (step wrapper): approval and exit-12 step pods `Completed`, outcome `approval-required` / `completed-early`, wrapped (image config read from SG's private ECR with the controller's login), Secrets deleted, pods kept |
 
 ## Not verified
 
@@ -182,7 +182,7 @@ registered in it):
 **Watch** during every run:
 
 ```sh
-kubectl -n sg-runner get pods -l app.kubernetes.io/component=step -w
+kubectl -n sg-runner get pods -l app.kubernetes.io/component=step -L sg-runner.stackguardian.io/outcome -w
 kubectl -n sg-runner logs sg-runner-0 -c steps -f
 # must stay empty: steps never fall back to dockerd
 kubectl -n sg-runner exec sg-runner-0 -c dockerd -- docker ps -a --filter label=wfrunId
@@ -194,7 +194,7 @@ kubectl -n sg-runner exec sg-runner-0 -c dockerd -- docker ps -a --filter label=
 |---|---|---|
 | 1 | Terraform plan + apply | Each step a pod on the runner's node; run log in the SG UI; COMPLETED |
 | 2 | Plan → approval → approve | Plan pod exits 11, run `APPROVAL_REQUIRED`; a new controller resumes (cache restored into the workspace PVC) and runs apply |
-| 3 | Alpine: `sh -c 'echo hi; exit 12'` | COMPLETED, later steps skipped, `hi` in the run log (1s step: the broker's `FINISHED_GRACE` keeps it) |
+| 3 | Alpine: `sh -c 'echo hi; exit 12'` | COMPLETED, later steps skipped, `hi` in the run log even for a 1s step |
 | 4 | Alpine: `sh -c 'echo boom >&2; exit 3'` | ERRORED, "failed with exit code: 3", `boom` in the log |
 | 5 | Cancel in the UI during a step | Step pod deleted with a 30s grace, run CANCELLED (not ERRORED) |
 | 6 | Alpine: `sleep 600`, step timeout 1m | "exceeded timeout of 1.0m", pod stopped, ERRORED, Terraform not run |
@@ -204,12 +204,13 @@ kubectl -n sg-runner exec sg-runner-0 -c dockerd -- docker ps -a --filter label=
 | 10 | Drift or policy discovery run | `shared-workspace-drift` / `-discovery` mounts work (not run yet) |
 | 11 | `kubectl delete pod sg-runner-0` while a step runs | The broker stays up through the drain, the step finishes in its pod, the run completes, then the runner restarts |
 | 12 | Runner pod deleted | Its step pods are deleted with it (ownerReference) |
-| 14 | Every run | `docker ps -a --filter label=wfrunId` in `dockerd` stays empty; finished step pods are gone ~10s after their result is read |
+| 14 | Every run | `docker ps -a --filter label=wfrunId` in `dockerd` stays empty |
+| 15 | Approval (exit 11) and exit 12 runs | Step pods `Completed`, outcome `approval-required` / `completed-early`, annotation `wrapped: "true"`; env Secret gone, pod kept for `finishedTTL` |
 
-**Known behaviour**: step pods that exit non-zero show `Failed`/`Error`,
-including 11 (approval) and 12 (finish early); they are deleted ~10s after the
-run controller reads the result. A step writing tens of MiB within a second
-can lose lines to kubelet log rotation (raise `containerLogMaxSize`).
+**Known behaviour**: exit 11 and 12 end `Completed` through the step wrapper
+(see native-steps.md); a step whose image config the broker can't read runs
+unwrapped and shows `Error` for them. A step writing tens of MiB within a
+second can lose lines to kubelet log rotation (raise `containerLogMaxSize`).
 
 ## Automated checks
 
