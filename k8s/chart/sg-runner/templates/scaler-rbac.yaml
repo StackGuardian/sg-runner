@@ -32,10 +32,21 @@ rules:
     resources: ["persistentvolumeclaims"]
     verbs: ["list", "get", "patch", "delete"]
   # Reap Jobs deregister long-parked runners from their PVC; the scaler lists
-  # them to find reaps in progress.
+  # them to find reaps in progress. Placeholder Jobs ask the cluster
+  # autoscaler for nodes (scaler.nudge).
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "get", "list", "delete"]
+  {{- if .Values.scaler.nudge.enabled }}
+  # Read only: runner pods the scheduler can't place, and whether the
+  # cluster autoscaler refused to add a node for them.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list"]
+  {{- end }}
   {{- if .Values.scaler.leaderElection.enabled }}
   # Leader election: one active scaler per StatefulSet. create can't be
   # restricted by name (the object doesn't exist yet), get/update can.

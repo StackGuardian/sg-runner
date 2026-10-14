@@ -19,21 +19,25 @@ image:
 
 imagePullSecrets: []
 
-# SG credentials: the runner group's node token, used to register, set runner
+# The runner group to register into. Not secret: the chart puts these in a
+# ConfigMap (<release>-config).
+sg:
+  # Required.
+  organization: ""
+  runnerGroup: ""
+  # Empty = https://api.app.stackguardian.io/api/v1.
+  apiUrl: ""
+
+# The runner group's node token, the only secret: used to register, set runner
 # status and (scaler) read the runner group. Set exactly one of existingSecret
 # or create=true.
 credentials:
-  # Secret with keys SG_NODE_TOKEN, SG_ORGANIZATION, SG_RUNNER_GROUP and
-  # optionally SG_BASE_API (runner.sh and the scaler read these file names).
+  # Secret with key SG_NODE_TOKEN; other keys in it are ignored.
   existingSecret: ""
-  # Let the chart create the Secret from the values below. They end up in the
-  # Helm release (a Secret in the namespace); prefer existingSecret.
+  # Let the chart create the Secret from nodeToken. The token then also ends up
+  # in the Helm release (a Secret in the namespace); prefer existingSecret.
   create: false
   nodeToken: ""
-  organization: ""
-  runnerGroup: ""
-  # Empty = the runner's default (https://api.app.stackguardian.io/api/v1).
-  apiUrl: ""
 
 runner:
   # Only used with scaler.enabled=false. With the scaler the chart leaves
@@ -93,6 +97,25 @@ runner:
     securityContext:
       privileged: true
 
+  # A `workflow-logs` sidecar streaming every workflow step's output to its
+  # stdout, one tagged line per output line (run controllers are skipped: they
+  # relay their steps' output, so it would show twice):
+  #   kubectl logs sg-runner-0 -c workflow-logs -f | grep run=<run id>
+  # Off by default: once on stdout, the cluster's log pipeline (Cloud
+  # Logging, Fluent Bit, Datadog, ...) collects it too, and workflow output can
+  # contain secrets (plans, env dumps, anything a step echoes).
+  workflowLogs:
+    enabled: false
+    # text: "<time> role=user run=<run id> workflow=<workflow> | <line>"
+    # json: one object per line with the same fields, for log backends.
+    format: text
+    # Also stream [SG_DEBUG] lines.
+    debug: false
+    # One `docker logs` process per running workflow step.
+    resources:
+      requests: { cpu: 10m, memory: 32Mi }
+      limits: { memory: 256Mi }
+
   # Upper bound on how long a terminating runner waits for running workflows
   # (the ecs-agent preStop drain) before it is killed.
   terminationGracePeriodSeconds: 3600
@@ -146,6 +169,21 @@ scaler:
   settleTimeout: 300
   # Seconds between scaling decisions.
   interval: 15
+  # Some cluster autoscalers (GKE's, at least) never add a node for a pod with
+  # a persistent disk, so a runner that needs a new node stays Pending. When
+  # the autoscaler says so (event NotTriggerScaleUp on the runner pod), the
+  # scaler starts a placeholder Job with the runner's requests and scheduling
+  # rules but no volumes. As soon as the autoscaler accepts it
+  # (TriggeredScaleUp), the scaler deletes the placeholder, and the runner
+  # takes the new node when it joins. Does nothing where the autoscaler scales
+  # up for runners by itself.
+  nudge:
+    enabled: true
+    # Only sleeps; mirror it for private registries (imagePullSecrets apply).
+    image: registry.k8s.io/pause:3.10
+    # Wait before asking again for a runner that's still Pending. Must outlast
+    # a node's boot, or a second node gets requested while the first boots.
+    cooldownSeconds: 180
   extraEnv: []
 
   # The scaler always listens on this port (container port `metrics`,
@@ -223,3 +261,20 @@ networkPolicy:
 podDisruptionBudget:
   enabled: false
   minAvailable: 1
+
+# `helm uninstall` cleans up after itself: a pre-delete hook Job stops the
+# scaler, parks every runner (each waits for its running workflows), then
+# deregisters every runner from StackGuardian from its state PVC and deletes
+# the runners' PVCs. If a runner can't be deregistered, the hook fails and
+# keeps that runner's PVCs, so nothing is orphaned; fix it and uninstall again.
+#
+# Runners finish running workflows first: pass a `helm uninstall --timeout`
+# that covers them (Helm's default is 5m). `helm uninstall --no-hooks` skips
+# the cleanup: runners stay registered and parked, PVCs stay.
+uninstall:
+  deregister: true
+  # Upper bound for the whole cleanup; empty = runner.terminationGracePeriodSeconds + 15 minutes.
+  activeDeadlineSeconds:
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { memory: 128Mi }

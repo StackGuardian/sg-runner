@@ -2,12 +2,12 @@
 # Smoke-installs the sg-runner chart on a throwaway kind cluster with locally
 # built images and checks what can be checked without StackGuardian: the
 # scaler starts and is ready, finds SG unreachable and leaks no credentials,
-# the runner's register init container fails as expected, and the scaler's
-# RBAC is as narrow as intended.
+# the runner's register init container fails as expected, the scaler's
+# RBAC is as narrow as intended, and `helm uninstall` leaves no PVCs behind.
 #
-# SG_BASE_API in the dummy Secret is http://127.0.0.1:9 (discard port on the
-# pod's own loopback): nothing ever reaches StackGuardian, and registration
-# fails before any AWS call.
+# sg.apiUrl is http://127.0.0.1:9 (discard port on the pod's own loopback):
+# nothing ever reaches StackGuardian, and registration fails before any AWS
+# call.
 #
 #   .github/scripts/kind-smoke.sh run        # load images, install, assert
 #   .github/scripts/kind-smoke.sh diag DIR   # dump cluster state into DIR
@@ -66,11 +66,9 @@ cmd_run() {
     | kubectl --context "$CONTEXT" apply -f -
   kubectl --context "$CONTEXT" label namespace "$NS" --overwrite \
     pod-security.kubernetes.io/enforce=privileged
+  # Only the token is secret; the runner group goes in as chart values.
   k create secret generic "$SECRET" \
     --from-literal=SG_NODE_TOKEN="$TOKEN" \
-    --from-literal=SG_ORGANIZATION=ci-org \
-    --from-literal=SG_RUNNER_GROUP=ci-group \
-    --from-literal=SG_BASE_API=http://127.0.0.1:9 \
     --dry-run=client -o yaml | k apply -f -
   endstep
 
@@ -81,6 +79,8 @@ cmd_run() {
   # Small volumes: kind's local-path provisioner ignores sizes anyway.
   helm --kube-context "$CONTEXT" -n "$NS" upgrade --install "$RELEASE" "$CHART" \
     --set credentials.existingSecret="$SECRET" \
+    --set sg.organization=ci-org --set sg.runnerGroup=ci-group \
+    --set sg.apiUrl=http://127.0.0.1:9 \
     --set image.repository="$runner_repo" --set image.tag="$runner_tag" \
     --set image.pullPolicy=Never \
     --set scaler.image.repository="$scaler_repo" --set scaler.image.tag="$scaler_tag" \
@@ -140,12 +140,26 @@ cmd_run() {
   can "get statefulsets.apps/$STS --subresource=scale" yes
   can "patch statefulsets.apps/$STS" yes
   can "create jobs.batch" yes
+  # scaler.nudge: read-only on runner pods and autoscaler events.
+  can "list pods" yes
+  can "list events" yes
   can "patch statefulsets.apps/other --subresource=scale" no
   can "delete statefulsets.apps/$STS" no
   can "delete pods" no
   can "create pods" no
   can "get secrets" no
   can "create pods/exec" no
+  endstep
+
+  step "helm uninstall deregisters and deletes every runner's PVCs"
+  # The pre-delete hook parks the runner, runs a reap Job against its state
+  # PVC (never registered here: nothing to deregister), then deletes the PVCs.
+  k get pvc
+  helm --kube-context "$CONTEXT" -n "$NS" uninstall "$RELEASE" --timeout "${TIMEOUT}s"
+  local left
+  left=$(k get pvc,statefulset,deployment,job -o name 2>&1)
+  [[ -z $left ]] || fail "left behind after helm uninstall: $left"
+  echo "nothing left after helm uninstall"
   endstep
 
   echo "kind smoke passed"
