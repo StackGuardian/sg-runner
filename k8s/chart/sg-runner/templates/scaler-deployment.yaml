@@ -59,10 +59,6 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           env:
-            - name: POD_NAMESPACE
-              valueFrom:
-                fieldRef: { fieldPath: metadata.namespace }
-            - { name: SCALER_STATEFULSET, value: {{ include "sg-runner.runnerName" . | quote }} }
             - { name: SCALER_LEADER_ELECT, value: {{ $s.leaderElection.enabled | quote }} }
             - { name: SCALER_MIN, value: {{ $s.min | quote }} }
             - { name: SCALER_MAX, value: {{ $s.max | quote }} }
@@ -73,21 +69,10 @@ spec:
             - { name: SCALER_STUCK_SECONDS, value: {{ $s.stuckSeconds | quote }} }
             - { name: SCALER_SETTLE_TIMEOUT, value: {{ $s.settleTimeout | quote }} }
             - { name: SCALER_INTERVAL, value: {{ $s.interval | quote }} }
-            # Reap Jobs run the runner image (not the scaler's) with the
-            # credentials Secret.
-            - { name: SCALER_IMAGE, value: {{ include "sg-runner.image" . | quote }} }
-            - { name: SCALER_CREDENTIALS_SECRET, value: {{ include "sg-runner.credentialsSecretName" . | quote }} }
-            # Reap Job pods: labelled like runners (component reaper) so the
-            # NetworkPolicy covers them, scheduled like runners (they mount a
-            # runner's state PVC, which may be bound to a node or zone).
-            - name: SCALER_REAP_POD_LABELS
-              value: {{ include "sg-runner.reaperLabels" . | fromYaml | toJson | quote }}
-            - name: SCALER_REAP_IMAGE_PULL_SECRETS
-              value: {{ include "sg-runner.pullSecretNames" . | quote }}
-            - name: SCALER_REAP_NODE_SELECTOR
-              value: {{ default dict .Values.runner.nodeSelector | toJson | quote }}
-            - name: SCALER_REAP_TOLERATIONS
-              value: {{ default list .Values.runner.tolerations | toJson | quote }}
+            - { name: SCALER_NUDGE, value: {{ $s.nudge.enabled | quote }} }
+            - { name: SCALER_NUDGE_IMAGE, value: {{ $s.nudge.image | quote }} }
+            - { name: SCALER_NUDGE_COOLDOWN, value: {{ $s.nudge.cooldownSeconds | quote }} }
+            {{- include "sg-runner.reapEnv" . | nindent 12 }}
             # Serves /metrics, /healthz and /readyz.
             - { name: SCALER_METRICS_ADDR, value: {{ printf ":%v" $s.metrics.port | quote }} }
             {{- with $s.extraEnv }}
@@ -110,13 +95,10 @@ spec:
           volumeMounts:
             - { name: sg-credentials, mountPath: /etc/sg-runner/credentials, readOnly: true }
       volumes:
-        - name: sg-credentials
-          secret:
-            secretName: {{ include "sg-runner.credentialsSecretName" . }}
-            # 0440, not the runners' 0400: the files are owned by root, and the
-            # scaler runs as a non-root UID. The pod's fsGroup makes them
-            # group-owned by its GID, so group read is what lets it read them.
-            defaultMode: 0440
+        # 0440, not the runners' 0400: the files are owned by root, and the
+        # scaler runs as a non-root UID. The pod's fsGroup makes them
+        # group-owned by its GID, so group read is what lets it read them.
+        {{- include "sg-runner.credentialsVolume" (dict "ctx" . "mode" "0440") | nindent 8 }}
       {{- with $s.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

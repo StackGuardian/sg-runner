@@ -2,12 +2,13 @@
 {{- $ns := .Release.Namespace -}}
 sg-runner {{ .Chart.Version }} installed as StatefulSet {{ $ns }}/{{ $sts }} (size: {{ .Values.runner.size }}).
 
-The namespace must allow privileged pods (nested Docker); the chart doesn't
-create or label it:
+Runner group: {{ .Values.sg.organization }}/{{ .Values.sg.runnerGroup }}. Each replica registers one runner on its
+first start.
+
+Runner pods are privileged (nested Docker). Where Pod Security is enforced, the
+namespace needs:
 
   kubectl label namespace {{ $ns }} pod-security.kubernetes.io/enforce=privileged
-
-Each replica registers one runner in the runner group on its first start.
 
 Runners:
   kubectl -n {{ $ns }} get statefulset,pods -l app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=runner
@@ -32,9 +33,14 @@ scaling up wakes them:
   kubectl -n {{ $ns }} scale statefulset {{ $sts }} --replicas=N
 {{- end }}
 
-Uninstalling keeps the PVCs: runners stay registered in SG as parked. To
-remove them, deregister each runner first (see the chart README), then delete
-the PVCs.
+{{- if .Values.uninstall.deregister }}
+`helm uninstall` deregisters every runner and deletes their PVCs; it waits for
+running workflows, so pass a --timeout that covers them:
+  helm -n {{ $ns }} uninstall {{ .Release.Name }} --timeout 30m
+{{- else }}
+uninstall.deregister=false: `helm uninstall` keeps the PVCs, and runners stay
+registered in SG as parked.
+{{- end }}
 {{- if .Values.networkPolicy.enabled }}
 
 NetworkPolicy {{ $sts }} only takes effect with a CNI that enforces it.

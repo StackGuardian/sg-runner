@@ -78,18 +78,9 @@
     "imagePullSecrets": {
       "type": "array"
     },
-    "credentials": {
+    "sg": {
       "type": "object",
       "properties": {
-        "existingSecret": {
-          "type": "string"
-        },
-        "create": {
-          "type": "boolean"
-        },
-        "nodeToken": {
-          "type": "string"
-        },
         "organization": {
           "type": "string"
         },
@@ -101,6 +92,21 @@
           "pattern": "^(https?://.+)?$"
         }
       }
+    },
+    "credentials": {
+      "type": "object",
+      "properties": {
+        "existingSecret": {
+          "type": "string"
+        },
+        "create": {
+          "type": "boolean"
+        },
+        "nodeToken": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
     },
     "runner": {
       "type": "object",
@@ -205,6 +211,26 @@
         },
         "affinity": {
           "type": "object"
+        },
+        "workflowLogs": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "format": {
+              "enum": [
+                "text",
+                "json"
+              ]
+            },
+            "debug": {
+              "type": "boolean"
+            },
+            "resources": {
+              "type": "object"
+            }
+          }
         }
       },
       "if": {
@@ -341,6 +367,22 @@
               "type": "boolean"
             }
           }
+        },
+        "nudge": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "image": {
+              "type": "string",
+              "minLength": 1
+            },
+            "cooldownSeconds": {
+              "type": "integer",
+              "minimum": 30
+            }
+          }
         }
       }
     },
@@ -409,6 +451,24 @@
             "integer",
             "string"
           ]
+        }
+      }
+    },
+    "uninstall": {
+      "type": "object",
+      "properties": {
+        "deregister": {
+          "type": "boolean"
+        },
+        "activeDeadlineSeconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 60
+        },
+        "resources": {
+          "type": "object"
         }
       }
     }

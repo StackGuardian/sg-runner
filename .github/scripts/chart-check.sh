@@ -15,7 +15,8 @@ KUBE_VERSION=${KUBE_VERSION:-1.37.0}
 # Release name = chart name, as the k8s/Makefile installs it.
 RELEASE=sg-runner
 # Every scenario needs credentials; the Secret doesn't have to exist to render.
-CREDS=(--set credentials.existingSecret=sg-runner-credentials)
+CREDS=(--set credentials.existingSecret=sg-runner-credentials
+  --set sg.organization=ci-org --set sg.runnerGroup=ci-group)
 
 rm -rf "$OUT" && mkdir -p "$OUT"
 failed=0
@@ -70,18 +71,29 @@ render defaults "${CREDS[@]}"
 expect_kind defaults StatefulSet
 expect_kind defaults Deployment
 expect_kind defaults Role
+# The uninstall hook (pre-delete Job).
+expect_kind defaults Job
 
 render credentials-create \
   --set credentials.create=true \
   --set credentials.nodeToken=ci-dummy-token \
-  --set credentials.organization=ci-org \
-  --set credentials.runnerGroup=ci-group \
-  --set credentials.apiUrl=http://127.0.0.1:9
+  --set sg.organization=ci-org \
+  --set sg.runnerGroup=ci-group \
+  --set sg.apiUrl=http://127.0.0.1:9
 expect_kind credentials-create Secret
+expect_kind credentials-create ConfigMap
 
-render scaler-disabled "${CREDS[@]}" --set scaler.enabled=false --set runner.replicas=2
+render scaler-disabled "${CREDS[@]}" --set scaler.enabled=false --set runner.replicas=2 \
+  --set uninstall.deregister=false
 expect_no_kind scaler-disabled Deployment
 expect_no_kind scaler-disabled Role
+expect_no_kind scaler-disabled Job
+
+# Without the scaler, the uninstall hook still cleans up, with its own Role.
+render uninstall-without-scaler "${CREDS[@]}" --set scaler.enabled=false
+expect_no_kind uninstall-without-scaler Deployment
+expect_kind uninstall-without-scaler Job
+expect_kind uninstall-without-scaler Role
 
 render network-policy "${CREDS[@]}" \
   --set networkPolicy.enabled=true \
@@ -94,6 +106,9 @@ render size-custom "${CREDS[@]}" \
   --set runner.resources.requests.memory=6Gi \
   --set runner.resources.limits.cpu=3 \
   --set runner.resources.limits.memory=6Gi
+
+render workflow-logs "${CREDS[@]}" --set runner.workflowLogs.enabled=true --set runner.workflowLogs.debug=true \
+  --set runner.workflowLogs.format=json
 
 render pdb "${CREDS[@]}" --set podDisruptionBudget.enabled=true --set scaler.min=2
 expect_kind pdb PodDisruptionBudget
@@ -119,8 +134,14 @@ echo "::endgroup::"
 echo "::group::rejections"
 reject size-huge 'runner[./]size' "${CREDS[@]}" --set runner.size=huge
 reject scaler-min-0 'scaler[./]min' "${CREDS[@]}" --set scaler.min=0
-reject no-credentials 'credentials'
+reject workflow-logs-format 'workflowLogs[./]format' "${CREDS[@]}" --set runner.workflowLogs.format=xml
+reject no-credentials 'credentials' --set sg.organization=o --set sg.runnerGroup=g
 reject both-credentials 'not both' "${CREDS[@]}" --set credentials.create=true
+reject no-runner-group 'sg.organization and sg.runnerGroup' \
+  --set credentials.existingSecret=x --set sg.organization=o
+reject token-only-secret 'additional properties|additionalProperties|organization' \
+  --set credentials.existingSecret=x --set credentials.organization=o \
+  --set sg.organization=o --set sg.runnerGroup=g
 reject custom-without-limits 'limits' "${CREDS[@]}" --set runner.size=custom
 reject network-policy-no-cidrs 'clusterCIDRs' "${CREDS[@]}" --set networkPolicy.enabled=true
 reject replicas-without-lease 'leaderElection' "${CREDS[@]}" \

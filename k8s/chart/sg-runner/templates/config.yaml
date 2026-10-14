@@ -1,0 +1,14 @@
+# The runner group to register into: not secret. Mounted next to the node
+# token as one file per key; runner.sh and the scaler read these names.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sg-runner.configName" . }}
+  labels:
+    {{- include "sg-runner.labels" (dict "ctx" . "component" "runner") | nindent 4 }}
+data:
+  SG_ORGANIZATION: {{ .Values.sg.organization | quote }}
+  SG_RUNNER_GROUP: {{ .Values.sg.runnerGroup | quote }}
+  {{- with .Values.sg.apiUrl }}
+  SG_BASE_API: {{ . | quote }}
+  {{- end }}

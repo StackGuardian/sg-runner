@@ -1,5 +1,6 @@
 {{- $name := include "sg-runner.runnerName" . }}
 {{- $secret := include "sg-runner.credentialsSecretName" . }}
+{{- $config := include "sg-runner.configName" . }}
 {{- $image := include "sg-runner.image" . }}
 {{- $component := dict "ctx" . "component" "runner" }}
 # Each replica is one registered runner.
@@ -56,13 +57,13 @@ spec:
                 secretKeyRef: { name: {{ $secret }}, key: SG_NODE_TOKEN }
             - name: SG_ORGANIZATION
               valueFrom:
-                secretKeyRef: { name: {{ $secret }}, key: SG_ORGANIZATION }
+                configMapKeyRef: { name: {{ $config }}, key: SG_ORGANIZATION }
             - name: SG_RUNNER_GROUP
               valueFrom:
-                secretKeyRef: { name: {{ $secret }}, key: SG_RUNNER_GROUP }
+                configMapKeyRef: { name: {{ $config }}, key: SG_RUNNER_GROUP }
             - name: SG_BASE_API
               valueFrom:
-                secretKeyRef: { name: {{ $secret }}, key: SG_BASE_API, optional: true }
+                configMapKeyRef: { name: {{ $config }}, key: SG_BASE_API, optional: true }
           volumeMounts:
             - { name: state, mountPath: /etc/ecs, subPath: ecs-config }
             - { name: state, mountPath: /var/lib/amazon/ssm, subPath: ssm }
@@ -138,8 +139,32 @@ spec:
             - { name: state, mountPath: /var/lib/amazon/ssm, subPath: ssm }
             - { name: aws-creds, mountPath: /rotatingcreds, readOnly: true }
             - { name: docker-run, mountPath: /var/run }
-            # Setting the runner's status through SG needs the SG credentials.
+            # Setting the runner's status through SG needs the node token and
+            # runner group.
             - { name: sg-credentials, mountPath: /etc/sg-runner/credentials, readOnly: true }
+        {{- with .Values.runner.workflowLogs }}
+        {{- if .enabled }}
+        # Every workflow step's output, tagged with its run (opt-in).
+        - name: workflow-logs
+          image: {{ $image }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          args: ['workflow-logs']
+          env:
+            - { name: SG_WORKFLOW_LOGS_FORMAT, value: {{ .format | quote }} }
+            - { name: SG_WORKFLOW_LOGS_DEBUG, value: {{ .debug | default false | quote }} }
+          # Keeps streaming while a drain waits for running workflows.
+          lifecycle:
+            preStop:
+              exec:
+                command: ['/opt/sg-runner/runner.sh', 'wait-drained']
+          {{- with .resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - { name: docker-run, mountPath: /var/run }
+        {{- end }}
+        {{- end }}
       volumes:
         - name: docker-run
           emptyDir: {}
@@ -153,10 +178,7 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
-        - name: sg-credentials
-          secret:
-            secretName: {{ $secret }}
-            defaultMode: 0400
+        {{- include "sg-runner.credentialsVolume" (dict "ctx" . "mode" "0400") | nindent 8 }}
       {{- with .Values.runner.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

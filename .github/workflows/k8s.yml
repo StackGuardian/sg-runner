@@ -221,7 +221,7 @@ jobs:
           node_image: ${{ env.KIND_NODE_IMAGE }}
           cluster_name: sg-runner-ci
           wait: 120s
-      # Dummy credentials, SG_BASE_API=http://127.0.0.1:9: never reaches SG.
+      # Dummy token, sg.apiUrl=http://127.0.0.1:9: never reaches SG.
       - name: Install and check
         env:
           CLUSTER: sg-runner-ci

@@ -27,7 +27,7 @@ REGISTRY  ?=
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build build-multiarch secret up status logs deregister down nuke
+.PHONY: help build build-multiarch secret up status logs down nuke
 
 help: ## List the available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -64,19 +64,26 @@ else
 endif
 
 # The namespace must allow privileged pods (dockerd); the chart doesn't create it.
-secret: ## Create the namespace and the SG credentials Secret from .env
+# Only the node token goes in the Secret; `up` passes the runner group (not
+# secret) as chart values, which the chart puts in a ConfigMap.
+secret: ## Create the namespace and the node token Secret from .env
 	@test -f .env || { echo "Copy .env.example to .env and fill it in first."; exit 1; }
 	kubectl --context $(CONTEXT) create namespace $(NS) --dry-run=client -o yaml \
 		| kubectl --context $(CONTEXT) apply -f -
 	kubectl --context $(CONTEXT) label namespace $(NS) --overwrite \
 		pod-security.kubernetes.io/enforce=privileged
-	$(KUBECTL) create secret generic $(SECRET) --from-env-file=.env \
-		--dry-run=client -o yaml | $(KUBECTL) apply -f -
+	grep '^SG_NODE_TOKEN=' .env \
+		| $(KUBECTL) create secret generic $(SECRET) --from-env-file=/dev/stdin \
+			--dry-run=client -o yaml | $(KUBECTL) apply -f -
 
 # IMAGE is split into repository and tag for the chart.
 up: ## Install or upgrade the chart (registers on first start)
-	$(HELM) upgrade --install $(RELEASE) $(CHART) \
+	@test -f .env || { echo "Copy .env.example to .env and fill it in first."; exit 1; }
+	. ./.env && $(HELM) upgrade --install $(RELEASE) $(CHART) \
 		--set credentials.existingSecret=$(SECRET) \
+		--set-string sg.organization="$$SG_ORGANIZATION" \
+		--set-string sg.runnerGroup="$$SG_RUNNER_GROUP" \
+		--set-string sg.apiUrl="$${SG_BASE_API:-}" \
 		--set image.repository=$(firstword $(subst :, ,$(IMAGE))) \
 		--set image.tag=$(lastword $(subst :, ,$(IMAGE)))
 
@@ -87,28 +94,16 @@ status: ## Show runner pods and state PVCs (a PVC without a pod is a parked runn
 logs: ## Tail all runner containers
 	$(KUBECTL) logs $(POD) --all-containers --prefix -f --max-log-requests 10
 
-# Parked runners are still registered but have no pod to run from, so wake
-# every runner that has a state PVC first, then deregister them one by one.
-# The scaler is stopped first: it would park the woken runners again.
-deregister: ## Wake parked runners, deregister all from SG, wipe identities (reads .env on stdin)
-	@n=$$($(KUBECTL) get pvc -o name | grep -c '/state-$(STS)-' || true); \
-	if [ "$$n" -eq 0 ]; then echo "No runners to deregister."; exit 0; fi; \
-	$(KUBECTL) scale deployment $(STS)-scaler --replicas=0 2>/dev/null; \
-	$(KUBECTL) scale statefulset $(STS) --replicas=$$n && \
-	for i in $$(seq 0 $$((n - 1))); do \
-		$(KUBECTL) wait --for=condition=Ready pod/$(STS)-$$i --timeout=300s && \
-		$(KUBECTL) exec -i $(STS)-$$i -c ecs-agent -- /opt/sg-runner/runner.sh deregister < .env \
-			|| exit 1; \
-	done
-
-# The runners' PVCs aren't part of the release: uninstalling parks every
-# runner (drain on the way out) and leaves it registered in SG. With the scaler
-# gone nothing reaps them; `make up` wakes them again.
+# --no-hooks skips the chart's uninstall cleanup: the runners' PVCs aren't
+# part of the release, so every runner parks (drain on the way out) and stays
+# registered in SG. With the scaler gone nothing reaps them; `make up` wakes
+# them again.
 down: ## Uninstall the chart, keep PVCs (runners stay registered, parked)
-	-$(HELM) uninstall $(RELEASE)
+	-$(HELM) uninstall $(RELEASE) --no-hooks
 
-# deregister runs first and aborts nuke on failure, so a runner is never
-# orphaned by deleting its identity.
-nuke: deregister down ## Deregister, then uninstall and delete PVCs and namespace
-	-$(KUBECTL) delete pvc --all
+# The chart's pre-delete hook parks every runner, deregisters each from SG
+# and deletes their PVCs; it fails (and the release stays) rather than orphan
+# a runner. The timeout covers running workflows.
+nuke: ## Uninstall: deregister every runner, delete PVCs, then the namespace
+	$(HELM) uninstall $(RELEASE) --timeout 30m
 	-kubectl --context $(CONTEXT) delete namespace $(NS)
