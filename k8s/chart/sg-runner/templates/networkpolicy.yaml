@@ -28,7 +28,12 @@ spec:
       app.kubernetes.io/name: {{ include "sg-runner.name" . }}
       app.kubernetes.io/instance: {{ .Release.Name }}
     matchExpressions:
+      {{- /* Native step pods (component=step) too. */}}
+      {{- if .Values.runner.nativeSteps.enabled }}
+      - { key: app.kubernetes.io/component, operator: In, values: [runner, reaper, step] }
+      {{- else }}
       - { key: app.kubernetes.io/component, operator: In, values: [runner, reaper] }
+      {{- end }}
   policyTypes: ["Ingress", "Egress"]
   # No ingress rules: runners only dial out.
   ingress: []

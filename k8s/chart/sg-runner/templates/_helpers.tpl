@@ -187,9 +187,14 @@ as "ctx" and the file mode as "mode".
 {{/*
 Resources of the dockerd container: a size preset or runner.resources, plus the
 workspace's ephemeral-storage request. Workflows run inside dockerd, and the ECS
-agent advertises these limits (SG_TASK_* on ecs-agent).
+agent advertises these limits (SG_TASK_* on ecs-agent). With native steps only
+run controllers do: runner.nativeSteps.controllerResources, and the workspace is
+a PVC.
 */}}
 {{- define "sg-runner.dockerdResources" -}}
+{{- if .Values.runner.nativeSteps.enabled }}
+{{- toYaml (default dict .Values.runner.nativeSteps.controllerResources) }}
+{{- else }}
 {{- $presets := dict
   "small" (dict "requests" (dict "cpu" "1" "memory" "2Gi") "limits" (dict "cpu" "2" "memory" "4Gi"))
   "medium" (dict "requests" (dict "cpu" "2" "memory" "4Gi") "limits" (dict "cpu" "4" "memory" "8Gi"))
@@ -214,4 +219,81 @@ agent advertises these limits (SG_TASK_* on ecs-agent).
 {{- $_ := set $res "requests" $requests }}
 {{- end }}
 {{- toYaml $res }}
+{{- end }}
+{{- end }}
+
+{{/*
+Native steps: the steps broker image, runner.nativeSteps.broker.image when its
+repository is set, the scaler image otherwise (it ships /sg-runner-steps).
+*/}}
+{{- define "sg-runner.brokerImage" -}}
+{{- $img := .Values.runner.nativeSteps.broker.image }}
+{{- if $img.repository }}
+{{- printf "%s:%s" $img.repository (default .Chart.AppVersion $img.tag | toString) }}
+{{- else }}
+{{- include "sg-runner.scalerImage" . }}
+{{- end }}
+{{- end }}
+
+{{/*
+Native steps: runner.nativeSteps.advertise.memory (<n>Mi or <n>Gi) in MiB, what
+the ECS agent advertises (SG_TASK_MEMORY_LIMIT_MIB). Fails rendering without
+advertise.cpu and .memory.
+*/}}
+{{- define "sg-runner.advertiseMemoryMiB" -}}
+{{- $a := default dict .Values.runner.nativeSteps.advertise }}
+{{- if not (and $a.cpu $a.memory) }}
+{{- fail "runner.nativeSteps.enabled needs runner.nativeSteps.advertise.cpu (whole CPUs) and .memory (Mi or Gi): what the runner advertises to SG for workflows" }}
+{{- end }}
+{{- $m := toString $a.memory }}
+{{- if regexMatch "^[1-9][0-9]*Gi$" $m }}
+{{- mul (trimSuffix "Gi" $m | atoi) 1024 }}
+{{- else if regexMatch "^[1-9][0-9]*Mi$" $m }}
+{{- trimSuffix "Mi" $m | atoi }}
+{{- else }}
+{{- fail (printf "runner.nativeSteps.advertise.memory must be <n>Mi or <n>Gi, got %q" $m) }}
+{{- end }}
+{{- end }}
+
+{{/*
+Runner pod affinity: runner.affinity, plus with native steps a required pod
+anti-affinity term (one runner per node: steps run on the runner's node and
+mount its RWO workspace), appended to any terms of the user's own.
+*/}}
+{{- define "sg-runner.runnerAffinity" -}}
+{{- $aff := deepCopy (default dict .Values.runner.affinity) }}
+{{- if .Values.runner.nativeSteps.enabled }}
+{{- $selector := include "sg-runner.selectorLabels" (dict "ctx" . "component" "runner") | fromYaml }}
+{{- $term := dict "topologyKey" "kubernetes.io/hostname" "labelSelector" (dict "matchLabels" $selector) }}
+{{- $anti := default dict $aff.podAntiAffinity }}
+{{- $required := default list $anti.requiredDuringSchedulingIgnoredDuringExecution }}
+{{- $_ := set $anti "requiredDuringSchedulingIgnoredDuringExecution" (append $required $term) }}
+{{- $_ := set $aff "podAntiAffinity" $anti }}
+{{- end }}
+{{- with $aff }}
+{{- toYaml . }}
+{{- end }}
+{{- end }}
+
+{{/*
+What the ECS agent advertises (runner.sh sizes the agent from it): the dockerd
+limits, or with native steps runner.nativeSteps.advertise. On ecs-agent and the
+register init container, which re-registers a runner whose size changed.
+*/}}
+{{- define "sg-runner.advertiseEnv" -}}
+{{- if .Values.runner.nativeSteps.enabled -}}
+# Steps run as pods next to the runner, not in dockerd: advertise
+# what the node has for them, with nothing kept back for dockerd.
+- { name: SG_TASK_CPU_LIMIT, value: {{ .Values.runner.nativeSteps.advertise.cpu | quote }} }
+- { name: SG_TASK_MEMORY_LIMIT_MIB, value: {{ include "sg-runner.advertiseMemoryMiB" . | quote }} }
+- { name: SG_DOCKERD_OVERHEAD_MIB, value: "0" }
+{{- else -}}
+# Rounded up to whole CPUs.
+- name: SG_TASK_CPU_LIMIT
+  valueFrom:
+    resourceFieldRef: { containerName: dockerd, resource: limits.cpu, divisor: '1' }
+- name: SG_TASK_MEMORY_LIMIT_MIB
+  valueFrom:
+    resourceFieldRef: { containerName: dockerd, resource: limits.memory, divisor: 1Mi }
+{{- end }}
 {{- end }}

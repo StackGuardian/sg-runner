@@ -10,7 +10,11 @@ metadata:
     {{- include "sg-runner.labels" $component | nindent 4 }}
 ---
 # Only the runner StatefulSet and its scale, PVCs, reap Jobs, its own lease and
+{{- if .Values.runner.nativeSteps.enabled }}
+# events. Runner pods' steps brokers have their own Role ({{ $sts }}).
+{{- else }}
 # events. Runner pods get no Kubernetes API access at all.
+{{- end }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

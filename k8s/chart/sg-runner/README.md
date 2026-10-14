@@ -89,6 +89,15 @@ setting (default 0.5 vCPU / 1 GiB): 1 vCPU / 1.5 GiB by default. The runner
 must be at least the largest workflow + 0.5 vCPU / 512 MiB, else that workflow
 stays queued (the scaler warns).
 
+**Resizing.** ECS keeps a runner's CPU and memory from its first
+registration, so a new size alone changes nothing. With
+`runner.reregisterOnResize` (default), a runner pod that starts with another
+size than its registration (`runner.size`, `runner.resources` or
+`runner.nativeSteps.advertise` changed) deregisters and registers again, if
+nothing runs on it; it gets a new runner ID in SG. With tasks running or
+pending it keeps the old size and logs a warning; restart it once idle. If SG
+can't be read, the old registration stays.
+
 ## Workflow logs
 
 Workflows run inside the nested Docker, so `kubectl logs` doesn't show them.
@@ -119,6 +128,57 @@ kubectl -n sg-runner logs sg-runner-0 -c workflow-logs -f | grep run=8ebpl0g9j8j
   exits within moments can be gone before it's followed; after a sidecar
   restart, running steps are followed from that point, not replayed.
 
+## Native steps (experimental)
+
+With `runner.nativeSteps.enabled=true`, run controllers still run in the
+nested Docker, but each workflow step runs as its own pod on the runner's node.
+A `steps` container in the runner pod (the broker, `/sg-runner-steps` in the
+scaler image) creates them for the controllers over a unix socket
+([`steps-api.md`](../../docs/steps-api.md)).
+
+```sh
+helm -n sg-runner upgrade --install sg-runner ./k8s/chart/sg-runner ... \
+  --set runner.nativeSteps.enabled=true \
+  --set runner.nativeSteps.advertise.cpu=4 \
+  --set runner.nativeSteps.advertise.memory=6Gi
+```
+
+What changes in the runner pod:
+
+- **One runner per node.** A required pod anti-affinity on
+  `kubernetes.io/hostname` is appended to `runner.affinity`'s own
+  `podAntiAffinity` terms (everything else in `runner.affinity` is kept). Step
+  pods are pinned to their runner's node and mount its workspace.
+- **Advertised capacity** comes from `nativeSteps.advertise`, not from
+  dockerd's limits: whole CPUs, memory as `<n>Mi` or `<n>Gi`, nothing kept back
+  for dockerd. Size it to what the node has left for steps and run controllers
+  (each workflow reserves 0.5 vCPU / 512 MiB for its controller plus its own
+  setting). The agent can't advertise more than the node has, and node memory
+  minus `advertise.memory` must stay under 64 GiB (the agent's reservation is
+  a uint16 of MiB; the runner refuses to start otherwise).
+- **dockerd** only hosts run controllers and gets
+  `nativeSteps.controllerResources`; `runner.size` and `runner.resources` are
+  ignored. Size its memory limit at ~512Mi per concurrent workflow run.
+- **Workspace** is a PVC per pod (`<pod>-workspace`, a generic ephemeral
+  volume created and deleted with the pod) instead of an `emptyDir`;
+  `runner.workspace` is ignored.
+- **API access.** The runner pod gets a ServiceAccount (`<statefulset>`) with a
+  Role for pods (create, get, list, watch, delete), `pods/log` (get) and
+  Secrets (create, delete only: never read back). Pod-level token automount
+  stays off; only the `steps` container mounts a token.
+- **Logs**: steps are pods, so the `workflow-logs` sidecar isn't rendered:
+  `kubectl logs -l app.kubernetes.io/component=step`, but only while a step
+  runs. Finished step pods don't stay around: the broker deletes each one
+  (and its Secrets) as soon as its run controller has read the result, and
+  the output is in SG. `finishedTTL` only catches finished steps nobody read
+  (e.g. the controller died).
+- **NetworkPolicy** covers step pods too (`app.kubernetes.io/component:
+  step`). It also blocks the Kubernetes API, which the broker needs: allow the
+  API server's endpoint (`kubectl get endpoints kubernetes`) with
+  `networkPolicy.extraEgress`. NetworkPolicy can't tell containers apart, so
+  that opens the API endpoint to the whole runner pod (the run controllers
+  too, without a token).
+
 ## Values
 
 | Key | Default | Description |
@@ -138,10 +198,23 @@ kubectl -n sg-runner logs sg-runner-0 -c workflow-logs -f | grep run=8ebpl0g9j8j
 | `runner.storage.state.size` / `.storageClassName` | `1Gi` / `""` | Runner identity PVC. Empty class = cluster default. |
 | `runner.storage.docker.size` / `.storageClassName` | `20Gi` / `""` | Docker data root PVC (image cache). |
 | `runner.dockerd.securityContext` | `{privileged: true}` | Nested Docker needs privileged for now. |
+| `runner.dockerd.extraEnv` | `[]` | Extra env vars for the `dockerd` container (advanced/testing, e.g. `SG_PRUNE_INTERVAL_SECONDS=0` turns off the nested Docker prune loop). |
 | `runner.workflowLogs.enabled` | `false` | `workflow-logs` sidecar: every workflow step's output on its stdout ([Workflow logs](#workflow-logs)). |
 | `runner.workflowLogs.format` | `text` | `text` (tagged lines) or `json` (one object per line). |
 | `runner.workflowLogs.debug` | `false` | Also stream `[SG_DEBUG]` lines. |
 | `runner.workflowLogs.resources` | 10m / 32Mi, limit 256Mi | One `docker logs` process per running workflow step. |
+| `runner.ecsAgent.extraEnv` | `[]` | Extra env vars for the `ecs-agent` container (advanced/testing, e.g. `ECS_IMAGE_PULL_BEHAVIOR=prefer-cached`). |
+| `runner.nativeSteps.enabled` | `false` | Workflow steps as pods ([Native steps](#native-steps-experimental)). |
+| `runner.nativeSteps.advertise.cpu` / `.memory` | empty | Required when enabled: what the runner advertises to SG. Whole CPUs; `<n>Mi` or `<n>Gi`. |
+| `runner.nativeSteps.controllerResources` | 500m / 1Gi, limits 2 / 2Gi | dockerd resources (run controllers only); ~512Mi per concurrent run. |
+| `runner.nativeSteps.workspace.size` / `.storageClassName` / `.accessModes` | `20Gi` / `""` / `[ReadWriteOnce]` | Workspace PVC per pod (`<pod>-workspace`). Empty class = cluster default. |
+| `runner.nativeSteps.schedulingTimeout` / `startTimeout` / `finishedTTL` | `5m` / `30m` / `10m` | Step pod fails if unschedulable / still pending this long. `finishedTTL` is a fallback: finished step pods are deleted once their result is read, ones nobody read after this. |
+| `runner.nativeSteps.step.nodeSelector` / `.tolerations` | empty | Step pod scheduling; empty = `runner.nodeSelector` / `runner.tolerations`. |
+| `runner.nativeSteps.step.imagePullPolicy` | `""` | `STEP_IMAGE_PULL_POLICY`. Empty = automatic (`Always` for `latest` or no tag, else `IfNotPresent`); `IfNotPresent` / `Never` for air-gapped clusters or preloaded images. |
+| `runner.nativeSteps.broker.image.repository` / `.tag` / `.pullPolicy` | `""` / `""` / `IfNotPresent` | `steps` container image; empty repository = the scaler image. |
+| `runner.nativeSteps.broker.resources` | 10m / 32Mi, limit 256Mi | |
+| `runner.nativeSteps.broker.extraEnv` | `[]` | Extra env vars for the broker. |
+| `runner.reregisterOnResize` | `true` | `SG_REREGISTER_ON_RESIZE` on the register init container: register an idle runner again when its registered size differs from what it now advertises ([Runner size](#runner-size)). |
 | `runner.terminationGracePeriodSeconds` | `3600` | Max wait for running workflows when a runner stops. |
 | `runner.podAnnotations` / `podLabels` / `nodeSelector` / `tolerations` / `affinity` | empty | Runner pod scheduling and metadata; `nodeSelector` and `tolerations` also apply to reap Jobs. |
 | `scaler.enabled` | `true` | Scaler Deployment + RBAC. When on, the chart leaves the StatefulSet's `replicas` to it. |

@@ -76,7 +76,9 @@ secret: ## Create the namespace and the node token Secret from .env
 		| $(KUBECTL) create secret generic $(SECRET) --from-env-file=/dev/stdin \
 			--dry-run=client -o yaml | $(KUBECTL) apply -f -
 
-# IMAGE is split into repository and tag for the chart.
+# IMAGE is split into repository and tag for the chart. HELM_ARGS go last, e.g.
+#   make up HELM_ARGS="--set runner.nativeSteps.enabled=true ..."
+HELM_ARGS ?=
 up: ## Install or upgrade the chart (registers on first start)
 	@test -f .env || { echo "Copy .env.example to .env and fill it in first."; exit 1; }
 	. ./.env && $(HELM) upgrade --install $(RELEASE) $(CHART) \
@@ -85,7 +87,8 @@ up: ## Install or upgrade the chart (registers on first start)
 		--set-string sg.runnerGroup="$$SG_RUNNER_GROUP" \
 		--set-string sg.apiUrl="$${SG_BASE_API:-}" \
 		--set image.repository=$(firstword $(subst :, ,$(IMAGE))) \
-		--set image.tag=$(lastword $(subst :, ,$(IMAGE)))
+		--set image.tag=$(lastword $(subst :, ,$(IMAGE))) \
+		$(HELM_ARGS)
 
 status: ## Show runner pods and state PVCs (a PVC without a pod is a parked runner)
 	$(KUBECTL) get statefulset,deployment,pods,pvc -o wide
