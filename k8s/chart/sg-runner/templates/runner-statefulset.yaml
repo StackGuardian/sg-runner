@@ -43,9 +43,9 @@ spec:
       # For the steps broker only: the token is mounted in that container alone.
       serviceAccountName: {{ $name }}
       {{- end }}
-      {{- with .Values.imagePullSecrets }}
+      {{- with include "sg-runner.imagePullSecrets" . }}
       imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
+        {{- . | nindent 8 }}
       {{- end }}
       # Upper bound on how long a terminating runner waits for running
       # workflows (the ecs-agent preStop hook) before it is killed.
@@ -211,6 +211,12 @@ spec:
               valueFrom:
                 fieldRef: { fieldPath: metadata.namespace }
             - { name: SOCKET_PATH, value: /run/sg-steps/steps.sock }
+            # Its own image: step pods' wrapper init container.
+            - { name: BROKER_IMAGE, value: {{ include "sg-runner.brokerImage" . | quote }} }
+            - { name: BROKER_IMAGE_PULL_POLICY, value: {{ $broker.image.pullPolicy | quote }} }
+            {{- with include "sg-runner.pullSecretNames" . }}
+            - { name: BROKER_IMAGE_PULL_SECRETS, value: {{ . | quote }} }
+            {{- end }}
             - { name: WORKSPACES_DIR, value: /var/tmp/workspace }
             # The workspace volume's PVC (generic ephemeral: <pod>-<volume>).
             - { name: WORKSPACE_CLAIM, value: $(RUNNER_POD_NAME)-workspace }
