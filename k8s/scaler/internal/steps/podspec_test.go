@@ -33,7 +33,6 @@ func testConfig() Config {
 		SchedulingTimeout: 5 * time.Minute, StartTimeout: 30 * time.Minute, FinishedTTL: time.Hour,
 		BrokerImage: "reg.example.com/sg-runner-scaler:1", BrokerImagePullPolicy: corev1.PullIfNotPresent,
 		BrokerImagePullSecrets: []string{"regcred"},
-		DrainedMarker:          "/var/run/sg-runner-drained",
 	}
 }
 

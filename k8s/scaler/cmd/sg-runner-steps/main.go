@@ -1,9 +1,10 @@
-// sg-runner-steps is the step broker: a container in the runner pod that runs
-// each workflow step of the run controllers as a pod of its own. See
-// k8s/docs/steps-api.md.
+// sg-runner-steps is the step broker: a native sidecar of the runner pod that
+// runs each workflow step of the run controllers as a pod of its own, and
+// serves dockerd the sg-steps-guard authorization plugin, which refuses step
+// containers in dockerd. See k8s/docs/steps-api.md.
 //
-// `sg-runner-steps wait-drained` is its preStop hook: it returns once the
-// runner's drain created DRAINED_MARKER.
+// `sg-runner-steps healthcheck` is its startup and readiness probe: it exits
+// 0 when both sockets answer.
 package main
 
 import (
@@ -24,11 +25,9 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 
+	"github.com/StackGuardian/sg-runner/k8s/scaler/internal/guard"
 	"github.com/StackGuardian/sg-runner/k8s/scaler/internal/steps"
 )
-
-// markerPoll is how often the broker and wait-drained look for the marker.
-const markerPoll = 2 * time.Second
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -38,10 +37,10 @@ func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "serve":
-		case "wait-drained":
-			run = waitDrained
+		case "healthcheck":
+			run = healthcheck
 		default:
-			log.Error("unknown command: want serve or wait-drained", "command", os.Args[1])
+			log.Error("unknown command: want serve or healthcheck", "command", os.Args[1])
 			os.Exit(2)
 		}
 	}
@@ -51,24 +50,19 @@ func main() {
 	}
 }
 
-func drained(marker string) bool {
-	_, err := os.Stat(marker)
-	return err == nil
-}
-
-// waitDrained returns once the drain marker exists; the pod's grace period
-// bounds it. It reads DRAINED_MARKER alone so a configuration error can't
-// cut a drain short.
-func waitDrained(log *slog.Logger) error {
-	marker := os.Getenv("DRAINED_MARKER")
-	if marker == "" {
-		marker = steps.DefaultDrainedMarker
+// healthcheck checks both sockets; it reads only their paths, so it works
+// whatever else the configuration says.
+func healthcheck(*slog.Logger) error {
+	env := func(key, def string) string {
+		if v := os.Getenv(key); v != "" {
+			return v
+		}
+		return def
 	}
-	for !drained(marker) {
-		time.Sleep(markerPoll)
-	}
-	log.Info("runner drained", "marker", marker)
-	return nil
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return steps.Healthcheck(ctx, env("SOCKET_PATH", steps.DefaultSocketPath),
+		env("GUARD_SOCKET", steps.DefaultGuardSocket), 2*time.Second)
 }
 
 func serve(log *slog.Logger) error {
@@ -94,52 +88,47 @@ func serve(log *slog.Logger) error {
 	s.Logs = func(ctx context.Context, ns, pod string, opts *corev1.PodLogOptions) (io.ReadCloser, error) {
 		return streams.CoreV1().Pods(ns).GetLogs(pod, opts).Stream(ctx)
 	}
-	l, err := steps.Listen(cfg.SocketPath)
-	if err != nil {
-		return fmt.Errorf("listen on %s: %w", cfg.SocketPath, err)
+	served := make(chan error, 2)
+	var servers []*http.Server
+	for _, sock := range []struct {
+		path    string
+		handler http.Handler
+	}{
+		{cfg.SocketPath, s.Handler()},
+		{cfg.GuardSocket, guard.Handler(log)},
+	} {
+		l, err := steps.Listen(sock.path)
+		if err != nil {
+			return fmt.Errorf("listen on %s: %w", sock.path, err)
+		}
+		srv := &http.Server{Handler: sock.handler, ReadHeaderTimeout: 10 * time.Second}
+		servers = append(servers, srv)
+		go func() { served <- srv.Serve(l) }()
 	}
-	srv := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
-	served := make(chan error, 1)
-	go func() { served <- srv.Serve(l) }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go s.RunGC(ctx, time.Minute)
-	log.Info("serving", "socket", cfg.SocketPath, "runner", cfg.RunnerPodName, "node", cfg.NodeName)
+	log.Info("serving", "socket", cfg.SocketPath, "guard", cfg.GuardSocket, "runner", cfg.RunnerPodName, "node", cfg.NodeName)
 
-	// Run controllers need the broker until their steps are done: SIGTERM
-	// only counts once the runner's drain is.
-	sigs := make(chan os.Signal, 2)
+	// A native sidecar gets SIGTERM only once the runner's containers (dockerd
+	// and the run controllers in it) are gone.
+	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
-	tick := time.NewTicker(markerPoll)
-	defer tick.Stop()
-	terminating := false
-wait:
-	for {
-		select {
-		case err := <-served:
-			return fmt.Errorf("serving: %w", err)
-		case sig := <-sigs:
-			if sig == syscall.SIGINT || drained(cfg.DrainedMarker) {
-				break wait
-			}
-			if !terminating {
-				log.Info("SIGTERM before the runner drained: serving until it did", "marker", cfg.DrainedMarker)
-			}
-			terminating = true
-		case <-tick.C:
-			if terminating && drained(cfg.DrainedMarker) {
-				break wait
-			}
-		}
+	select {
+	case err := <-served:
+		return fmt.Errorf("serving: %w", err)
+	case sig := <-sigs:
+		log.Info("shutting down", "signal", sig.String())
 	}
 
-	log.Info("shutting down")
 	cancel()
 	shutdown, stop := context.WithTimeout(context.Background(), 10*time.Second)
 	defer stop()
-	if err := srv.Shutdown(shutdown); err != nil && !errors.Is(err, context.DeadlineExceeded) {
-		return err
+	for _, srv := range servers {
+		if err := srv.Shutdown(shutdown); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
 	}
 	return nil
 }

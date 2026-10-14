@@ -18,7 +18,10 @@ import (
 
 // Config is everything the broker is told from outside.
 type Config struct {
-	SocketPath string
+	// SocketPath is the API's socket, GuardSocket the dockerd authorization
+	// plugin's.
+	SocketPath  string
+	GuardSocket string
 	// WorkspacesDir is the run controllers' workspace root: request paths
 	// start with it.
 	WorkspacesDir string
@@ -51,12 +54,13 @@ type Config struct {
 	BrokerImage            string
 	BrokerImagePullPolicy  corev1.PullPolicy
 	BrokerImagePullSecrets []string
-	// DrainedMarker is the file the runner's drain creates when done.
-	DrainedMarker string
 }
 
-// DefaultDrainedMarker is DRAINED_MARKER's default, also for wait-drained.
-const DefaultDrainedMarker = "/var/run/sg-runner-drained"
+// Default sockets, also for healthcheck.
+const (
+	DefaultSocketPath  = "/run/sg-steps/steps.sock"
+	DefaultGuardSocket = "/run/sg-guard/sg-steps-guard.sock"
+)
 
 // LoadConfig reads the environment through getenv (os.Getenv when nil).
 func LoadConfig(getenv func(string) string) (Config, error) {
@@ -87,7 +91,8 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	}
 
 	c := Config{
-		SocketPath:        str("SOCKET_PATH", "/run/sg-steps/steps.sock"),
+		SocketPath:        str("SOCKET_PATH", DefaultSocketPath),
+		GuardSocket:       str("GUARD_SOCKET", DefaultGuardSocket),
 		WorkspacesDir:     str("WORKSPACES_DIR", "/var/tmp/workspace"),
 		WorkspaceClaim:    required("WORKSPACE_CLAIM"),
 		RunnerPodName:     required("RUNNER_POD_NAME"),
@@ -98,9 +103,11 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		StartTimeout:      duration("START_TIMEOUT", "30m"),
 		FinishedTTL:       duration("FINISHED_TTL", "1h"),
 		BrokerImage:       str("BROKER_IMAGE", ""),
-		DrainedMarker:     str("DRAINED_MARKER", DefaultDrainedMarker),
 	}
 
+	if c.GuardSocket == c.SocketPath {
+		errs = append(errs, "GUARD_SOCKET and SOCKET_PATH are the same")
+	}
 	if !path.IsAbs(c.WorkspacesDir) {
 		errs = append(errs, fmt.Sprintf("WORKSPACES_DIR=%q: want an absolute path", c.WorkspacesDir))
 	}
