@@ -89,8 +89,11 @@ func (c *Config) StepState(p *corev1.Pod, now time.Time, stopped bool) State {
 
 	if cs != nil {
 		if t := cs.State.Terminated; t != nil {
-			code := t.ExitCode
-			s.State, s.ExitCode, s.Reason, s.Message = StateExited, &code, t.Reason, t.Message
+			code, message := t.ExitCode, t.Message
+			if c, ok := wrappedExit(p, t); ok {
+				code, message = c, ""
+			}
+			s.State, s.ExitCode, s.Reason, s.Message = StateExited, &code, t.Reason, message
 			s.StartedAt, s.FinishedAt = timePtr(t.StartedAt.Time), timePtr(t.FinishedAt.Time)
 			return s
 		}
@@ -156,6 +159,19 @@ func (c *Config) StepState(p *corev1.Pod, now time.Time, stopped bool) State {
 	}
 	s.State, s.Message = StatePending, waiting
 	return s
+}
+
+// wrappedExits are the termination messages of the wrapper's mapped exits.
+var wrappedExits = map[string]int32{"sg-exit-code=11": 11, "sg-exit-code=12": 12}
+
+// wrappedExit is the step's own exit code when the wrapper mapped it to 0:
+// only a wrapped pod's exit 0 with the wrapper's exact message counts.
+func wrappedExit(p *corev1.Pod, t *corev1.ContainerStateTerminated) (int32, bool) {
+	if p.Annotations[AnnotationWrapped] != "true" || t.ExitCode != 0 {
+		return 0, false
+	}
+	code, ok := wrappedExits[t.Message]
+	return code, ok
 }
 
 // podFinishedAt is when a pod the kubelet failed stopped: its container's

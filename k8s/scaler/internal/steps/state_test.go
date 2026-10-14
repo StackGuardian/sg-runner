@@ -56,6 +56,17 @@ func podFailed(reason string) func(*corev1.Pod) {
 	}
 }
 
+func wrapped(p *corev1.Pod) { p.Annotations = map[string]string{AnnotationWrapped: "true"} }
+
+func withMessage(cs *corev1.ContainerState, msg string) *corev1.ContainerState {
+	cs.Terminated.Message = msg
+	return cs
+}
+
+func wrappedExit0(msg string) *corev1.ContainerState {
+	return withMessage(terminated(0, "Completed", t0.Add(time.Minute), t0.Add(6*time.Minute)), msg)
+}
+
 func ptrTime(t time.Time) *metav1.Time { m := metav1.NewTime(t); return &m }
 
 func TestStepState(t *testing.T) {
@@ -101,6 +112,13 @@ func TestStepState(t *testing.T) {
 		"deleted running":    {pod(corev1.PodRunning, running(started), deleting), time.Hour, false, want{state: StateFailed, reason: FailedPodDeleted}},
 		"deleted pending":    {pod(corev1.PodPending, nil, deleting), time.Minute, false, want{state: StateFailed, reason: FailedPodDeleted}},
 		"stopping running":   {pod(corev1.PodRunning, running(started), deleting), time.Hour, true, want{state: StateRunning, start: &started}},
+		"wrapped 11":         {pod(corev1.PodSucceeded, wrappedExit0("sg-exit-code=11"), wrapped), time.Hour, false, want{StateExited, "Completed", code(11), &started, &ended}},
+		"wrapped 12":         {pod(corev1.PodSucceeded, wrappedExit0("sg-exit-code=12"), wrapped), time.Hour, false, want{StateExited, "Completed", code(12), &started, &ended}},
+		"wrapped 0":          {pod(corev1.PodSucceeded, wrappedExit0(""), wrapped), time.Hour, false, want{StateExited, "Completed", code(0), &started, &ended}},
+		"wrapped other text": {pod(corev1.PodSucceeded, wrappedExit0("sg-exit-code=13"), wrapped), time.Hour, false, want{StateExited, "Completed", code(0), &started, &ended}},
+		"wrapped near miss":  {pod(corev1.PodSucceeded, wrappedExit0("sg-exit-code=11\n"), wrapped), time.Hour, false, want{StateExited, "Completed", code(0), &started, &ended}},
+		"unwrapped message":  {pod(corev1.PodSucceeded, wrappedExit0("sg-exit-code=11")), time.Hour, false, want{StateExited, "Completed", code(0), &started, &ended}},
+		"wrapped, exit 1":    {pod(corev1.PodFailed, withMessage(terminated(1, "Error", started, ended), "sg-exit-code=11"), wrapped), time.Hour, false, want{StateExited, "Error", code(1), &started, &ended}},
 		"stopped exited":     {pod(corev1.PodFailed, terminated(143, "Error", started, ended), deleting), time.Hour, true, want{StateExited, "Error", code(143), &started, &ended}},
 	}
 	for name, c := range cases {

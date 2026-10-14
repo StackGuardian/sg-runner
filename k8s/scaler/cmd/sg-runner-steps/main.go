@@ -87,6 +87,10 @@ func serve(log *slog.Logger) error {
 	}
 
 	s := steps.NewServer(cfg, client, log)
+	s.Images = steps.NewRegistry()
+	if cfg.BrokerImage == "" {
+		log.Warn("BROKER_IMAGE is not set: steps run unwrapped, their exits 11 and 12 end the pod Failed")
+	}
 	s.Logs = func(ctx context.Context, ns, pod string, opts *corev1.PodLogOptions) (io.ReadCloser, error) {
 		return streams.CoreV1().Pods(ns).GetLogs(pod, opts).Stream(ctx)
 	}
