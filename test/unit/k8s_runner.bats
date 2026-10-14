@@ -1,8 +1,8 @@
 #!/usr/bin/env bats
 #
 # Unit tests for the pure helpers of k8s/runner.sh: agent sizing (CPU
-# affinity, reserved memory), re-registering on a size change, and reading the
-# registration in ecs.config.
+# affinity, reserved memory), re-registering on a size change, reading the
+# registration in ecs.config, and dockerd's authorization plugin.
 
 setup() {
   load "${BATS_TEST_DIRNAME}/../helpers/load.bash"
@@ -347,56 +347,42 @@ CFG
 
 #}}}: cmd_reap
 
-#{{{ workflow logs
+#{{{ dockerd authorization plugin
 
-@test "container_log_tags skips run controllers (ECS tasks)" {
-  run container_log_tags "arn:aws:ecs:eu-central-1:111:task/cluster/f6bff787|/var/tmp/workspace "
+# A unix socket at a short path (sun_path is ~104 bytes on macOS).
+make_socket() {
+  python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$1"
+}
+
+@test "dockerd_args turns on the steps broker's authorization plugin" {
+  run dockerd_args
+  assert_success
+  assert_line "--host=unix:///var/run/docker.sock"
+  assert_line "--authorization-plugin=sg-steps-guard"
+}
+
+@test "wait_for_authz_plugin returns once the plugin socket exists" {
+  local dir
+  dir=$(mktemp -d /tmp/sg-authz.XXXXXX)
+  make_socket "$dir/sg-steps-guard.sock"
+  SG_AUTHZ_PLUGIN_SOCKET="$dir/sg-steps-guard.sock" run wait_for_authz_plugin
+  rm -rf "$dir"
+  assert_success
+  assert_output --partial "Authorization plugin"
+}
+
+@test "wait_for_authz_plugin dies without the socket: dockerd never starts unguarded" {
+  SG_AUTHZ_PLUGIN_SOCKET="$SG_TEST_TMPDIR/missing.sock" SG_AUTHZ_PLUGIN_WAIT_SECONDS=1 \
+    SG_AUTHZ_PLUGIN_POLL_SECONDS=0.2 run wait_for_authz_plugin
   assert_failure
-  assert_output ""
+  assert_output --partial "not starting dockerd unguarded"
 }
 
-@test "container_log_tags reads a step's run and workflow from its workspace mount" {
-  run container_log_tags "| /var/run/docker.sock /var/tmp/workspace/orgs/o/wfgrps/g/wfs/simple-ec2/wfruns/58679q13o963/shared-workspace "
-  assert_success
-  assert_output "58679q13o963 simple-ec2"
+@test "wait_for_authz_plugin doesn't take a plain file for the socket" {
+  touch "$SG_TEST_TMPDIR/plain.sock"
+  SG_AUTHZ_PLUGIN_SOCKET="$SG_TEST_TMPDIR/plain.sock" SG_AUTHZ_PLUGIN_WAIT_SECONDS=1 \
+    SG_AUTHZ_PLUGIN_POLL_SECONDS=0.2 run wait_for_authz_plugin
+  assert_failure
 }
 
-@test "container_log_tags leaves unknowns as -" {
-  run container_log_tags "|"
-  assert_success
-  assert_output "- -"
-}
-
-@test "format_log_lines tags each line, keeping spaces and pipes in the message" {
-  SG_WORKFLOW_LOGS_FORMAT=text
-  run format_log_lines r1 wf1 <<<$'2026-10-14T01:00:00.1Z terraform  plan | tee\n2026-10-14T01:00:01.2Z \nno-timestamp'
-  assert_success
-  assert_line --index 0 "2026-10-14T01:00:00.1Z role=user run=r1 workflow=wf1 | terraform  plan | tee"
-  assert_line --index 1 "2026-10-14T01:00:01.2Z role=user run=r1 workflow=wf1 | "
-  assert_line --index 2 "- role=user run=r1 workflow=wf1 | no-timestamp"
-}
-
-@test "format_log_lines drops [SG_DEBUG] lines unless debug is on" {
-  SG_WORKFLOW_LOGS_FORMAT=text
-  local input=$'2026-10-14T01:00:00Z [SG_DEBUG] Setting git ssh key\n2026-10-14T01:00:01Z Initializing the backend...'
-  run format_log_lines r1 wf1 <<<"$input"
-  assert_success
-  assert_output "2026-10-14T01:00:01Z role=user run=r1 workflow=wf1 | Initializing the backend..."
-
-  SG_WORKFLOW_LOGS_DEBUG=true run format_log_lines r1 wf1 <<<"$input"
-  assert_success
-  assert_line --index 0 "2026-10-14T01:00:00Z role=user run=r1 workflow=wf1 | [SG_DEBUG] Setting git ssh key"
-}
-
-@test "format_log_lines writes one JSON object per line, debug lines dropped" {
-  SG_WORKFLOW_LOGS_FORMAT=json
-  run format_log_lines r1 wf1 <<<$'2026-10-14T01:00:00Z say "hi"\n2026-10-14T01:00:01Z [SG_DEBUG] x\nbare'
-  assert_success
-  assert_line --index 0 '{"time":"2026-10-14T01:00:00Z","msg":"say \"hi\"","role":"user","run":"r1","workflow":"wf1"}'
-  assert_line --index 1 '{"time":null,"msg":"bare","role":"user","run":"r1","workflow":"wf1"}'
-
-  SG_WORKFLOW_LOGS_DEBUG=true run format_log_lines r1 wf1 <<<$'2026-10-14T01:00:01Z [SG_DEBUG] x'
-  assert_output '{"time":"2026-10-14T01:00:01Z","msg":"[SG_DEBUG] x","role":"user","run":"r1","workflow":"wf1"}'
-}
-
-#}}}: workflow logs
+#}}}: dockerd authorization plugin

@@ -182,54 +182,6 @@
             "custom"
           ]
         },
-        "resources": {
-          "type": "object",
-          "properties": {
-            "requests": {
-              "type": "object",
-              "additionalProperties": {
-                "$ref": "#/definitions/quantity"
-              }
-            },
-            "limits": {
-              "type": "object",
-              "additionalProperties": {
-                "$ref": "#/definitions/quantity"
-              }
-            }
-          }
-        },
-        "workspace": {
-          "type": "object",
-          "properties": {
-            "sizeLimit": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/quantity"
-                },
-                {
-                  "const": ""
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "request": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/quantity"
-                },
-                {
-                  "const": ""
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          }
-        },
         "storage": {
           "type": "object",
           "properties": {
@@ -271,26 +223,6 @@
         "affinity": {
           "type": "object"
         },
-        "workflowLogs": {
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "format": {
-              "enum": [
-                "text",
-                "json"
-              ]
-            },
-            "debug": {
-              "type": "boolean"
-            },
-            "resources": {
-              "type": "object"
-            }
-          }
-        },
         "ecsAgent": {
           "type": "object",
           "properties": {
@@ -299,32 +231,32 @@
             }
           }
         },
-        "nativeSteps": {
+        "reregisterOnResize": {
+          "type": "boolean"
+        },
+        "advertise": {
           "type": "object",
           "properties": {
-            "enabled": {
-              "type": "boolean"
+            "cpu": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
             },
-            "advertise": {
-              "type": "object",
-              "properties": {
-                "cpu": {
-                  "type": [
-                    "integer",
-                    "null"
-                  ],
-                  "minimum": 1
-                },
-                "memory": {
-                  "type": "string",
-                  "pattern": "^([1-9][0-9]*(Mi|Gi))?$"
-                }
-              },
-              "additionalProperties": false
-            },
-            "controllerResources": {
-              "$ref": "#/definitions/resources"
-            },
+            "memory": {
+              "type": "string",
+              "pattern": "^([1-9][0-9]*(Mi|Gi))?$"
+            }
+          },
+          "additionalProperties": false
+        },
+        "controllerResources": {
+          "$ref": "#/definitions/resources"
+        },
+        "steps": {
+          "type": "object",
+          "properties": {
             "workspace": {
               "type": "object",
               "required": [
@@ -392,41 +324,7 @@
                 }
               }
             }
-          },
-          "if": {
-            "properties": {
-              "enabled": {
-                "const": true
-              }
-            },
-            "required": [
-              "enabled"
-            ]
-          },
-          "then": {
-            "required": [
-              "advertise"
-            ],
-            "properties": {
-              "advertise": {
-                "required": [
-                  "cpu",
-                  "memory"
-                ],
-                "properties": {
-                  "cpu": {
-                    "type": "integer"
-                  },
-                  "memory": {
-                    "minLength": 1
-                  }
-                }
-              }
-            }
           }
-        },
-        "reregisterOnResize": {
-          "type": "boolean"
         }
       },
       "if": {
@@ -437,8 +335,26 @@
         }
       },
       "then": {
+        "required": [
+          "advertise",
+          "controllerResources"
+        ],
         "properties": {
-          "resources": {
+          "advertise": {
+            "required": [
+              "cpu",
+              "memory"
+            ],
+            "properties": {
+              "cpu": {
+                "type": "integer"
+              },
+              "memory": {
+                "minLength": 1
+              }
+            }
+          },
+          "controllerResources": {
             "required": [
               "limits"
             ],
@@ -452,7 +368,8 @@
             }
           }
         }
-      }
+      },
+      "additionalProperties": false
     },
     "scaler": {
       "type": "object",

@@ -77,7 +77,7 @@ secret: ## Create the namespace and the node token Secret from .env
 			--dry-run=client -o yaml | $(KUBECTL) apply -f -
 
 # IMAGE is split into repository and tag for the chart. HELM_ARGS go last, e.g.
-#   make up HELM_ARGS="--set runner.nativeSteps.enabled=true ..."
+#   make up HELM_ARGS="--set runner.size=medium ..."
 HELM_ARGS ?=
 up: ## Install or upgrade the chart (registers on first start)
 	@test -f .env || { echo "Copy .env.example to .env and fill it in first."; exit 1; }

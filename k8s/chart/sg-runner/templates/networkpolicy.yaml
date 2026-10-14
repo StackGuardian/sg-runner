@@ -9,9 +9,9 @@
 {{- if not $v4 }}
 {{- fail "networkPolicy.clusterCIDRs needs the IPv4 pod, service and node CIDRs (and the API server endpoint if outside them) with networkPolicy.enabled=true" }}
 {{- end }}
-# Workflow isolation. Nested workflow traffic leaves through the runner pod's
-# IP, so this policy covers workflow containers and the agents alike (and reap
-# Job pods, labelled component=reaper by the scaler): no
+# Workflow isolation for runner pods (run controllers in the nested Docker,
+# whose traffic leaves through the pod's IP, and the agents), step pods
+# (component=step) and reap Job pods (component=reaper, set by the scaler): no
 # cluster-internal destinations, no cloud metadata, everything else (SG API,
 # AWS endpoints, VCS, registries, workflow targets) allowed.
 # Needs a CNI that enforces NetworkPolicy (Calico, Cilium, ...); others ignore
@@ -28,12 +28,7 @@ spec:
       app.kubernetes.io/name: {{ include "sg-runner.name" . }}
       app.kubernetes.io/instance: {{ .Release.Name }}
     matchExpressions:
-      {{- /* Native step pods (component=step) too. */}}
-      {{- if .Values.runner.nativeSteps.enabled }}
       - { key: app.kubernetes.io/component, operator: In, values: [runner, reaper, step] }
-      {{- else }}
-      - { key: app.kubernetes.io/component, operator: In, values: [runner, reaper] }
-      {{- end }}
   policyTypes: ["Ingress", "Egress"]
   # No ingress rules: runners only dial out.
   ingress: []

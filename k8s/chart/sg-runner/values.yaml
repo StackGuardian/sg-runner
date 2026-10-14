@@ -45,125 +45,49 @@ runner:
   # spec.replicas out: the scaler owns it, and upgrades keep the live value.
   replicas: 1
 
-  # Size of the dockerd container, where workflows run. Its limits are what the
-  # runner advertises to SG: CPU = limits.cpu, memory = limits.memory - 256 MiB
-  # (SG_DOCKERD_OVERHEAD_MIB, left for dockerd itself).
+  # Each runner takes a node of its own (required pod anti-affinity, added to
+  # runner.affinity). Run controllers run in the runner pod's nested Docker;
+  # each workflow step runs as a pod of its own on the runner's node, created
+  # by the `steps` broker sidecar (k8s/docs/steps-api.md).
   #
-  #   preset   requests          limits (advertised)   default workflows
-  #   small    1 CPU / 2Gi       2 CPU / 4Gi           2
-  #   medium   2 CPU / 4Gi       4 CPU / 8Gi           4
-  #   large    4 CPU / 8Gi       8 CPU / 16Gi          8
-  #   custom   runner.resources (limits.cpu and limits.memory required)
+  # The size sets what the runner advertises to SG for workflows (step pods
+  # and run controllers together), and the dockerd container's resources,
+  # which only hold the run controllers:
+  #
+  #   preset   advertised      controllers (dockerd) requests / limits
+  #   small    2 CPU / 4Gi     500m / 1Gi   2 / 2Gi
+  #   medium   4 CPU / 8Gi     1 / 2Gi      4 / 4Gi
+  #   large    8 CPU / 16Gi    2 / 4Gi      8 / 8Gi
+  #   custom   runner.advertise and runner.controllerResources (required)
   #
   # A workflow reserves 0.5 vCPU / 512 MiB for its run controller plus its own
   # resource setting (default 0.5 vCPU / 1 GiB), so a default workflow takes
   # 1 vCPU / 1.5 GiB; the presets are CPU-bound. The runner must be at least
   # the largest workflow + 0.5 vCPU / 512 MiB, else that workflow stays queued
-  # forever (the scaler warns about it).
+  # forever (the scaler warns about it). Size the controllers' memory limit at
+  # ~512Mi per concurrent workflow run.
   #
-  # Requests are half the limits, so nodes can be overcommitted; set equal
-  # requests and limits with `custom` to guarantee the advertised capacity.
+  # The node needs the advertised capacity free for step pods, plus the
+  # runner pod's own requests. The agent can't advertise more than the node
+  # has, and node memory minus the advertised memory must stay under 64 GiB
+  # (the agent's reservation is a uint16 of MiB; the runner refuses to start
+  # otherwise).
   size: small
-  # Used with size=custom, e.g.:
-  #   requests: { cpu: "3", memory: 6Gi }
-  #   limits: { cpu: "3", memory: 6Gi }
-  resources: {}
+  # size=custom only. Whole CPUs; memory in Mi or Gi (e.g. 6Gi, 3072Mi).
+  advertise:
+    cpu:
+    memory: ""
+  # size=custom only, e.g.:
+  #   requests: { cpu: 500m, memory: 1Gi }
+  #   limits: { cpu: "2", memory: 2Gi }
+  controllerResources: {}
 
-  # Scratch space for workflow runs. The run controller and every step
-  # bind-mount /var/tmp/workspace from the Docker daemon they run on, i.e. the
-  # dockerd container. Without a volume it lands in the container's writable
-  # layer. An emptyDir matches a VM (scratch, gone when the pod goes). Native
-  # steps use nativeSteps.workspace instead.
-  workspace:
-    # The kubelet evicts the pod (and with it running workflows) when the
-    # workspace grows past this.
-    sizeLimit: 20Gi
-    # ephemeral-storage request on dockerd, so the scheduler places runners on
-    # nodes with room for workspaces. Empty = no request.
-    request: 2Gi
-
-  storage:
-    # Runner identity (ecs.config, SSM registration, agent state). Survives
-    # restarts and parking so a runner doesn't register again.
-    state:
-      size: 1Gi
-      # Empty = the cluster's default StorageClass.
-      storageClassName: ""
-    # Docker data root (/var/lib/docker): images cached across parking.
-    docker:
-      size: 20Gi
-      storageClassName: ""
-
-  dockerd:
-    # Nested Docker needs a privileged container for now (see docs/TODO.md).
-    securityContext:
-      privileged: true
-    # Extra env vars for the dockerd container (advanced/testing), e.g. turn
-    # off the nested Docker prune loop:
-    #   - { name: SG_PRUNE_INTERVAL_SECONDS, value: "0" }
-    extraEnv: []
-
-  # A `workflow-logs` sidecar streaming every workflow step's output to its
-  # stdout, one tagged line per output line (run controllers are skipped: they
-  # relay their steps' output, so it would show twice):
-  #   kubectl logs sg-runner-0 -c workflow-logs -f | grep run=<run id>
-  # Off by default: once on stdout, the cluster's log pipeline (Cloud
-  # Logging, Fluent Bit, Datadog, ...) collects it too, and workflow output can
-  # contain secrets (plans, env dumps, anything a step echoes).
-  workflowLogs:
-    enabled: false
-    # text: "<time> role=user run=<run id> workflow=<workflow> | <line>"
-    # json: one object per line with the same fields, for log backends.
-    format: text
-    # Also stream [SG_DEBUG] lines.
-    debug: false
-    # One `docker logs` process per running workflow step.
-    resources:
-      requests: { cpu: 10m, memory: 32Mi }
-      limits: { memory: 256Mi }
-
-  ecsAgent:
-    # Extra env vars for the ecs-agent container (advanced/testing), e.g.
-    #   - { name: ECS_IMAGE_PULL_BEHAVIOR, value: prefer-cached }
-    extraEnv: []
-
-  # Native steps (experimental): run controllers stay in the nested Docker,
-  # but each workflow step runs as its own pod on the runner's node, created by
-  # a `steps` broker container in the runner pod (k8s/docs/steps-api.md).
-  # Changes the runner pod when on:
-  #   - one runner per node (required pod anti-affinity, added to
-  #     runner.affinity), steps are pinned to it
-  #   - the runner advertises `advertise` to SG instead of dockerd's limits;
-  #     runner.size and runner.resources are ignored, dockerd gets
-  #     controllerResources
-  #   - the workspace is a PVC per pod (<pod>-workspace, a generic ephemeral
-  #     volume, gone with the pod) that the step pods mount too;
-  #     runner.workspace is ignored
-  #   - the runner pod gets a ServiceAccount (pods, pods/log and creating
-  #     Secrets in the namespace); only the steps container mounts its token
-  #   - no workflow-logs sidecar: steps are pods,
-  #     `kubectl logs -l app.kubernetes.io/component=step`; finished ones stay
-  #     for finishedTTL, labelled with their outcome
-  nativeSteps:
-    enabled: false
-    # Required when enabled: the step capacity the runner advertises to SG,
-    # i.e. what the node has left for step pods and run controllers. Whole CPUs;
-    # memory in Mi or Gi (e.g. 6Gi, 3072Mi). A workflow reserves its run
-    # controller's 0.5 vCPU / 512 MiB plus its own setting out of this. Must
-    # not exceed the node (the agent can't advertise more than the node has),
-    # and node memory minus this must stay under 64 GiB (the agent's
-    # reservation is a uint16 of MiB; the runner refuses to start otherwise).
-    advertise:
-      cpu:
-      memory: ""
-    # The dockerd container, which only hosts run controllers now. Size the
-    # memory limit at ~512Mi per concurrent workflow run.
-    controllerResources:
-      requests: { cpu: 500m, memory: 1Gi }
-      limits: { cpu: "2", memory: 2Gi }
-    # Workspace PVC (generic ephemeral volume) at /var/tmp/workspace on dockerd,
-    # mounted by the steps. Steps share the runner's node, so ReadWriteOnce is
-    # enough.
+  # Workflow steps as pods.
+  steps:
+    # Workspace PVC per runner pod (<pod>-workspace, a generic ephemeral
+    # volume, created and deleted with the pod) at /var/tmp/workspace on
+    # dockerd, mounted by the steps. Steps share the runner's node, so
+    # ReadWriteOnce is enough.
     workspace:
       # Empty = the cluster's default StorageClass.
       storageClassName: ""
@@ -186,7 +110,7 @@ runner:
       # no tag, else IfNotPresent. IfNotPresent or Never for air-gapped
       # clusters or images preloaded on the nodes.
       imagePullPolicy: ""
-    # The `steps` container (Go, distroless, non-root).
+    # The `steps` sidecar (Go, distroless, non-root).
     broker:
       # Empty repository = the scaler image (it ships /sg-runner-steps).
       image:
@@ -198,13 +122,39 @@ runner:
         limits: { memory: 256Mi }
       extraEnv: []
 
+  storage:
+    # Runner identity (ecs.config, SSM registration, agent state). Survives
+    # restarts and parking so a runner doesn't register again.
+    state:
+      size: 1Gi
+      # Empty = the cluster's default StorageClass.
+      storageClassName: ""
+    # Docker data root (/var/lib/docker): run controller images cached across
+    # parking.
+    docker:
+      size: 20Gi
+      storageClassName: ""
+
+  dockerd:
+    # Nested Docker needs a privileged container for now (see docs/TODO.md).
+    securityContext:
+      privileged: true
+    # Extra env vars for the dockerd container (advanced/testing), e.g. turn
+    # off the nested Docker prune loop:
+    #   - { name: SG_PRUNE_INTERVAL_SECONDS, value: "0" }
+    extraEnv: []
+
+  ecsAgent:
+    # Extra env vars for the ecs-agent container (advanced/testing), e.g.
+    #   - { name: ECS_IMAGE_PULL_BEHAVIOR, value: prefer-cached }
+    extraEnv: []
+
   # ECS keeps a runner's CPU and memory from its first registration, so a
-  # new size (runner.size, runner.resources, nativeSteps.advertise) would
-  # otherwise not show until the runner registers anew. With this on, a
-  # runner whose registered size differs from what it now advertises
-  # deregisters and registers again when its pod starts, if nothing runs on
-  # it (else it keeps the old size and logs a warning). It gets a new runner
-  # ID in SG.
+  # new size (runner.size, runner.advertise) would otherwise not show until
+  # the runner registers anew. With this on, a runner whose registered size
+  # differs from what it now advertises deregisters and registers again when
+  # its pod starts, if nothing runs on it (else it keeps the old size and logs
+  # a warning). It gets a new runner ID in SG.
   reregisterOnResize: true
 
   # Upper bound on how long a terminating runner waits for running workflows
@@ -315,10 +265,12 @@ scaler:
   tolerations: []
   affinity: {}
 
-# Egress isolation for runner pods. Nested workflow traffic leaves through the
-# pod IP, so this covers workflow containers and the agents alike. Needs a CNI
-# that enforces NetworkPolicy (Calico, Cilium, ...); others silently ignore it.
-# Also covers reap Job pods (component=reaper, set by the scaler).
+# Egress isolation for runner pods (run controllers' nested traffic leaves
+# through the pod IP, so they and the agents alike), step pods and reap Job
+# pods (component=reaper, set by the scaler). Needs a CNI that enforces
+# NetworkPolicy (Calico, Cilium, ...); others silently ignore it. It blocks
+# the Kubernetes API too, which the steps broker needs: allow the API server's
+# endpoint in extraEgress.
 #
 # IPv4 by default: no IPv6 egress is allowed at all. On dual-stack clusters,
 # list the IPv6 pod/service/node CIDRs in clusterCIDRs too, which opens IPv6
