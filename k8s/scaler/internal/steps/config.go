@@ -39,14 +39,18 @@ type Config struct {
 	// automatic one: Always for latest or no tag, else IfNotPresent).
 	StepImagePullPolicy corev1.PullPolicy
 	// SchedulingTimeout fails a step the scheduler can't place, StartTimeout
-	// one whose container hasn't started; FinishedTTL is how long the GC
-	// keeps finished steps.
+	// one whose container hasn't started; FinishedTTL is how long finished
+	// step pods stay.
 	SchedulingTimeout time.Duration
 	StartTimeout      time.Duration
 	FinishedTTL       time.Duration
-	// FinishedGrace is how long a step's pod stays after a client got its
-	// terminal state, for log streams that open late or reconnect.
-	FinishedGrace time.Duration
+	// BrokerImage is the broker's own image, carrying sg-step-wrapper for the
+	// steps' init container; its pull policy ("" for the cluster's default)
+	// and pull secrets (for the step pods). No BrokerImage: steps aren't
+	// wrapped.
+	BrokerImage            string
+	BrokerImagePullPolicy  corev1.PullPolicy
+	BrokerImagePullSecrets []string
 	// DrainedMarker is the file the runner's drain creates when done.
 	DrainedMarker string
 }
@@ -76,8 +80,7 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	duration := func(key, def string) time.Duration {
 		raw := str(key, def)
 		d, err := time.ParseDuration(raw)
-		// Only FINISHED_GRACE may be 0 (delete right away).
-		if err != nil || d < 0 || d == 0 && key != "FINISHED_GRACE" {
+		if err != nil || d <= 0 {
 			errs = append(errs, fmt.Sprintf("%s=%q: want a positive Go duration (e.g. 5m)", key, raw))
 		}
 		return d
@@ -93,8 +96,8 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		Namespace:         required("NAMESPACE"),
 		SchedulingTimeout: duration("SCHEDULING_TIMEOUT", "5m"),
 		StartTimeout:      duration("START_TIMEOUT", "30m"),
-		FinishedTTL:       duration("FINISHED_TTL", "10m"),
-		FinishedGrace:     duration("FINISHED_GRACE", "10s"),
+		FinishedTTL:       duration("FINISHED_TTL", "1h"),
+		BrokerImage:       str("BROKER_IMAGE", ""),
 		DrainedMarker:     str("DRAINED_MARKER", DefaultDrainedMarker),
 	}
 
@@ -140,11 +143,25 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		errs = append(errs, fmt.Sprintf("STEP_TOLERATIONS: want a JSON array of tolerations: %v", err))
 	}
 
-	switch p := corev1.PullPolicy(str("STEP_IMAGE_PULL_POLICY", "")); p {
-	case "", corev1.PullAlways, corev1.PullIfNotPresent, corev1.PullNever:
-		c.StepImagePullPolicy = p
-	default:
-		errs = append(errs, fmt.Sprintf("STEP_IMAGE_PULL_POLICY=%q: want Always, IfNotPresent or Never", p))
+	pullPolicy := func(key string) corev1.PullPolicy {
+		switch p := corev1.PullPolicy(str(key, "")); p {
+		case "", corev1.PullAlways, corev1.PullIfNotPresent, corev1.PullNever:
+			return p
+		default:
+			errs = append(errs, fmt.Sprintf("%s=%q: want Always, IfNotPresent or Never", key, p))
+			return ""
+		}
+	}
+	c.StepImagePullPolicy = pullPolicy("STEP_IMAGE_PULL_POLICY")
+	c.BrokerImagePullPolicy = pullPolicy("BROKER_IMAGE_PULL_POLICY")
+	for _, name := range strings.Split(str("BROKER_IMAGE_PULL_SECRETS", ""), ",") {
+		if name = strings.TrimSpace(name); name == "" {
+			continue
+		}
+		for _, msg := range validation.IsDNS1123Subdomain(name) {
+			errs = append(errs, fmt.Sprintf("BROKER_IMAGE_PULL_SECRETS: %q: %s", name, msg))
+		}
+		c.BrokerImagePullSecrets = append(c.BrokerImagePullSecrets, name)
 	}
 
 	if len(errs) > 0 {

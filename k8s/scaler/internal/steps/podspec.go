@@ -35,8 +35,38 @@ const (
 	AnnotationName    = "sg-runner.stackguardian.io/name"
 )
 
-// ContainerName is the step pod's only container.
+// ContainerName is the step pod's container.
 const ContainerName = "step"
+
+// The wrapper: the init container installs it from the broker's image into
+// an emptyDir the step runs it from.
+const (
+	WrapperInitContainer = "sg-wrapper-install"
+	WrapperVolume        = "sg-wrapper"
+	WrapperDir           = "/sg-wrapper"
+	WrapperPath          = WrapperDir + "/sg-step-wrapper"
+	// WrapperSource is the wrapper in the broker's image.
+	WrapperSource = "/sg-step-wrapper"
+)
+
+// AnnotationWrapped is "true" on a pod whose step runs under the wrapper,
+// "false" (with AnnotationNotWrappedReason) on one that doesn't.
+const (
+	AnnotationWrapped          = "sg-runner.stackguardian.io/wrapped"
+	AnnotationNotWrappedReason = "sg-runner.stackguardian.io/not-wrapped-reason"
+)
+
+// LabelOutcome is how a finished step ended, set once it's terminal.
+const LabelOutcome = "sg-runner.stackguardian.io/outcome"
+
+// Outcomes.
+const (
+	OutcomeSucceeded        = "succeeded"
+	OutcomeApprovalRequired = "approval-required"
+	OutcomeCompletedEarly   = "completed-early"
+	OutcomeFailed           = "failed"
+	OutcomeStopped          = "stopped"
+)
 
 // MaxEnvBytes caps the env's keys and values together (a Secret holds 1 MiB).
 const MaxEnvBytes = 1_000_000
@@ -308,21 +338,40 @@ func CPURequest(shares int64) resource.Quantity {
 	return *resource.NewMilliQuantity(m, resource.DecimalSI)
 }
 
+// Wrap is how a step pod runs its command: Command (wrapCommand) runs it
+// under the wrapper; without, Reason says why not and the image's own
+// entrypoint runs.
+type Wrap struct {
+	Command []string
+	Reason  string
+}
+
+// escape keeps the kubelet from expanding $(VAR) in a command or args, as
+// Docker never does.
+func escape(in []string) []string {
+	var out []string
+	for _, a := range in {
+		out = append(out, strings.ReplaceAll(a, "$", "$$"))
+	}
+	return out
+}
+
 // Pod is a step's pod.
-func (c *Config) Pod(id string, r *Request, withPullSecret bool) *corev1.Pod {
+func (c *Config) Pod(id string, r *Request, withPullSecret bool, wrap Wrap) *corev1.Pod {
 	meta := c.meta(id, r)
 	meta.Annotations = map[string]string{
 		AnnotationOrg:     r.Org,
 		AnnotationRun:     r.Run,
 		AnnotationStepIdx: strconv.Itoa(r.StepIdx),
 		AnnotationName:    r.Name,
+		AnnotationWrapped: "true",
 	}
-
-	// Docker never expands $(VAR) in a command; the kubelet does unless
-	// escaped as $$(VAR).
-	var args []string
-	for _, a := range r.Args {
-		args = append(args, strings.ReplaceAll(a, "$", "$$"))
+	command, args := escape(wrap.Command), escape(r.Args)
+	if command != nil {
+		args = nil
+	} else {
+		meta.Annotations[AnnotationWrapped] = "false"
+		meta.Annotations[AnnotationNotWrappedReason] = wrap.Reason
 	}
 
 	res := corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: CPURequest(r.CPUShares)}}
@@ -347,6 +396,35 @@ func (c *Config) Pod(id string, r *Request, withPullSecret bool) *corev1.Pod {
 	var pullSecrets []corev1.LocalObjectReference
 	if withPullSecret {
 		pullSecrets = []corev1.LocalObjectReference{{Name: PullSecretName(id)}}
+	}
+
+	var initContainers []corev1.Container
+	if command != nil {
+		for _, name := range c.BrokerImagePullSecrets {
+			pullSecrets = append(pullSecrets, corev1.LocalObjectReference{Name: name})
+		}
+		volumes = append(volumes, corev1.Volume{Name: WrapperVolume, VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: ptr.To(resource.MustParse("64Mi"))}}})
+		mounts = append(mounts, corev1.VolumeMount{Name: WrapperVolume, MountPath: WrapperDir, ReadOnly: true})
+		initContainers = []corev1.Container{{
+			Name:            WrapperInitContainer,
+			Image:           c.BrokerImage,
+			ImagePullPolicy: c.BrokerImagePullPolicy,
+			Command:         []string{WrapperSource, "install", WrapperPath},
+			VolumeMounts:    []corev1.VolumeMount{{Name: WrapperVolume, MountPath: WrapperDir}},
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("10m"), corev1.ResourceMemory: resource.MustParse("16Mi")},
+				Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Mi")},
+			},
+			SecurityContext: &corev1.SecurityContext{
+				RunAsNonRoot:             ptr.To(true),
+				RunAsUser:                ptr.To[int64](65532),
+				RunAsGroup:               ptr.To[int64](65532),
+				AllowPrivilegeEscalation: ptr.To(false),
+				ReadOnlyRootFilesystem:   ptr.To(true),
+				Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+			},
+		}}
 	}
 
 	pullPolicy := c.StepImagePullPolicy
@@ -381,11 +459,16 @@ func (c *Config) Pod(id string, r *Request, withPullSecret bool) *corev1.Pod {
 			SecurityContext: &corev1.PodSecurityContext{
 				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 			},
+			InitContainers: initContainers,
 			Containers: []corev1.Container{{
 				Name:            ContainerName,
 				Image:           r.Image,
 				ImagePullPolicy: pullPolicy,
+				Command:         command,
 				Args:            args,
+				// The wrapper leaves mapped exit codes here.
+				TerminationMessagePath:   corev1.TerminationMessagePathDefault,
+				TerminationMessagePolicy: corev1.TerminationMessageReadFile,
 				EnvFrom: []corev1.EnvFromSource{{SecretRef: &corev1.SecretEnvSource{
 					LocalObjectReference: corev1.LocalObjectReference{Name: EnvSecretName(id)}}}},
 				Resources:       res,

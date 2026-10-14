@@ -16,9 +16,9 @@ import (
 )
 
 const (
-	testOrg = "/orgs/demo-org"
+	testOrg = "/orgs/example-org"
 	testRun = "/wfgrps/x/wfs/y/wfruns/z"
-	testWS  = "/var/tmp/workspace/orgs/demo-org/wfgrps/x/wfs/y/wfruns/z"
+	testWS  = "/var/tmp/workspace/orgs/example-org/wfgrps/x/wfs/y/wfruns/z"
 	testID  = "sg-runner-0-s-7f3k9q2x"
 )
 
@@ -30,14 +30,16 @@ func testConfig() Config {
 		StepLabels:        map[string]string{"app.kubernetes.io/name": "sg-runner", LabelComponent: "overridden"},
 		StepNodeSelector:  map[string]string{"pool": "steps"},
 		StepTolerations:   []corev1.Toleration{{Key: "dedicated", Operator: corev1.TolerationOpExists}},
-		SchedulingTimeout: 5 * time.Minute, StartTimeout: 30 * time.Minute, FinishedTTL: 10 * time.Minute,
-		DrainedMarker: "/var/run/sg-runner-drained",
+		SchedulingTimeout: 5 * time.Minute, StartTimeout: 30 * time.Minute, FinishedTTL: time.Hour,
+		BrokerImage: "reg.example.com/sg-runner-scaler:1", BrokerImagePullPolicy: corev1.PullIfNotPresent,
+		BrokerImagePullSecrets: []string{"regcred"},
+		DrainedMarker:          "/var/run/sg-runner-drained",
 	}
 }
 
 func testRequest() Request {
 	return Request{
-		Name: "demo-org-plan-0", Org: testOrg, Run: testRun, StepIdx: 2,
+		Name: "example-org-plan-0", Org: testOrg, Run: testRun, StepIdx: 2,
 		Image: "registry.example.com/team/image:1.2",
 		Args:  []string{"sh", "-c", "echo $(HOME) $HOME"},
 		Env:   map[string]string{"SG_WORKFLOW_RUN_PAYLOAD": "{}", "a.b-c_D": "x"},
@@ -79,10 +81,10 @@ func TestValidate(t *testing.T) {
 		"mount the root":          {func(r *Request) { r.Mounts[0].Source = "/var/tmp/workspace" }, ReasonInvalidMount},
 		"mount the socket dir":    {func(r *Request) { r.Mounts[0].Source = "/var/tmp/workspace/.sg-runner" }, ReasonInvalidMount},
 		"mount another run": {func(r *Request) {
-			r.Mounts[0].Source = "/var/tmp/workspace/orgs/demo-org/wfgrps/x/wfs/y/wfruns/zz/shared"
+			r.Mounts[0].Source = "/var/tmp/workspace/orgs/example-org/wfgrps/x/wfs/y/wfruns/zz/shared"
 		}, ReasonInvalidMount},
 		"mount with dotdot": {func(r *Request) { r.Mounts[0].Source = testWS + "/a/../../z/a" }, ReasonInvalidMount},
-		"mount relative":    {func(r *Request) { r.Mounts[0].Source = "orgs/demo-org" }, ReasonInvalidMount},
+		"mount relative":    {func(r *Request) { r.Mounts[0].Source = "orgs/example-org" }, ReasonInvalidMount},
 		"mount elsewhere":   {func(r *Request) { r.Mounts[0].Source = "/etc" }, ReasonInvalidMount},
 		"target relative":   {func(r *Request) { r.Mounts[0].Target = "mnt" }, ReasonInvalidMount},
 		"target root":       {func(r *Request) { r.Mounts[0].Target = "/" }, ReasonInvalidMount},
@@ -238,14 +240,14 @@ func TestPod(t *testing.T) {
 	cfg := testConfig()
 	cfg.WorkspaceSubPathPrefix = "shared/r0"
 	r := testRequest()
-	p := cfg.Pod(testID, &r, true)
+	p := cfg.Pod(testID, &r, true, Wrap{Reason: "test"})
 
 	if p.Name != testID || p.Namespace != "sg" {
 		t.Errorf("name %s/%s", p.Namespace, p.Name)
 	}
 	checkOwnedAndLabeled(t, p.ObjectMeta)
 	if want := map[string]string{AnnotationOrg: testOrg, AnnotationRun: testRun, AnnotationStepIdx: "2",
-		AnnotationName: "demo-org-plan-0"}; !reflect.DeepEqual(p.Annotations, want) {
+		AnnotationName: "example-org-plan-0", AnnotationWrapped: "false", AnnotationNotWrappedReason: "test"}; !reflect.DeepEqual(p.Annotations, want) {
 		t.Errorf("annotations %v", p.Annotations)
 	}
 
@@ -272,6 +274,7 @@ func TestPod(t *testing.T) {
 	}
 	c := s.Containers[0]
 	if c.Name != "step" || c.Image != r.Image || c.ImagePullPolicy != corev1.PullIfNotPresent || c.Command != nil ||
+		s.InitContainers != nil || c.TerminationMessagePath != "/dev/termination-log" ||
 		!reflect.DeepEqual(c.Args, []string{"sh", "-c", "echo $$(HOME) $$HOME"}) ||
 		*c.SecurityContext.Privileged || c.SecurityContext.Capabilities != nil {
 		t.Errorf("container %+v", c)
@@ -285,8 +288,8 @@ func TestPod(t *testing.T) {
 		t.Errorf("resources %+v", c.Resources)
 	}
 	wantMounts := []corev1.VolumeMount{
-		{Name: "workspace", MountPath: "/mnt/sg_workspace", SubPath: "shared/r0/orgs/demo-org/wfgrps/x/wfs/y/wfruns/z/shared-workspace"},
-		{Name: "workspace", MountPath: "/mnt/artifacts", SubPath: "shared/r0/orgs/demo-org/wfgrps/x/wfs/y/wfruns/z/artifacts", ReadOnly: true},
+		{Name: "workspace", MountPath: "/mnt/sg_workspace", SubPath: "shared/r0/orgs/example-org/wfgrps/x/wfs/y/wfruns/z/shared-workspace"},
+		{Name: "workspace", MountPath: "/mnt/artifacts", SubPath: "shared/r0/orgs/example-org/wfgrps/x/wfs/y/wfruns/z/artifacts", ReadOnly: true},
 	}
 	if !reflect.DeepEqual(c.VolumeMounts, wantMounts) {
 		t.Errorf("volume mounts %+v", c.VolumeMounts)
@@ -297,18 +300,18 @@ func TestPodMinimal(t *testing.T) {
 	cfg := testConfig()
 	r := Request{Org: testOrg, Run: testRun, Image: "alpine",
 		Mounts: []Mount{{Source: testWS + "/w", Target: "/w"}}}
-	p := cfg.Pod(testID, &r, false)
+	p := cfg.Pod(testID, &r, false, Wrap{Reason: "test"})
 	c := p.Spec.Containers[0]
 	if p.Spec.ActiveDeadlineSeconds != nil || p.Spec.ImagePullSecrets != nil || c.Args != nil ||
 		c.ImagePullPolicy != corev1.PullAlways || c.Resources.Requests.Cpu().String() != "1m" ||
 		c.Resources.Limits != nil || c.Resources.Requests.Memory().Value() != 0 {
 		t.Errorf("minimal pod %+v", p.Spec)
 	}
-	if c.VolumeMounts[0].SubPath != "orgs/demo-org/wfgrps/x/wfs/y/wfruns/z/w" {
+	if c.VolumeMounts[0].SubPath != "orgs/example-org/wfgrps/x/wfs/y/wfruns/z/w" {
 		t.Errorf("subPath without a prefix: %s", c.VolumeMounts[0].SubPath)
 	}
 	r.Mounts = nil
-	if p := cfg.Pod(testID, &r, false); p.Spec.Volumes != nil || p.Spec.Containers[0].VolumeMounts != nil {
+	if p := cfg.Pod(testID, &r, false, Wrap{Reason: "test"}); p.Spec.Volumes != nil || p.Spec.Containers[0].VolumeMounts != nil {
 		t.Errorf("a step without mounts got the workspace: %+v", p.Spec.Volumes)
 	}
 }
@@ -319,9 +322,72 @@ func TestPodPullPolicyOverride(t *testing.T) {
 		r := Request{Org: testOrg, Run: testRun, Image: image}
 		for _, p := range []corev1.PullPolicy{corev1.PullNever, corev1.PullAlways, corev1.PullIfNotPresent} {
 			cfg.StepImagePullPolicy = p
-			if got := cfg.Pod(testID, &r, false).Spec.Containers[0].ImagePullPolicy; got != p {
+			if got := cfg.Pod(testID, &r, false, Wrap{Reason: "test"}).Spec.Containers[0].ImagePullPolicy; got != p {
 				t.Errorf("%s with %s: %s", image, p, got)
 			}
 		}
+	}
+}
+
+func TestWrapCommand(t *testing.T) {
+	cfg := ImageConfig{Entrypoint: []string{"/entry", "--flag"}, Cmd: []string{"default"}}
+	for name, c := range map[string]struct {
+		cfg  ImageConfig
+		args []string
+		want []string
+	}{
+		"entrypoint and cmd":   {cfg, nil, []string{WrapperPath, "--", "/entry", "--flag", "default"}},
+		"args replace the cmd": {cfg, []string{"plan", "-x"}, []string{WrapperPath, "--", "/entry", "--flag", "plan", "-x"}},
+		"empty args keep cmd":  {cfg, []string{}, []string{WrapperPath, "--", "/entry", "--flag", "default"}},
+		"cmd only":             {ImageConfig{Cmd: []string{"sh"}}, nil, []string{WrapperPath, "--", "sh"}},
+		"args only":            {ImageConfig{}, []string{"run"}, []string{WrapperPath, "--", "run"}},
+		"nothing":              {ImageConfig{}, nil, nil},
+	} {
+		if got := wrapCommand(c.cfg, c.args); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: %q, want %q", name, got, c.want)
+		}
+	}
+}
+
+func TestWrappedPod(t *testing.T) {
+	cfg := testConfig()
+	r := testRequest()
+	r.RegistryAuth = &RegistryAuth{Registry: "registry.example.com"}
+	cmd := wrapCommand(ImageConfig{Entrypoint: []string{"/entry"}}, r.Args)
+	p := cfg.Pod(testID, &r, true, Wrap{Command: cmd})
+
+	if p.Annotations[AnnotationWrapped] != "true" || p.Annotations[AnnotationNotWrappedReason] != "" {
+		t.Errorf("annotations %v", p.Annotations)
+	}
+	c := p.Spec.Containers[0]
+	want := []string{WrapperPath, "--", "/entry", "sh", "-c", "echo $$(HOME) $$HOME"}
+	if !reflect.DeepEqual(c.Command, want) || c.Args != nil {
+		t.Errorf("command %q args %q", c.Command, c.Args)
+	}
+	if last := c.VolumeMounts[len(c.VolumeMounts)-1]; last != (corev1.VolumeMount{Name: "sg-wrapper", MountPath: "/sg-wrapper", ReadOnly: true}) {
+		t.Errorf("wrapper mount %+v", last)
+	}
+	if len(p.Spec.InitContainers) != 1 {
+		t.Fatalf("init containers %+v", p.Spec.InitContainers)
+	}
+	ic := p.Spec.InitContainers[0]
+	sc := ic.SecurityContext
+	if ic.Name != "sg-wrapper-install" || ic.Image != cfg.BrokerImage || ic.ImagePullPolicy != corev1.PullIfNotPresent ||
+		!reflect.DeepEqual(ic.Command, []string{"/sg-step-wrapper", "install", "/sg-wrapper/sg-step-wrapper"}) ||
+		!reflect.DeepEqual(ic.VolumeMounts, []corev1.VolumeMount{{Name: "sg-wrapper", MountPath: "/sg-wrapper"}}) ||
+		ic.Resources.Requests.Cpu().String() != "10m" || ic.Resources.Requests.Memory().String() != "16Mi" ||
+		!*sc.RunAsNonRoot || *sc.RunAsUser != 65532 || *sc.AllowPrivilegeEscalation || !*sc.ReadOnlyRootFilesystem ||
+		!reflect.DeepEqual(sc.Capabilities.Drop, []corev1.Capability{"ALL"}) {
+		t.Errorf("init container %+v", ic)
+	}
+	if want := []corev1.LocalObjectReference{{Name: testID + "-pull"}, {Name: "regcred"}}; !reflect.DeepEqual(p.Spec.ImagePullSecrets, want) {
+		t.Errorf("pull secrets %+v", p.Spec.ImagePullSecrets)
+	}
+	var names []string
+	for _, v := range p.Spec.Volumes {
+		names = append(names, v.Name)
+	}
+	if strings.Join(names, ",") != "workspace,sg-wrapper" || p.Spec.Volumes[1].EmptyDir == nil {
+		t.Errorf("volumes %+v", p.Spec.Volumes)
 	}
 }

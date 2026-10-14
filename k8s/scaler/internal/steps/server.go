@@ -54,6 +54,9 @@ type Server struct {
 	// PollInterval is how often a log request checks whether the container
 	// started (1s when 0).
 	PollInterval time.Duration
+	// Images looks up step images' entrypoint and cmd for the wrapper (steps
+	// aren't wrapped when nil).
+	Images ImageConfigs
 
 	idRE *regexp.Regexp
 
@@ -63,7 +66,7 @@ type Server struct {
 }
 
 // stepRecord is what the broker remembers of a step besides its pod: a stop
-// it was asked for, the final state, and the pod's deletion.
+// it was asked for, its final state, and what's left to clean up.
 type stepRecord struct {
 	at time.Time
 	// stopped: a client asked for the stop; last is the latest state seen
@@ -72,14 +75,15 @@ type stepRecord struct {
 	last    *State
 	// following: a goroutine reads the stopped pod until it's gone.
 	following bool
-	// final is the terminal state a client got (or the GC went by): the
-	// step's state for good, also once its pod is gone.
-	final *State
-	// servedAt is when a client first got final (zero when the GC set it):
-	// the pod stays FINISHED_GRACE after.
-	servedAt time.Time
-	// deleting: one deletion of the pod and Secrets runs; deleted: done.
-	deleting  bool
+	// final is the terminal state, once the broker saw it: the step's state
+	// for good, also once its pod is gone. terminalAt is when it saw it.
+	final      *State
+	terminalAt time.Time
+	// finishing: one goroutine labels the pod with its outcome and deletes
+	// its Secrets; finished: done.
+	finishing bool
+	finished  bool
+	// deleted: the pod and Secrets are gone (FINISHED_TTL, DELETE).
 	deleted   bool
 	deletedAt time.Time
 	// secretsDeleted: the step's Secrets are gone.
@@ -232,6 +236,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	wrap := s.wrap(ctx, &req)
 	secrets := s.Client.CoreV1().Secrets(s.Config.Namespace)
 	var created []string
 	// Secrets of a step that has no pod (else they go with the runner pod).
@@ -257,43 +262,56 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		}
 		created = append(created, PullSecretName(id))
 	}
-	pod := s.Config.Pod(id, &req, pull != nil)
+	pod := s.Config.Pod(id, &req, pull != nil, wrap)
 	if _, err := s.Client.CoreV1().Pods(s.Config.Namespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
 		cleanup()
 		writeError(w, kubeError("create Pod "+id, err))
 		return
 	}
 	s.Log.Info("step created", "id", id, "org", req.Org, "run", req.Run, "stepIdx", req.StepIdx,
-		"name", req.Name, "image", req.Image)
+		"name", req.Name, "image", req.Image, "wrapped", wrap.Command != nil)
+	if wrap.Command == nil {
+		s.Log.Warn("step not wrapped: its exits 11 and 12 end the pod Failed", "id", id, "image", req.Image, "reason", wrap.Reason)
+	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 
-// state is a step's state: its final one once a client got that, a stopped
-// step's last once its pod is gone.
+// state is a step's state: its final one once the broker saw that, a
+// stopped step's last once its pod is gone. Seeing it terminal the first time
+// starts finishing it (outcome label, Secrets).
 func (s *Server) state(ctx context.Context, id string) (State, error) {
 	if st, ok := s.final(id); ok {
 		return st, nil
 	}
 	p, err := s.Client.CoreV1().Pods(s.Config.Namespace).Get(ctx, id, metav1.GetOptions{})
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	rec := s.steps[id]
 	if rec != nil && rec.final != nil {
-		return *rec.final, nil
+		st := *rec.final
+		s.mu.Unlock()
+		return st, nil
 	}
 	stopped := rec != nil && rec.stopped
-	if apierrors.IsNotFound(err) {
-		if stopped {
-			return stoppedState(id, rec.last), nil
-		}
+	var st State
+	switch {
+	case apierrors.IsNotFound(err) && stopped:
+		st, p = stoppedState(id, rec.last), nil
+	case apierrors.IsNotFound(err):
+		s.mu.Unlock()
 		return State{}, notFound(id)
-	}
-	if err != nil {
+	case err != nil:
+		s.mu.Unlock()
 		return State{}, kubeError("get Pod "+id, err)
+	default:
+		st = s.Config.StepState(p, s.now(), stopped)
+		if stopped {
+			rec.see(st)
+		}
 	}
-	st := s.Config.StepState(p, s.now(), stopped)
-	if stopped {
-		rec.see(st)
+	finish := st.Terminal() && s.terminalLocked(id, st)
+	s.mu.Unlock()
+	if finish {
+		go s.finishAsync(id, p)
 	}
 	return st, nil
 }
@@ -320,70 +338,6 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, st)
-	if st.Terminal() {
-		s.served(id, st)
-	}
-}
-
-// served records a terminal state a client got: the step's for good. Its pod
-// and Secrets go FINISHED_GRACE later (a log stream may still be opening or
-// reconnecting), or when its last log stream closes after that.
-func (s *Server) served(id string, st State) {
-	s.mu.Lock()
-	rec := s.recordLocked(id)
-	first := rec.final == nil
-	if first {
-		rec.final, rec.servedAt = &st, time.Now()
-	}
-	s.mu.Unlock()
-	if !first {
-		return
-	}
-	deleteNow := func() {
-		if s.claimDeletion(id) {
-			s.deleteFinal(id, "served")
-		}
-	}
-	if s.Config.FinishedGrace <= 0 {
-		go deleteNow()
-		return
-	}
-	time.AfterFunc(s.Config.FinishedGrace, deleteNow)
-}
-
-// claimDeletion makes the caller a final step's only deleter, unless its
-// grace hasn't passed, a log stream still reads it, or it's deleted already.
-func (s *Server) claimDeletion(id string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rec := s.steps[id]
-	if rec == nil || rec.final == nil || rec.deleting || rec.deleted || s.streams[id] > 0 ||
-		!rec.servedAt.IsZero() && time.Since(rec.servedAt) < s.Config.FinishedGrace {
-		return false
-	}
-	rec.deleting = true
-	return true
-}
-
-// deleteFinal deletes a claimed step's pod and Secrets; a failure leaves it
-// to the next GET, stream or sweep.
-func (s *Server) deleteFinal(id, why string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	err := s.deleteStep(ctx, id)
-	s.mu.Lock()
-	rec := s.steps[id]
-	rec.deleting = false
-	if err == nil {
-		rec.deleted, rec.deletedAt, rec.secretsDeleted = true, s.now(), true
-	}
-	final := *rec.final
-	s.mu.Unlock()
-	if err != nil {
-		s.Log.Warn("deleting a finished step", "id", id, "why", why, "err", err)
-		return
-	}
-	s.Log.Info("finished step deleted", "id", id, "why", why, "state", final.State, "reason", final.Reason)
 }
 
 func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
@@ -467,10 +421,15 @@ func (s *Server) followStop(id string, limit time.Duration) {
 		if err == nil {
 			st := s.Config.StepState(p, s.now(), true)
 			s.mu.Lock()
-			if rec := s.steps[id]; rec != nil {
+			finish := false
+			if rec := s.steps[id]; rec != nil && rec.final == nil {
 				rec.see(st)
+				finish = st.Terminal() && s.terminalLocked(id, st)
 			}
 			s.mu.Unlock()
+			if finish {
+				s.finishAsync(id, p)
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -566,13 +525,7 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.openStream(id)
-	// The last stream of a step a client knows is done lets its pod go.
-	defer func() {
-		s.closeStream(id)
-		if s.claimDeletion(id) {
-			go s.deleteFinal(id, "logs closed")
-		}
-	}()
+	defer s.closeStream(id)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
