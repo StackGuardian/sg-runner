@@ -1,0 +1,328 @@
+# sg-runner chart (prototype). Each runner StatefulSet replica is one
+# registered StackGuardian Private Runner; the scaler owns the replica count.
+#
+# The namespace must allow privileged pods (nested Docker):
+#   pod-security.kubernetes.io/enforce: privileged
+# The chart doesn't create the namespace.
+
+nameOverride: ""
+# Also renames the runner StatefulSet, so its pods and PVCs. Changing it on an
+# existing install orphans the runners registered from the old PVCs.
+fullnameOverride: ""
+
+# Runner image (register, dockerd, ssm-agent, ecs-agent; reap Jobs too).
+image:
+  repository: ghcr.io/stackguardian/sg-runner-k8s
+  # Empty = the chart's appVersion (the release's version in a published
+  # chart).
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Secret names or {name: ...} objects, e.g. [regcred, {name: other}].
+imagePullSecrets: []
+
+# The runner group to register into. Not secret: the chart puts these in a
+# ConfigMap (<release>-config).
+sg:
+  # Required.
+  organization: ""
+  runnerGroup: ""
+  # Where the organization lives: eu (app.stackguardian.io) or us
+  # (us.stackguardian.io). Picks the API URL.
+  region: eu
+  # Overrides region with a full API URL, including /api/v1. Leave empty.
+  apiUrl: ""
+
+# The runner group's node token, the only secret: used to register, set runner
+# status and (scaler) read the runner group. Set exactly one of existingSecret
+# or create=true.
+credentials:
+  # Secret with key SG_NODE_TOKEN; other keys in it are ignored.
+  existingSecret: ""
+  # Let the chart create the Secret from nodeToken. The token then also ends up
+  # in the Helm release (a Secret in the namespace); prefer existingSecret.
+  create: false
+  nodeToken: ""
+
+runner:
+  # Only used with scaler.enabled=false. With the scaler the chart leaves
+  # spec.replicas out: the scaler owns it, and upgrades keep the live value.
+  replicas: 1
+
+  # Each runner takes a node of its own (required pod anti-affinity, added to
+  # runner.affinity). Run controllers run in the runner pod's nested Docker;
+  # each workflow step runs as a pod of its own on the runner's node, created
+  # by the `steps` broker sidecar (k8s/docs/steps-api.md).
+  #
+  # The size sets what the runner advertises to SG for workflows (step pods
+  # and run controllers together), and the dockerd container's resources,
+  # which only hold the run controllers:
+  #
+  #   preset   advertised      controllers (dockerd) requests / limits
+  #   small    2 CPU / 4Gi     500m / 1Gi   2 / 2Gi
+  #   medium   4 CPU / 8Gi     1 / 2Gi      4 / 4Gi
+  #   large    8 CPU / 16Gi    2 / 4Gi      8 / 8Gi
+  #   custom   runner.advertise and runner.controllerResources (required)
+  #
+  # A workflow reserves 0.5 vCPU / 512 MiB for its run controller plus its own
+  # resource setting (default 0.5 vCPU / 1 GiB), so a default workflow takes
+  # 1 vCPU / 1.5 GiB; the presets are CPU-bound. The runner must be at least
+  # the largest workflow + 0.5 vCPU / 512 MiB, else that workflow stays queued
+  # forever (the scaler warns about it). Size the controllers' memory limit at
+  # ~512Mi per concurrent workflow run.
+  #
+  # The node needs the advertised capacity free for step pods, plus the
+  # runner pod's own requests. The agent can't advertise more than the node
+  # has, and node memory minus the advertised memory must stay under 64 GiB
+  # (the agent's reservation is a uint16 of MiB; the runner refuses to start
+  # otherwise).
+  size: small
+  # size=custom only. Whole CPUs; memory in Mi or Gi (e.g. 6Gi, 3072Mi).
+  advertise:
+    cpu:
+    memory: ""
+  # size=custom only, e.g.:
+  #   requests: { cpu: 500m, memory: 1Gi }
+  #   limits: { cpu: "2", memory: 2Gi }
+  controllerResources: {}
+
+  # Workflow steps as pods.
+  steps:
+    # Workspace PVC per runner pod (<pod>-workspace, a generic ephemeral
+    # volume, created and deleted with the pod) at /var/tmp/workspace on
+    # dockerd, mounted by the steps. Steps share the runner's node, so
+    # ReadWriteOnce is enough.
+    workspace:
+      # Empty = the cluster's default StorageClass.
+      storageClassName: ""
+      size: 20Gi
+      accessModes: [ReadWriteOnce]
+    # A step pod that can't be scheduled for this long fails (Unschedulable).
+    schedulingTimeout: 5m
+    # A step pod still pending (pulling, creating) after this long fails.
+    startTimeout: 30m
+    # Finished step pods are kept for this long, then deleted; their Secrets
+    # are deleted when they finish.
+    finishedTTL: 1h
+    # Scheduling of step pods (pinned to the runner's node anyway). Empty =
+    # runner.nodeSelector / runner.tolerations, so steps tolerate the runner
+    # node's taints.
+    step:
+      nodeSelector: {}
+      tolerations: []
+      # Pull policy of step images. Empty = automatic: Always for `latest` or
+      # no tag, else IfNotPresent. IfNotPresent or Never for air-gapped
+      # clusters or images preloaded on the nodes.
+      imagePullPolicy: ""
+    # The `steps` sidecar (Go, distroless, non-root).
+    broker:
+      # Empty repository = the scaler image (it ships /sg-runner-steps).
+      image:
+        repository: ""
+        tag: ""
+        pullPolicy: IfNotPresent
+      resources:
+        requests: { cpu: 10m, memory: 32Mi }
+        limits: { memory: 256Mi }
+      extraEnv: []
+
+  storage:
+    # Runner identity (ecs.config, SSM registration, agent state). Survives
+    # restarts and parking so a runner doesn't register again.
+    state:
+      size: 1Gi
+      # Empty = the cluster's default StorageClass.
+      storageClassName: ""
+    # Docker data root (/var/lib/docker): run controller images cached across
+    # parking.
+    docker:
+      size: 20Gi
+      storageClassName: ""
+
+  dockerd:
+    # Nested Docker needs a privileged container for now (see docs/TODO.md).
+    securityContext:
+      privileged: true
+    # Extra env vars for the dockerd container (advanced/testing), e.g. turn
+    # off the nested Docker prune loop:
+    #   - { name: SG_PRUNE_INTERVAL_SECONDS, value: "0" }
+    extraEnv: []
+
+  ecsAgent:
+    # Extra env vars for the ecs-agent container (advanced/testing), e.g.
+    #   - { name: ECS_IMAGE_PULL_BEHAVIOR, value: prefer-cached }
+    extraEnv: []
+
+  # ECS keeps a runner's CPU and memory from its first registration, so a
+  # new size (runner.size, runner.advertise) would otherwise not show until
+  # the runner registers anew. With this on, a runner whose registered size
+  # differs from what it now advertises deregisters and registers again when
+  # its pod starts, if nothing runs on it (else it keeps the old size and logs
+  # a warning). It gets a new runner ID in SG.
+  reregisterOnResize: true
+
+  # Upper bound on how long a terminating runner waits for running workflows
+  # (the ecs-agent preStop drain) before it is killed.
+  terminationGracePeriodSeconds: 3600
+
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+scaler:
+  # Deployment that owns the runner StatefulSet's replicas: wakes parked
+  # runners or adds new ones when workflows queue, parks idle ones, and reaps
+  # runners parked longer than parkTTL.
+  enabled: true
+
+  # The scaler's own image (Go, distroless, non-root; build with
+  # `make build-scaler`). It also ships the steps broker
+  # (runner.steps.broker.image defaults to it).
+  image:
+    repository: ghcr.io/stackguardian/sg-runner-scaler
+    # Empty = the chart's appVersion.
+    tag: ""
+    pullPolicy: IfNotPresent
+  # Empty = the image's entrypoint.
+  command: []
+
+  # Two replicas are safe with leader election: only the lease holder scales,
+  # the other takes over when it goes away. Without it, keep 1 (two scalers
+  # would fight over replicas).
+  replicas: 1
+  leaderElection:
+    # Lease <runner StatefulSet>-scaler in the release namespace.
+    enabled: true
+
+  # Runners kept awake. At least 1: SG pauses workflows while no runner is
+  # ACTIVE. 2 avoids that pause while a single runner restarts.
+  min: 1
+  # Also capped by the runner group's MaxNumberOfRunners.
+  max: 10
+  # % of awake runners' CPU or memory to keep free (warm spare); 0 = off.
+  headroomPct: 0
+  # Park the highest awake runner after it has been idle this long.
+  idleSeconds: 60
+  # Deregister runners parked longer than this (12h) and delete their PVCs.
+  parkTTL: 43200
+  # Queued workflows with an idle awake runner for this long are treated as
+  # too big for any runner: warn and stop scaling out for them.
+  stuckSeconds: 180
+  # How long to wait for a woken or new runner to connect before deciding
+  # without it.
+  settleTimeout: 300
+  # Seconds between scaling decisions.
+  interval: 15
+  # Some cluster autoscalers (GKE's, at least) never add a node for a pod with
+  # a persistent disk, so a runner that needs a new node stays Pending. When
+  # the autoscaler says so (event NotTriggerScaleUp on the runner pod), the
+  # scaler starts a placeholder Job with the runner's requests and scheduling
+  # rules but no volumes. As soon as the autoscaler accepts it
+  # (TriggeredScaleUp), the scaler deletes the placeholder, and the runner
+  # takes the new node when it joins. Does nothing where the autoscaler scales
+  # up for runners by itself.
+  nudge:
+    enabled: true
+    # Only sleeps; mirror it for private registries (imagePullSecrets apply).
+    image: registry.k8s.io/pause:3.10
+    # Wait before asking again for a runner that's still Pending. Must outlast
+    # a node's boot, or a second node gets requested while the first boots.
+    cooldownSeconds: 180
+  extraEnv: []
+
+  # The scaler always listens on this port (container port `metrics`,
+  # SCALER_METRICS_ADDR=:<port>): /metrics, plus /healthz and /readyz for the
+  # probes.
+  # metrics.enabled only adds a Service (and optionally a ServiceMonitor).
+  metrics:
+    enabled: false
+    port: 9090
+    # Needs the Prometheus Operator CRDs; skipped when the API isn't there.
+    serviceMonitor:
+      enabled: false
+      interval: 30s
+      labels: {}
+
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { memory: 128Mi }
+  podAnnotations: {}
+  podLabels: {}
+  # The Go image is distroless and runs as non-root. runAsUser is explicit:
+  # the kubelet can't verify runAsNonRoot against a named USER (distroless
+  # `nonroot` = 65532). fsGroup makes the credentials Secret's files group-owned
+  # by that GID, so they're readable with mode 0440 (see the Deployment).
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# Egress isolation for runner pods (run controllers' nested traffic leaves
+# through the pod IP, so they and the agents alike), step pods and reap Job
+# pods (component=reaper, set by the scaler). Needs a CNI that enforces
+# NetworkPolicy (Calico, Cilium, ...); others silently ignore it. It blocks
+# the Kubernetes API too, which the steps broker needs: allow the API server's
+# endpoint in extraEgress.
+#
+# IPv4 by default: no IPv6 egress is allowed at all. On dual-stack clusters,
+# list the IPv6 pod/service/node CIDRs in clusterCIDRs too, which opens IPv6
+# egress except those.
+networkPolicy:
+  enabled: false
+  # Pod, service and node CIDRs, plus the Kubernetes API endpoint if it's
+  # outside them. Required when enabled: workflows must not reach the cluster.
+  clusterCIDRs: []
+  # Block the cloud metadata endpoint (169.254.169.254).
+  blockMetadata: true
+  # Also block AWS's IPv6 metadata endpoint (fd00:ec2::254). Only matters when
+  # IPv6 egress is open (IPv6 entries in clusterCIDRs).
+  blockMetadataIPv6: false
+  # Allow DNS to the cluster resolver. Off = workflows and agents must resolve
+  # through an external resolver.
+  allowClusterDNS: true
+  dnsSelector:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: kube-system
+    podSelector:
+      matchLabels:
+        k8s-app: kube-dns
+  # Extra egress rules (NetworkPolicyEgressRule list), added as-is.
+  extraEgress: []
+
+# Keeps node drains from evicting the last runner: SG pauses workflows while no
+# runner is ACTIVE. With a single awake runner it blocks drains until the
+# scaler wakes another; use scaler.min >= 2 alongside it.
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+# `helm uninstall` cleans up after itself: a pre-delete hook Job stops the
+# scaler, parks every runner (each waits for its running workflows), then
+# deregisters every runner from StackGuardian from its state PVC and deletes
+# the runners' PVCs. If a runner can't be deregistered, the hook fails and
+# keeps that runner's PVCs, so nothing is orphaned; fix it and uninstall again.
+#
+# Runners finish running workflows first: pass a `helm uninstall --timeout`
+# that covers them (Helm's default is 5m). `helm uninstall --no-hooks` skips
+# the cleanup: runners stay registered and parked, PVCs stay.
+uninstall:
+  deregister: true
+  # Upper bound for the whole cleanup; empty = runner.terminationGracePeriodSeconds + 15 minutes.
+  activeDeadlineSeconds:
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { memory: 128Mi }

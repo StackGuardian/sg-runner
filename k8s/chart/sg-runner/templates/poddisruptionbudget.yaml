@@ -1,0 +1,16 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- $component := dict "ctx" . "component" "runner" }}
+# Keeps voluntary disruptions (node drains) from evicting the last runner: SG
+# pauses workflows while no runner is ACTIVE.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "sg-runner.runnerName" . }}
+  labels:
+    {{- include "sg-runner.labels" $component | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "sg-runner.selectorLabels" $component | nindent 6 }}
+{{- end }}

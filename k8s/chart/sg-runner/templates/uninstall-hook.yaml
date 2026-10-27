@@ -1,0 +1,144 @@
+{{- if .Values.uninstall.deregister }}
+{{- $u := .Values.uninstall }}
+{{- $s := .Values.scaler }}
+{{- $name := printf "%s-uninstall" (include "sg-runner.fullname" .) }}
+{{- $sts := include "sg-runner.runnerName" . }}
+{{- $scaler := include "sg-runner.scalerName" . }}
+{{- $component := dict "ctx" . "component" "uninstall" }}
+{{- $deadline := $u.activeDeadlineSeconds | default (add .Values.runner.terminationGracePeriodSeconds 900) }}
+# `helm uninstall` cleanup: before Helm deletes the release, park every runner,
+# deregister each from StackGuardian and delete the runners' PVCs (which
+# aren't part of the release). Its own ServiceAccount and Role, created as
+# hooks too, so it works with the scaler disabled. Skipped by
+# `helm uninstall --no-hooks`.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "sg-runner.labels" $component | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "sg-runner.labels" $component | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+  {{- if $s.enabled }}
+  # Stop the scaler first, so it doesn't wake or park runners meanwhile.
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    resourceNames: [{{ $scaler | quote }}]
+    verbs: ["get", "patch"]
+  {{- end }}
+  # Park every runner.
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "statefulsets/scale"]
+    resourceNames: [{{ $sts | quote }}]
+    verbs: ["get", "patch"]
+  # Wait for the scaler and runner pods to be gone.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  # Find the runners' PVCs; delete them once deregistered.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["list", "delete"]
+  # Reap Jobs deregister each runner from its state PVC.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "sg-runner.labels" $component | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+# Kept when it fails, for its logs: kubectl logs job/{{ $name }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "sg-runner.labels" $component | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  # Running workflows finish first (runner.terminationGracePeriodSeconds),
+  # then the reaps.
+  activeDeadlineSeconds: {{ $deadline }}
+  template:
+    metadata:
+      labels:
+        {{- include "sg-runner.selectorLabels" $component | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $name }}
+      restartPolicy: Never
+      {{- with include "sg-runner.imagePullSecrets" . }}
+      imagePullSecrets:
+        {{- . | nindent 8 }}
+      {{- end }}
+      {{- with $s.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        # The scaler's binary, `teardown` mode.
+        - name: uninstall
+          image: {{ include "sg-runner.scalerImage" . }}
+          imagePullPolicy: {{ $s.image.pullPolicy }}
+          {{- with $s.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          args: ["teardown"]
+          {{- with $s.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            {{- include "sg-runner.reapEnv" . | nindent 12 }}
+            - { name: TEARDOWN_RUNNER_SELECTOR, value: {{ include "sg-runner.selectorLabels" (dict "ctx" . "component" "runner") | fromYaml | include "sg-runner.selectorString" | quote }} }
+            {{- if $s.enabled }}
+            - { name: TEARDOWN_SCALER_DEPLOYMENT, value: {{ $scaler | quote }} }
+            - { name: TEARDOWN_SCALER_SELECTOR, value: {{ include "sg-runner.selectorLabels" (dict "ctx" . "component" "scaler") | fromYaml | include "sg-runner.selectorString" | quote }} }
+            {{- end }}
+          {{- with $u.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with $s.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $s.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

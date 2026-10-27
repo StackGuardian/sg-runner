@@ -1,0 +1,80 @@
+{{- if .Values.scaler.enabled }}
+{{- $name := include "sg-runner.scalerName" . }}
+{{- $sts := include "sg-runner.runnerName" . }}
+{{- $component := dict "ctx" . "component" "scaler" }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "sg-runner.labels" $component | nindent 4 }}
+---
+# Only the runner StatefulSet and its scale, PVCs, reap Jobs, its own lease and
+# events. Runner pods' steps brokers have their own Role ({{ $sts }}).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "sg-runner.labels" $component | nindent 4 }}
+rules:
+  # Read replicas; patch for the scaler's timer annotations.
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    resourceNames: [{{ $sts | quote }}]
+    verbs: ["get", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets/scale"]
+    resourceNames: [{{ $sts | quote }}]
+    verbs: ["get", "patch"]
+  # Parked-at stamps, and deleting a reaped runner's PVCs.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["list", "get", "patch", "delete"]
+  # Reap Jobs deregister long-parked runners from their PVC; the scaler lists
+  # them to find reaps in progress. Placeholder Jobs ask the cluster
+  # autoscaler for nodes (scaler.nudge).
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "delete"]
+  {{- if .Values.scaler.nudge.enabled }}
+  # Read only: runner pods the scheduler can't place, and whether the
+  # cluster autoscaler refused to add a node for them.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list"]
+  {{- end }}
+  {{- if .Values.scaler.leaderElection.enabled }}
+  # Leader election: one active scaler per StatefulSet. create can't be
+  # restricted by name (the object doesn't exist yet), get/update can.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: [{{ printf "%s-scaler" $sts | quote }}]
+    verbs: ["get", "update"]
+  {{- end }}
+  # Scaling decisions as Kubernetes events.
+  - apiGroups: ["", "events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "sg-runner.labels" $component | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

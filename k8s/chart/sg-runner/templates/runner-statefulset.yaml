@@ -1,0 +1,323 @@
+{{- $name := include "sg-runner.runnerName" . }}
+{{- $secret := include "sg-runner.credentialsSecretName" . }}
+{{- $config := include "sg-runner.configName" . }}
+{{- $image := include "sg-runner.image" . }}
+{{- $component := dict "ctx" . "component" "runner" }}
+{{- $steps := .Values.runner.steps }}
+# Each replica is one registered runner.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "sg-runner.labels" $component | nindent 4 }}
+spec:
+  serviceName: {{ $name }}
+  {{- if not .Values.scaler.enabled }}
+  replicas: {{ .Values.runner.replicas }}
+  {{- end }}
+  {{- /* With the scaler, no replicas: it owns them, and Helm's 3-way merge
+  keeps the live value on upgrade. A new StatefulSet starts with 1. */}}
+  # Park and wake runners side by side, not one at a time (each park can wait
+  # for running workflows).
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "sg-runner.selectorLabels" $component | nindent 6 }}
+  template:
+    metadata:
+      # Selector labels only: a chart version label here would roll (drain)
+      # every runner on each chart upgrade.
+      labels:
+        {{- include "sg-runner.selectorLabels" $component | nindent 8 }}
+        {{- with .Values.runner.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- include "sg-runner.configChecksum" $ | nindent 8 }}
+        {{- with .Values.runner.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      # For the steps broker only: the token is mounted in that container alone.
+      serviceAccountName: {{ $name }}
+      {{- with include "sg-runner.imagePullSecrets" . }}
+      imagePullSecrets:
+        {{- . | nindent 8 }}
+      {{- end }}
+      # Upper bound on how long a terminating runner waits for running
+      # workflows (the ecs-agent preStop hook) before it is killed.
+      terminationGracePeriodSeconds: {{ .Values.runner.terminationGracePeriodSeconds }}
+      initContainers:
+        - name: register
+          image: {{ $image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ['register']
+          # Only what registration needs.
+          env:
+            - name: SG_NODE_TOKEN
+              valueFrom:
+                secretKeyRef: { name: {{ $secret }}, key: SG_NODE_TOKEN }
+            - name: SG_ORGANIZATION
+              valueFrom:
+                configMapKeyRef: { name: {{ $config }}, key: SG_ORGANIZATION }
+            - name: SG_RUNNER_GROUP
+              valueFrom:
+                configMapKeyRef: { name: {{ $config }}, key: SG_RUNNER_GROUP }
+            - name: SG_BASE_API
+              valueFrom:
+                configMapKeyRef: { name: {{ $config }}, key: SG_BASE_API, optional: true }
+            # A runner registered with another size than the agent will
+            # advertise (below) registers again (runner.reregisterOnResize).
+            - { name: SG_REREGISTER_ON_RESIZE, value: {{ .Values.runner.reregisterOnResize | quote }} }
+            {{- include "sg-runner.advertiseEnv" . | nindent 12 }}
+          volumeMounts:
+            - { name: state, mountPath: /etc/ecs, subPath: ecs-config }
+            # Agent state, wiped with the rest when it registers again.
+            - { name: state, mountPath: /var/lib/ecs/data, subPath: ecs-data }
+            - { name: state, mountPath: /var/lib/amazon/ssm, subPath: ssm }
+            - { name: state, mountPath: /var/log/registration, subPath: registration }
+        {{- $broker := $steps.broker }}
+        {{- $step := $steps.step }}
+        # Runs each workflow step as a pod on this node, for the run
+        # controllers (k8s/docs/steps-api.md), and guards dockerd (authorization
+        # plugin). The only container with API access. A native sidecar: it
+        # starts before dockerd and stops after every other container, so it
+        # outlives the drain.
+        - name: steps
+          image: {{ include "sg-runner.brokerImage" . }}
+          imagePullPolicy: {{ $broker.image.pullPolicy }}
+          restartPolicy: Always
+          command: ['/sg-runner-steps']
+          args: ['serve']
+          env:
+            - name: RUNNER_POD_NAME
+              valueFrom:
+                fieldRef: { fieldPath: metadata.name }
+            - name: RUNNER_POD_UID
+              valueFrom:
+                fieldRef: { fieldPath: metadata.uid }
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef: { fieldPath: spec.nodeName }
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef: { fieldPath: metadata.namespace }
+            - { name: SOCKET_PATH, value: /run/sg-steps/steps.sock }
+            # dockerd's authorization plugin, on the docker-plugins volume.
+            - { name: GUARD_SOCKET, value: /run/sg-guard/sg-steps-guard.sock }
+            # Its own image: step pods' wrapper init container.
+            - { name: BROKER_IMAGE, value: {{ include "sg-runner.brokerImage" . | quote }} }
+            - { name: BROKER_IMAGE_PULL_POLICY, value: {{ $broker.image.pullPolicy | quote }} }
+            {{- with include "sg-runner.pullSecretNames" . }}
+            - { name: BROKER_IMAGE_PULL_SECRETS, value: {{ . | quote }} }
+            {{- end }}
+            - { name: WORKSPACES_DIR, value: /var/tmp/workspace }
+            # The workspace volume's PVC (generic ephemeral: <pod>-<volume>).
+            - { name: WORKSPACE_CLAIM, value: $(RUNNER_POD_NAME)-workspace }
+            - name: STEP_LABELS
+              value: {{ include "sg-runner.selectorLabels" (dict "ctx" . "component" "step") | fromYaml | toJson | quote }}
+            - name: STEP_NODE_SELECTOR
+              value: {{ default .Values.runner.nodeSelector $step.nodeSelector | default dict | toJson | quote }}
+            - name: STEP_TOLERATIONS
+              value: {{ default .Values.runner.tolerations $step.tolerations | default list | toJson | quote }}
+            - { name: SCHEDULING_TIMEOUT, value: {{ $steps.schedulingTimeout | quote }} }
+            - { name: START_TIMEOUT, value: {{ $steps.startTimeout | quote }} }
+            - { name: FINISHED_TTL, value: {{ $steps.finishedTTL | quote }} }
+            {{- with $step.imagePullPolicy }}
+            - { name: STEP_IMAGE_PULL_POLICY, value: {{ . }} }
+            {{- end }}
+            {{- with $broker.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          # dockerd starts once this passes: its guard socket must exist.
+          startupProbe:
+            exec:
+              command: ['/sg-runner-steps', 'healthcheck']
+            periodSeconds: 2
+            timeoutSeconds: 6
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: ['/sg-runner-steps', 'healthcheck']
+            periodSeconds: 10
+            timeoutSeconds: 6
+          {{- with $broker.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - { name: steps-socket, mountPath: /run/sg-steps }
+            - { name: docker-plugins, mountPath: /run/sg-guard }
+            - { name: steps-api-access, mountPath: /var/run/secrets/kubernetes.io/serviceaccount, readOnly: true }
+      containers:
+        - name: dockerd
+          image: {{ $image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ['dockerd']
+          {{- with .Values.runner.dockerd.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.runner.dockerd.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # Only run controllers run inside this container (their steps are
+          # pods); the ECS agent advertises the runner's size (SG_TASK_*).
+          resources:
+            {{- include "sg-runner.dockerdResources" . | nindent 12 }}
+          lifecycle:
+            preStop:
+              exec:
+                command: ['/opt/sg-runner/runner.sh', 'wait-drained']
+          readinessProbe:
+            exec:
+              command: ['docker', 'network', 'inspect', 'sg-net']
+            periodSeconds: 10
+          volumeMounts:
+            - { name: docker-run, mountPath: /var/run }
+            - { name: docker, mountPath: /var/lib/docker }
+            # Where dockerd finds the steps broker's authorization plugin.
+            - { name: docker-plugins, mountPath: /run/docker/plugins }
+            # Same path the agent's ECS_HOST_DATA_DIR points at.
+            - { name: state, mountPath: /var/lib/ecs/data, subPath: ecs-data }
+            # Run controller containers bind-mount this path from this daemon's
+            # filesystem; step pods mount the same PVC.
+            - { name: workspace, mountPath: /var/tmp/workspace }
+            # The steps broker's socket, where run controllers look for it.
+            - { name: steps-socket, mountPath: /var/tmp/workspace/.sg-runner }
+        - name: ssm-agent
+          image: {{ $image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ['ssm-agent']
+          # Keeps rotating the agent's credentials while a drain runs.
+          lifecycle:
+            preStop:
+              exec:
+                command: ['/opt/sg-runner/runner.sh', 'wait-drained']
+          volumeMounts:
+            - { name: state, mountPath: /var/lib/amazon/ssm, subPath: ssm }
+            - { name: aws-creds, mountPath: /root/.aws }
+            - { name: docker-run, mountPath: /var/run }
+        - name: ecs-agent
+          image: {{ $image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ['ecs-agent']
+          env:
+            {{- include "sg-runner.advertiseEnv" . | nindent 12 }}
+            {{- with .Values.runner.ecsAgent.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          lifecycle:
+            preStop:
+              exec:
+                command: ['/opt/sg-runner/runner.sh', 'drain']
+          livenessProbe:
+            exec:
+              command: ['ecs-agent', '--healthcheck']
+            initialDelaySeconds: 120
+            periodSeconds: 30
+          volumeMounts:
+            - { name: state, mountPath: /etc/ecs, subPath: ecs-config }
+            - { name: state, mountPath: /data, subPath: ecs-data }
+            - { name: state, mountPath: /var/lib/ecs/data, subPath: ecs-data }
+            - { name: state, mountPath: /log, subPath: ecs-log }
+            - { name: state, mountPath: /var/lib/amazon/ssm, subPath: ssm }
+            - { name: aws-creds, mountPath: /rotatingcreds, readOnly: true }
+            - { name: docker-run, mountPath: /var/run }
+            # Setting the runner's status through SG needs the node token and
+            # runner group.
+            - { name: sg-credentials, mountPath: /etc/sg-runner/credentials, readOnly: true }
+      volumes:
+        - name: docker-run
+          emptyDir: {}
+        - name: aws-creds
+          emptyDir:
+            medium: Memory
+        # A PVC per pod (<pod>-workspace), created and deleted with it, that
+        # step pods mount too.
+        - name: workspace
+          ephemeral:
+            volumeClaimTemplate:
+              metadata:
+                labels:
+                  {{- include "sg-runner.selectorLabels" $component | nindent 18 }}
+              spec:
+                accessModes: {{ toJson $steps.workspace.accessModes }}
+                {{- with $steps.workspace.storageClassName }}
+                storageClassName: {{ . }}
+                {{- end }}
+                resources:
+                  requests:
+                    storage: {{ $steps.workspace.size }}
+        - name: steps-socket
+          emptyDir: {}
+        # The broker's authorization plugin socket, for dockerd.
+        - name: docker-plugins
+          emptyDir: {}
+        # What the pod's automounted token would be (kube-api-access-*), for
+        # the steps container only.
+        - name: steps-api-access
+          projected:
+            defaultMode: 0444
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3607
+              - configMap:
+                  name: kube-root-ca.crt
+                  items: [{ key: ca.crt, path: ca.crt }]
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef: { apiVersion: v1, fieldPath: metadata.namespace }
+        {{- include "sg-runner.credentialsVolume" (dict "ctx" . "mode" "0400") | nindent 8 }}
+      {{- with .Values.runner.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.runner.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with include "sg-runner.runnerAffinity" . }}
+      affinity:
+        {{- . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    # Runner identity (ecs.config, SSM registration, agent state): survives
+    # pod restarts so the runner doesn't re-register. Kept on scale-down too:
+    # a parked runner wakes from it. Not managed by Helm, so uninstall keeps it.
+    - metadata:
+        name: state
+      spec:
+        accessModes: ['ReadWriteOnce']
+        {{- with .Values.runner.storage.state.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.runner.storage.state.size }}
+    # Docker data root: the image cache survives parking.
+    - metadata:
+        name: docker
+      spec:
+        accessModes: ['ReadWriteOnce']
+        {{- with .Values.runner.storage.docker.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.runner.storage.docker.size }}
