@@ -27,7 +27,10 @@ sg:
   # Required.
   organization: ""
   runnerGroup: ""
-  # Empty = https://api.app.stackguardian.io/api/v1.
+  # Where the organization lives: eu (app.stackguardian.io) or us
+  # (us.stackguardian.io). Picks the API URL.
+  region: eu
+  # Overrides region with a full API URL, including /api/v1. Leave empty.
   apiUrl: ""
 
 # The runner group's node token, the only secret: used to register, set runner

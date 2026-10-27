@@ -143,6 +143,14 @@
         "runnerGroup": {
           "type": "string"
         },
+        "region": {
+          "type": "string",
+          "enum": [
+            "eu",
+            "us",
+            "dash"
+          ]
+        },
         "apiUrl": {
           "type": "string",
           "pattern": "^(https?://.+)?$"

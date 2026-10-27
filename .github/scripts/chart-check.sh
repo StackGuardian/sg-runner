@@ -97,6 +97,15 @@ render credentials-create \
   --set sg.apiUrl=http://127.0.0.1:9
 expect_kind credentials-create Secret
 expect_kind credentials-create ConfigMap
+# sg.apiUrl wins over sg.region.
+expect_text credentials-create 'SG_BASE_API: "http://127.0.0.1:9"'
+
+# sg.region picks the API URL; eu by default.
+expect_text defaults 'SG_BASE_API: "https://api.app.stackguardian.io/api/v1"'
+render region-us "${CREDS[@]}" --set sg.region=us
+expect_text region-us 'SG_BASE_API: "https://api.us.stackguardian.io/api/v1"'
+render region-dash "${CREDS[@]}" --set sg.region=dash
+expect_text region-dash 'SG_BASE_API: "https://testapi.qa.stackguardian.io/api/v1"'
 
 render scaler-disabled "${CREDS[@]}" --set scaler.enabled=false --set runner.replicas=2 \
   --set uninstall.deregister=false
@@ -234,6 +243,7 @@ echo "::endgroup::"
 
 echo "::group::rejections"
 reject size-huge 'runner[./]size' "${CREDS[@]}" --set runner.size=huge
+reject unknown-region 'sg[./]region' "${CREDS[@]}" --set sg.region=asia
 reject scaler-min-0 'scaler[./]min' "${CREDS[@]}" --set scaler.min=0
 reject no-credentials 'credentials' --set sg.organization=o --set sg.runnerGroup=g
 reject both-credentials 'not both' "${CREDS[@]}" --set credentials.create=true

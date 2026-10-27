@@ -9,6 +9,4 @@ metadata:
 data:
   SG_ORGANIZATION: {{ .Values.sg.organization | quote }}
   SG_RUNNER_GROUP: {{ .Values.sg.runnerGroup | quote }}
-  {{- with .Values.sg.apiUrl }}
-  SG_BASE_API: {{ . | quote }}
-  {{- end }}
+  SG_BASE_API: {{ include "sg-runner.apiUrl" . | quote }}
