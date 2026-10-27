@@ -229,9 +229,11 @@ from `SCALER_REAP_POD_LABELS`, `SCALER_REAP_IMAGE_PULL_SECRETS`,
 `SCALER_REAP_NODE_SELECTOR` and `SCALER_REAP_TOLERATIONS`; the chart sets them
 from the runner's values.
 
-The scaler reads the SG credentials once, at start: restart it
-(`kubectl rollout restart deploy/<release>-sg-runner-scaler`) after rotating
-the node token.
+The scaler and the runners read the SG settings and node token once, at
+start. A change through Helm (`sg.*`, or the token with `credentials.create`)
+rolls them. A token rotated in an `existingSecret` doesn't: restart both
+(`kubectl rollout restart deploy/<release>-sg-runner-scaler
+sts/<release>-sg-runner`); each runner drains on its way down.
 
 ## Development
 

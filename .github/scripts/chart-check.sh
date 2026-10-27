@@ -106,6 +106,13 @@ render region-us "${CREDS[@]}" --set sg.region=us
 expect_text region-us 'SG_BASE_API: "https://api.us.stackguardian.io/api/v1"'
 render region-dash "${CREDS[@]}" --set sg.region=dash
 expect_text region-dash 'SG_BASE_API: "https://testapi.qa.stackguardian.io/api/v1"'
+# Runner and scaler read the config and token once at start: a change rolls
+# both. Only a chart-managed token can be hashed.
+expect_count defaults 'checksum/config:' 2
+expect_count defaults 'checksum/token:' 0
+expect_count credentials-create 'checksum/token:' 2
+[[ $(grep -m1 'checksum/config:' "$OUT/defaults.yaml") != $(grep -m1 'checksum/config:' "$OUT/region-us.yaml") ]] \
+  || { echo "::error title=helm template::checksum/config doesn't change with sg.region"; failed=1; }
 
 render scaler-disabled "${CREDS[@]}" --set scaler.enabled=false --set runner.replicas=2 \
   --set uninstall.deregister=false
