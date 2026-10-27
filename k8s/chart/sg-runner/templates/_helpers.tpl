@@ -184,6 +184,14 @@ SG_BASE_API). Fails rendering without sg.organization and sg.runnerGroup.
 {{- end }}
 
 {{/*
+StackGuardian API URL: sg.apiUrl when set, else the one for sg.region.
+*/}}
+{{- define "sg-runner.apiUrl" -}}
+{{- $urls := dict "eu" "https://api.app.stackguardian.io/api/v1" "us" "https://api.us.stackguardian.io/api/v1" "dash" "https://testapi.qa.stackguardian.io/api/v1" }}
+{{- .Values.sg.apiUrl | default (get $urls (.Values.sg.region | default "eu")) }}
+{{- end }}
+
+{{/*
 The runner group settings and node token as files in one directory
 (/etc/sg-runner/credentials), as runner.sh and the scaler read them: the
 ConfigMap plus only the SG_NODE_TOKEN key of the Secret. Pass the root context

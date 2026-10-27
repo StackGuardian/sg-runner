@@ -17,14 +17,15 @@ all with the same version (the chart's defaults point at its own release's
 images). Versions are on the repository's releases (`k8s/v*` tags).
 
 Only the runner group's node token is secret. The organization, runner group
-and API URL are plain values (`sg.*`); the chart keeps them in a ConfigMap.
+and region (`eu` or `us`; it picks the API URL) are plain values
+(`sg.*`); the chart keeps them in a ConfigMap.
 
 ```sh
 kubectl create namespace sg-runner
 kubectl -n sg-runner create secret generic sg-runner-credentials \
   --from-literal=SG_NODE_TOKEN=...
 helm -n sg-runner upgrade --install sg-runner oci://ghcr.io/stackguardian/charts/sg-runner --version <v> \
-  --set sg.organization=<org> --set sg.runnerGroup=<runner group> \
+  --set sg.organization=<org> --set sg.runnerGroup=<runner group> --set sg.region=eu \
   --set credentials.existingSecret=sg-runner-credentials --set runner.size=medium
 ```
 
@@ -178,7 +179,8 @@ stays.
 | `image.repository` / `.tag` / `.pullPolicy` | `ghcr.io/stackguardian/sg-runner-k8s` / `""` / `IfNotPresent` | Runner image; also used by reap Jobs. Empty tag = `appVersion` (the release's version). |
 | `imagePullSecrets` | `[]` | For runner, scaler and reap Job pods (and native steps' wrapper). Secret names or `{name: ...}` objects, mixed as you like. |
 | `sg.organization` / `sg.runnerGroup` | `""` | Required: the runner group to register into. In the `<release>-config` ConfigMap. |
-| `sg.apiUrl` | `""` | StackGuardian API; empty = `https://api.app.stackguardian.io/api/v1`. |
+| `sg.region` | `eu` | Where the organization lives: `eu` (app.stackguardian.io) or `us` (us.stackguardian.io). Sets the API URL. |
+| `sg.apiUrl` | `""` | Overrides `sg.region` with a full API URL, including `/api/v1`. |
 | `credentials.existingSecret` | `""` | Secret with key `SG_NODE_TOKEN` (the runner group's node token); other keys are ignored. |
 | `credentials.create` / `nodeToken` | `false` / `""` | Create that Secret from `nodeToken`. Exactly one of this or `existingSecret`. |
 | `runner.replicas` | `1` | Only with `scaler.enabled=false`. |

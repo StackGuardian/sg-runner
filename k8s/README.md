@@ -69,6 +69,7 @@ kubectl -n sg-runner create secret generic sg-runner-credentials \
 helm upgrade --install sg-runner oci://ghcr.io/stackguardian/charts/sg-runner --version <v> \
   -n sg-runner \
   --set sg.organization=<org> --set sg.runnerGroup=<runner group> \
+  --set sg.region=eu \
   --set credentials.existingSecret=sg-runner-credentials \
   --set runner.size=medium
 ```
