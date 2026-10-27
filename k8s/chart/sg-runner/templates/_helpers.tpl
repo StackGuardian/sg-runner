@@ -192,6 +192,21 @@ StackGuardian API URL: sg.apiUrl when set, else the one for sg.region.
 {{- end }}
 
 {{/*
+Hashes of the runner group config and, with credentials.create, the node
+token, as pod annotations: runner.sh and the scaler read them once at start,
+so a change must roll their pods. The data only, not the rendered objects:
+their chart version label would roll (drain) every runner on each chart
+upgrade. A token in an existingSecret is invisible to the chart: rotating it
+needs a rollout restart.
+*/}}
+{{- define "sg-runner.configChecksum" -}}
+checksum/config: {{ list .Values.sg.organization .Values.sg.runnerGroup (include "sg-runner.apiUrl" .) | join "\n" | sha256sum | quote }}
+{{- if .Values.credentials.create }}
+checksum/token: {{ .Values.credentials.nodeToken | sha256sum | quote }}
+{{- end }}
+{{- end }}
+
+{{/*
 The runner group settings and node token as files in one directory
 (/etc/sg-runner/credentials), as runner.sh and the scaler read them: the
 ConfigMap plus only the SG_NODE_TOKEN key of the Secret. Pass the root context
