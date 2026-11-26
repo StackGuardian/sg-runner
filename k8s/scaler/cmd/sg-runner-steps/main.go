@@ -1,7 +1,8 @@
 // sg-runner-steps is the step broker: a native sidecar of the runner pod that
 // runs each workflow step of the run controllers as a pod of its own, and
 // serves dockerd the sg-steps-guard authorization plugin, which refuses step
-// containers in dockerd. See k8s/docs/steps-api.md.
+// containers in dockerd. The run controllers call it over the step broker
+// API (a unix socket).
 //
 // `sg-runner-steps healthcheck` is its startup and readiness probe: it exits
 // 0 when both sockets answer.

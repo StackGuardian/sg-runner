@@ -5,7 +5,7 @@
 // zombies, and exits 0 for the exit codes StackGuardian gives meaning to (11:
 // approval required, 12: finished early), leaving the code in the
 // container's termination message, so the pod ends Completed rather than
-// Failed. See k8s/docs/steps-api.md.
+// Failed.
 package wrapper
 
 import (

@@ -204,7 +204,9 @@ jobs:
           prerelease=()
           [[ $VERSION == *-* ]] && prerelease=(--prerelease)
           cat >"$RUNNER_TEMP/notes.md" <<EOF
-          Kubernetes runner $VERSION (beta).
+          Kubernetes runner $VERSION.
+
+          Prototype, not supported. Workflows run only with a run controller release that supports the step broker, which is not released yet.
 
           Install the chart:
 

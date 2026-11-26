@@ -81,7 +81,7 @@ spec:
         {{- $broker := $steps.broker }}
         {{- $step := $steps.step }}
         # Runs each workflow step as a pod on this node, for the run
-        # controllers (k8s/docs/steps-api.md), and guards dockerd (authorization
+        # controllers (step broker API), and guards dockerd (authorization
         # plugin). The only container with API access. A native sidecar: it
         # starts before dockerd and stops after every other container, so it
         # outlives the drain.

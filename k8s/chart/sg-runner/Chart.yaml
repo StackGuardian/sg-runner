@@ -4,8 +4,9 @@ description: StackGuardian Private Runner on Kubernetes (prototype). Each Statef
 type: application
 # Chart version, bumped on every chart change.
 version: 0.9.0
-# The prototype image is built locally (`make build`), there is no released
-# tag yet. Used as the image tag when image.tag is empty.
+# `dev` is for local builds (`make build`). The release workflow packages the
+# chart with the release's version (the `k8s/v*` tag without its prefix) as
+# both version and appVersion. Used as the image tag when image.tag is empty.
 appVersion: "dev"
 # The steps broker is a native sidecar (init container with restartPolicy
 # Always).

@@ -1,7 +1,7 @@
 # sg-runner-scaler: sizes the runner StatefulSet (see k8s/README.md,
 # "Autoscaling"). The image also carries /sg-runner-steps, the step broker
 # running in each runner pod, and /sg-step-wrapper, which step pods' init
-# container installs (see k8s/docs/steps-api.md). Build from k8s/scaler:
+# container installs. Build from k8s/scaler:
 #   docker build -t sg-runner-scaler:dev .
 #   docker buildx build --platform linux/amd64,linux/arm64 -t sg-runner-scaler:dev .
 

@@ -1,16 +1,20 @@
 # sg-runner Helm chart (prototype)
 
-> **Status: prototype.** Not supported, not documented for customers.
+> **Status: prototype, not supported.** Workflows run only with a run
+> controller release that supports the step broker, and that release is not
+> out yet. If the run controller lacks it, the runner refuses to start the
+> workflow's steps and those steps fail with an error.
 
 Runs StackGuardian Private Runners on Kubernetes (≥ 1.29). Each replica of the
 runner StatefulSet is one registered runner on a node of its own, running each
 workflow step as a pod ([How a runner runs workflows](#how-a-runner-runs-workflows));
 a scaler Deployment wakes, parks and reaps runners from the runner group's
-queue. Design and known gaps: [`k8s/README.md`](../../README.md).
+queue. Design and known limitations: `k8s/README.md` in
+https://github.com/StackGuardian/sg-runner.
 
 ## Install
 
-The chart and its images are published to GHCR (beta): the chart as
+The chart and its images are published to GHCR: the chart as
 `oci://ghcr.io/stackguardian/charts/sg-runner`, the images as
 `ghcr.io/stackguardian/sg-runner-k8s` and `ghcr.io/stackguardian/sg-runner-scaler`,
 all with the same version (the chart's defaults point at its own release's
@@ -30,8 +34,7 @@ helm -n sg-runner upgrade --install sg-runner oci://ghcr.io/stackguardian/charts
 ```
 
 From a checkout, `./k8s/chart/sg-runner` works the same; its images default to
-the `dev` tag, so set `image.*` and `scaler.image.*` to images you built
-(`make up` does).
+the `dev` tag, so set `image.*` and `scaler.image.*` to images you built.
 
 Or let the chart create the Secret too (`credentials.create=true`,
 `credentials.nodeToken=...`), with `--create-namespace`: one `helm install`.
@@ -45,11 +48,9 @@ Security, label the namespace first; the chart doesn't create or label it:
 kubectl label namespace sg-runner pod-security.kubernetes.io/enforce=privileged
 ```
 
-From `k8s/`, `make secret up` does the same against OrbStack.
-
-Release `sg-runner` names the StatefulSet `sg-runner`, so pods `sg-runner-N` and
-PVCs `state-sg-runner-N` / `docker-sg-runner-N`. Other release names get
-`<release>-sg-runner`. Don't rename an existing install: the runners
+A release name that contains `sg-runner` is used as is for the StatefulSet:
+release `sg-runner` gives pods `sg-runner-N` and PVCs `state-sg-runner-N` /
+`docker-sg-runner-N`. Other release names get `<release>-sg-runner`. Don't rename an existing install: the runners
 registered from the old PVCs would be orphaned.
 
 ## Uninstall
@@ -90,7 +91,7 @@ Each runner pod takes a node of its own. Its run controllers (the ECS tasks)
 run in the pod's nested Docker (`dockerd`); each workflow step runs as a pod
 of its own on the runner's node. A `steps` sidecar in the runner pod (the
 broker, `/sg-runner-steps` in the scaler image) creates the step pods for the
-controllers over a unix socket ([`steps-api.md`](../../docs/steps-api.md)).
+controllers, which call it over a unix socket.
 
 - **One runner per node.** A required pod anti-affinity on
   `kubernetes.io/hostname` is appended to `runner.affinity`'s own
@@ -116,7 +117,7 @@ controllers over a unix socket ([`steps-api.md`](../../docs/steps-api.md)).
   automount stays off; only the `steps` container mounts a token.
 - **Logs**: steps are pods, so
   `kubectl logs -l app.kubernetes.io/component=step` shows them. Finished
-  step pods stay for `runner.steps.finishedTTL` (1h), labelled with their
+  step pods stay for `runner.steps.finishedTTL` (1h), labeled with their
   outcome; their Secrets (env, registry credentials) are deleted as soon as
   they finish:
   `kubectl get pods -l app.kubernetes.io/component=step -L sg-runner.stackguardian.io/outcome`.
@@ -140,7 +141,7 @@ controllers over a unix socket ([`steps-api.md`](../../docs/steps-api.md)).
 
 ## Runner size
 
-`runner.size` sets what the runner advertises to SG for workflows (step pods
+`runner.size` sets what the runner advertises to StackGuardian for workflows (step pods
 and run controllers together), and the resources of the `dockerd` container,
 which only holds the run controllers. Nothing is kept back for dockerd.
 
@@ -154,8 +155,10 @@ which only holds the run controllers. Nothing is kept back for dockerd.
 A workflow reserves 0.5 vCPU / 512 MiB for its run controller plus its own
 setting (default 0.5 vCPU / 1 GiB): 1 vCPU / 1.5 GiB by default. The runner
 must be at least the largest workflow + 0.5 vCPU / 512 MiB, else that workflow
-stays queued (the scaler warns). Size the controllers' memory limit at ~512Mi
-per concurrent workflow run.
+stays queued (the scaler warns with a `StuckQueue` Event instead of waking
+every runner). So `small` runs 2 default workflows at once, `medium` 4 and
+`large` 8. Size the controllers' memory limit at ~512Mi per concurrent
+workflow run.
 
 The node needs the advertised capacity free for step pods, plus the runner
 pod's own requests. The agent can't advertise more than the node has, and
@@ -167,9 +170,28 @@ registration, so a new size alone changes nothing. With
 `runner.reregisterOnResize` (default), a runner pod that starts with another
 size than its registration (`runner.size` or `runner.advertise` changed)
 deregisters and registers again, if nothing runs on it; it gets a new runner
-ID in SG. With tasks running or pending it keeps the old size and logs a
-warning; restart it once idle. If SG can't be read, the old registration
+ID in StackGuardian. With tasks running or pending it keeps the old size and logs a
+warning; restart it once idle. If StackGuardian can't be read, the old registration
 stays.
+
+## Docker cleanup
+
+The `dockerd` container prunes the nested Docker itself: once at start (a
+runner may park before a full interval) and then every
+`SG_PRUNE_INTERVAL_SECONDS`. Set these with `runner.dockerd.extraEnv`:
+
+| Env (on `dockerd`) | Default | |
+|---|---|---|
+| `SG_PRUNE_INTERVAL_SECONDS` | `14400` (4h) | `0` turns cleanup off |
+| `SG_PRUNE_UNTIL` | `24h` | minimum age of stopped containers, images and build cache it removes |
+| `SG_PRUNE_IMAGES_ABOVE_PCT` | `70` | unused images go only once the Docker volume is this full (`0`: every run) |
+
+Every sweep that can remove a container is age-guarded, so containers the ECS
+agent created but hasn't started yet are kept. Volumes are pruned on their own
+(`docker volume prune`). Unused images are the cache that makes waking fast,
+so they're kept until the volume fills up. Docker filters images by creation
+time, not last use, so a prune under pressure removes every unused image
+older than `SG_PRUNE_UNTIL`.
 
 ## Values
 
@@ -177,7 +199,7 @@ stays.
 |---|---|---|
 | `nameOverride` / `fullnameOverride` | `""` | Rename resources; `fullnameOverride` also renames the StatefulSet (max 52 chars). |
 | `image.repository` / `.tag` / `.pullPolicy` | `ghcr.io/stackguardian/sg-runner-k8s` / `""` / `IfNotPresent` | Runner image; also used by reap Jobs. Empty tag = `appVersion` (the release's version). |
-| `imagePullSecrets` | `[]` | For runner, scaler and reap Job pods (and native steps' wrapper). Secret names or `{name: ...}` objects, mixed as you like. |
+| `imagePullSecrets` | `[]` | For runner, scaler and reap Job pods (and the step pods' wrapper init container). Secret names or `{name: ...}` objects, mixed as you like. |
 | `sg.organization` / `sg.runnerGroup` | `""` | Required: the runner group to register into. In the `<release>-config` ConfigMap. |
 | `sg.region` | `eu` | Where the organization lives: `eu` (app.stackguardian.io) or `us` (us.stackguardian.io). Sets the API URL. |
 | `sg.apiUrl` | `""` | Overrides `sg.region` with a full API URL, including `/api/v1`. |
@@ -185,11 +207,11 @@ stays.
 | `credentials.create` / `nodeToken` | `false` / `""` | Create that Secret from `nodeToken`. Exactly one of this or `existingSecret`. |
 | `runner.replicas` | `1` | Only with `scaler.enabled=false`. |
 | `runner.size` | `small` | `small`, `medium`, `large` or `custom`: what the runner advertises and the controllers' room ([Runner size](#runner-size)). |
-| `runner.advertise.cpu` / `.memory` | empty | `size=custom` only, required: what the runner advertises to SG. Whole CPUs; `<n>Mi` or `<n>Gi`. |
+| `runner.advertise.cpu` / `.memory` | empty | `size=custom` only, required: what the runner advertises to StackGuardian. Whole CPUs; `<n>Mi` or `<n>Gi`. |
 | `runner.controllerResources` | `{}` | `size=custom` only, limits required: dockerd resources (run controllers only); ~512Mi per concurrent run. |
 | `runner.storage.state.size` / `.storageClassName` | `1Gi` / `""` | Runner identity PVC. Empty class = cluster default. |
 | `runner.storage.docker.size` / `.storageClassName` | `20Gi` / `""` | Docker data root PVC (image cache). |
-| `runner.dockerd.securityContext` | `{privileged: true}` | Nested Docker needs privileged for now. |
+| `runner.dockerd.securityContext` | `{privileged: true}` | Nested Docker needs privileged. |
 | `runner.dockerd.extraEnv` | `[]` | Extra env vars for the `dockerd` container (advanced/testing, e.g. `SG_PRUNE_INTERVAL_SECONDS=0` turns off the nested Docker prune loop). |
 | `runner.ecsAgent.extraEnv` | `[]` | Extra env vars for the `ecs-agent` container (advanced/testing, e.g. `ECS_IMAGE_PULL_BEHAVIOR=prefer-cached`). |
 | `runner.steps.workspace.size` / `.storageClassName` / `.accessModes` | `20Gi` / `""` / `[ReadWriteOnce]` | Workspace PVC per pod (`<pod>-workspace`) at `/var/tmp/workspace` on dockerd, mounted by step pods. Empty class = cluster default. |
@@ -207,7 +229,7 @@ stays.
 | `scaler.command` | `[]` | Empty = image entrypoint. |
 | `scaler.replicas` | `1` | 2 is safe with leader election; > 1 without it fails rendering. |
 | `scaler.leaderElection.enabled` | `true` | `SCALER_LEADER_ELECT`; lease `<statefulset>-scaler`. Also switches the rollout to `RollingUpdate`. |
-| `scaler.min` | `1` | `SCALER_MIN`, ≥ 1 (SG pauses workflows without an ACTIVE runner). |
+| `scaler.min` | `1` | `SCALER_MIN`, ≥ 1 (StackGuardian pauses workflows without an ACTIVE runner). |
 | `scaler.max` | `10` | `SCALER_MAX`, also capped by `MaxNumberOfRunners`. |
 | `scaler.headroomPct` | `0` | `SCALER_HEADROOM_PCT`: capacity to keep free, 0 = off. |
 | `scaler.idleSeconds` | `60` | `SCALER_IDLE_SECONDS`: idle time before parking. |
@@ -244,7 +266,7 @@ stays.
   which resets the StatefulSet to 1 replica: every other runner parks until the
   scaler wakes them for queued work.
 - **Cluster autoscaler and runner volumes.** Some cluster autoscalers (GKE's,
-  at least) never add a node for a pod with a persistent disk: a runner that
+  for one) never add a node for a pod with a persistent disk: a runner that
   needs a new node, new or waking, stays Pending with `NotTriggerScaleUp …
   didn't match Pod's node affinity/selector`, while the same pod without
   volumes scales up. With `scaler.nudge.enabled` (default), the scaler then
@@ -269,23 +291,10 @@ stays.
   CIDRs are listed in `clusterCIDRs` (dual stack), which opens `::/0` except
   those and, with `blockMetadataIPv6`, the AWS IPv6 metadata endpoint. Other
   clouds' IPv6 metadata addresses aren't covered.
-
-## Migrating from the raw manifests
-
-The old `k8s/manifests/` used `app: sg-runner` selectors. A StatefulSet's
-selector is immutable and Helm won't adopt objects it didn't create, so the
-chart can't take over in place. The PVCs carry the runner identities and keep
-their names (`state-sg-runner-N`, `docker-sg-runner-N`) as long as the release
-is named `sg-runner`, so:
-
-1. Note the current replica count: `kubectl -n sg-runner get sts sg-runner`.
-2. Delete the old scaler, then the StatefulSet (runners drain and park; PVCs
-   stay): `kubectl -n sg-runner delete deploy/sg-runner-scaler sts/sg-runner`,
-   and the old RBAC (`sa`, `role`, `rolebinding` named `sg-runner-scaler`).
-3. Install the chart as release `sg-runner` in the same namespace with
-   `credentials.existingSecret=sg-runner-credentials` plus `sg.organization`
-   and `sg.runnerGroup` (`make up`). Only the Secret's `SG_NODE_TOKEN` key is
-   used now.
-4. The StatefulSet starts at 1 replica; the scaler wakes the other parked
-   runners as work queues (or reaps them after `parkTTL`). Without the
-   scaler, set `runner.replicas` to the noted count.
+- **Rotating the node token.** The scaler and the runners read the
+  StackGuardian settings and the node token once, at start. A change through
+  Helm (`sg.*`, or the token with `credentials.create`) rolls them. A token
+  rotated in an `existingSecret` doesn't: restart both
+  (`kubectl rollout restart deploy/<statefulset>-scaler sts/<statefulset>`,
+  with the StatefulSet name from [Install](#install)); each runner drains on
+  its way down.

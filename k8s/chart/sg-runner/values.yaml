@@ -52,7 +52,7 @@ runner:
   # Each runner takes a node of its own (required pod anti-affinity, added to
   # runner.affinity). Run controllers run in the runner pod's nested Docker;
   # each workflow step runs as a pod of its own on the runner's node, created
-  # by the `steps` broker sidecar (k8s/docs/steps-api.md).
+  # by the `steps` broker sidecar over the step broker API.
   #
   # The size sets what the runner advertises to SG for workflows (step pods
   # and run controllers together), and the dockerd container's resources,
@@ -140,7 +140,7 @@ runner:
       storageClassName: ""
 
   dockerd:
-    # Nested Docker needs a privileged container for now (see docs/TODO.md).
+    # Nested Docker needs a privileged container.
     securityContext:
       privileged: true
     # Extra env vars for the dockerd container (advanced/testing), e.g. turn

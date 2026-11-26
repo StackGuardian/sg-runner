@@ -2,6 +2,9 @@
 {{- $ns := .Release.Namespace -}}
 sg-runner {{ .Chart.Version }} installed as StatefulSet {{ $ns }}/{{ $sts }} (size: {{ .Values.runner.size }}).
 
+WARNING: prototype, not supported. Workflows run only with a run controller
+release that supports the step broker, which is not released yet.
+
 Runner group: {{ .Values.sg.organization }}/{{ .Values.sg.runnerGroup }}. Each replica registers one runner on its
 first start.
 
@@ -13,7 +16,7 @@ namespace needs:
 Runners:
   kubectl -n {{ $ns }} get statefulset,pods -l app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=runner
 
-Parked runners are state PVCs without a pod (still registered in SG, shown as
+Parked runners are state PVCs without a pod (still registered in StackGuardian, shown as
 DRAINING and disconnected):
   kubectl -n {{ $ns }} get pvc | grep '^state-{{ $sts }}-'
 {{- if .Values.scaler.enabled }}
@@ -39,7 +42,7 @@ running workflows, so pass a --timeout that covers them:
   helm -n {{ $ns }} uninstall {{ .Release.Name }} --timeout 30m
 {{- else }}
 uninstall.deregister=false: `helm uninstall` keeps the PVCs, and runners stay
-registered in SG as parked.
+registered in StackGuardian as parked.
 {{- end }}
 {{- $size := include "sg-runner.size" . | fromYaml }}
 
@@ -47,7 +50,7 @@ One runner per node, advertising {{ $size.cpu }} CPU / {{ $size.memory }} for wo
 Each workflow step runs as a pod on its runner's node:
   kubectl -n {{ $ns }} get pods -l app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=step
   kubectl -n {{ $ns }} logs -f <step pod>
-Finished step pods stay for {{ .Values.runner.steps.finishedTTL }}, labelled with their outcome:
+Finished step pods stay for {{ .Values.runner.steps.finishedTTL }}, labeled with their outcome:
   kubectl -n {{ $ns }} get pods -l app.kubernetes.io/component=step -L sg-runner.stackguardian.io/outcome
 The steps broker in each runner pod creates them:
   kubectl -n {{ $ns }} logs -f {{ $sts }}-0 -c steps

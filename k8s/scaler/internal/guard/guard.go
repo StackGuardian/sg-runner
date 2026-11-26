@@ -1,8 +1,7 @@
 // Package guard is sg-steps-guard, a Docker authorization plugin the step
 // broker serves to the runner's dockerd: it refuses to create workflow step
 // containers there, as the runner runs steps as pods (a run controller
-// without step broker support would otherwise run them in dockerd). See
-// k8s/docs/steps-api.md, "Guard".
+// without step broker support would otherwise run them in dockerd).
 package guard
 
 import (

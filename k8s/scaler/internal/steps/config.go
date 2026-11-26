@@ -1,5 +1,6 @@
 // Package steps is the step broker: it runs each workflow step of the run
-// controllers in a runner pod as a pod of its own. See k8s/docs/steps-api.md.
+// controllers in a runner pod as a pod of its own, on requests that arrive
+// over the step broker API.
 package steps
 
 import (
