@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Mock: hostname
+# Records the call. detect_private_ip falls back to `hostname -I`.
+#   $MOCK_HOSTNAME_OUTPUT (default: 10.0.0.1)
+#   $MOCK_HOSTNAME_EXIT   (default: 0)
+printf '%s\n' "hostname $*" >>"${MOCK_CALL_LOG}"
+echo "${MOCK_HOSTNAME_OUTPUT-10.0.0.1}"
+exit "${MOCK_HOSTNAME_EXIT:-0}"

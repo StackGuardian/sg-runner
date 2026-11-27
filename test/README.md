@@ -140,7 +140,8 @@ Set the override env vars **before** calling the function under test. Use
 | `curl`      | `MOCK_CURL_OUTPUT` (empty)                                                              | `MOCK_CURL_EXIT` (`0`)      |
 | `crontab`   | `MOCK_CRONTAB_LIST` (empty; used by `crontab -l`)                                       | `MOCK_CRONTAB_EXIT` (`0`)   |
 | `iptables`  | (no stdout); `MOCK_IPTABLES_CHECK_EXIT` (`1`) is the exit for `-C` rule checks          | `MOCK_IPTABLES_EXIT` (`0`)  |
-| `ip`        | `MOCK_IP_ROUTE_OUTPUT` (default route, field 9 = `10.0.0.1`)                            | `MOCK_IP_EXIT` (`0`)        |
+| `ip`        | `MOCK_IP_ROUTE_GET_OUTPUT` (`route get` reply, src `10.0.0.1`), `MOCK_IP_ADDR_OUTPUT` (one global `10.0.0.1/24`), `MOCK_IP_ROUTE_OUTPUT` (dhcp default route) | `MOCK_IP_EXIT` (`0`); per query `MOCK_IP_ROUTE_GET_EXIT`, `MOCK_IP_ADDR_EXIT` |
+| `hostname`  | `MOCK_HOSTNAME_OUTPUT` (`10.0.0.1`; used by `hostname -I`)                              | `MOCK_HOSTNAME_EXIT` (`0`)  |
 | `free`      | `MOCK_FREE_OUTPUT` (a minimal `free -h` table)                                          | `MOCK_FREE_EXIT` (`0`)      |
 | `nproc`     | `MOCK_NPROC_OUTPUT` (`4`)                                                               | `MOCK_NPROC_EXIT` (`0`)     |
 | `uptime`    | `MOCK_UPTIME_OUTPUT` (a typical `uptime` line with load average)                        | `MOCK_UPTIME_EXIT` (`0`)    |

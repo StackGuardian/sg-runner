@@ -14,6 +14,7 @@
   - [3.4 Restart](#34-restart)
 - [System diagnostics](#system-diagnostics)
 - [Managing `cgroupsv2`](#managing-cgroupsv2)
+- [Kubernetes (prototype)](#kubernetes-prototype)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
 
@@ -186,6 +187,51 @@ To revert you can just run:
 ```
 ./main.sh cgroupsv2 enable
 ```
+
+## Kubernetes (prototype)
+
+> **Status: prototype, not supported.** Workflows run only with a run
+> controller release that supports the step broker, which is not released yet.
+
+[`k8s/`](k8s/README.md) runs Private Runners as Kubernetes pods, installed with
+a Helm chart ([`k8s/chart/sg-runner`](k8s/chart/sg-runner/README.md), Kubernetes
+1.29+). Each StatefulSet replica is one registered runner: a nested Docker
+daemon for the run controller, the SSM and ECS agents, and `main.sh` sourced
+for registration and network setup. Workflow **steps** run as their own
+Kubernetes pods, created by a step broker in the runner pod
+([how workflows run](k8s/README.md#how-workflows-run)); a guard refuses step
+containers in the nested Docker daemon. A scaler
+([`k8s/scaler`](k8s/scaler), Go) follows the runner group's queue in StackGuardian:
+
+- **Parks** idle runners: the pod stops but the runner stays registered, and
+  wakes again in about 8s (a fresh registration takes about 20s).
+- **Wakes or adds** runners when workflows queue, between a minimum of 1 and
+  the lower of `scaler.max` and the runner group's `MaxNumberOfRunners`;
+  optional headroom keeps a warm spare.
+- **Deregisters** runners parked longer than a TTL (12h by default).
+
+The runner size (`runner.size`: `small`, `medium`, `large` or `custom`) sets
+the workflow capacity a runner advertises; one runner per node. See
+[`k8s/README.md`](k8s/README.md) for the design, measurements and known
+limitations; install and values are in the chart README.
+
+### Known limitations
+
+- **Privileged pod.** The nested Docker daemon (run controllers) needs it;
+  clusters enforcing restricted Pod Security reject it. Workflow steps run as
+  unprivileged pods.
+- **Network isolation is opt-in.** The chart's NetworkPolicy keeps runner and
+  step pods away from cluster addresses and the metadata endpoint, but needs an
+  enforcing CNI and the cluster's CIDRs.
+- **amd64 nodes** for StackGuardian's step images.
+- **No proxy support.** `--http-proxy` isn't wired up.
+- **Testing gaps:** waking after a long park is untested, and end-to-end
+  testing of the scaler against StackGuardian and of GKE/EKS specifics is not
+  complete.
+- **StackGuardian credentials in the pod.** Mounted into the `ecs-agent` container and the
+  scaler to set runner status and read the queue.
+- **`ecs-init` is bypassed.** Agent defaults are copied into `k8s/runner.sh` and
+  may drift with new ECS agent releases.
 
 ## Troubleshooting
 

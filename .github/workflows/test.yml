@@ -1,8 +1,18 @@
 name: test
 
+# Shell: main.sh and k8s/runner.sh (shellcheck), and the bats unit + smoke
+# tiers, which include the k8s/runner.sh tests (test/unit/k8s_*.bats).
 on:
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint:

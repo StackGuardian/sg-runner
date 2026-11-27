@@ -239,7 +239,7 @@ print_details() { #{{{
   echo
   details_frame "Host Information"
   details_item "Hostname" "$HOSTNAME"
-  details_item "Private IP Address" "$(ip route | grep default | cut -d" " -f9)"
+  details_item "Private IP Address" "$(detect_private_ip)"
   details_item "Public IP Address" "$(curl -fSs ifconfig.me)"
   details_item "HTTP PROXY" "$HTTP_PROXY"
   echo
@@ -328,13 +328,19 @@ EOF
 #}}}: api_call
 
 update_runner_group() { #{{{
+  # Best-effort report, sent at most once per error: api_call reports its own
+  # failures through err(), which would call back in here and retry until the
+  # stack overflows (one authenticated request per round) whenever the API is
+  # unreachable. The guard is dynamically scoped, so nested calls see it.
+  [[ -n "${REPORTING_RUNNER_GROUP_ERROR:-}" ]] && return 0
+  local REPORTING_RUNNER_GROUP_ERROR=1
   local err_msg ip_addr payload url
   url="${SG_BASE_API}/orgs/${ORGANIZATION_ID}/runnergroups/${RUNNER_GROUP_ID}/"
 
   err_msg=$(printf '%s' "$1" | tr -cd "[:print:]")
   debug "Error message ${err_msg}"
 
-  ip_addr=$(ip route | grep default | cut -d" " -f9)
+  ip_addr=$(detect_private_ip)
 
   payload=$(jq -n \
     --arg ip "$ip_addr" \
@@ -344,11 +350,15 @@ update_runner_group() { #{{{
     --arg command "${0} $*" \
     '{RunnerRegistrationErrors: {($ip): {RunnerId: $runner_id, error: $error, timestamp: $timestamp, command: $command}}}')
 
-  if api_call "PATCH" "$url" "$payload"; then
+  # Subshell: api_call exits on an empty response, and a failed report must
+  # not end a caller that only meant to log a non-fatal error.
+  if (api_call "PATCH" "$url" "$payload"); then
     debug "updated runner group with error msg"
   else
     debug "failed to update runner group with error msg"
   fi
+  # debug() returns non-zero when --debug is off; a report never fails err().
+  return 0
 }
 #}}}: update_runner_group
 
@@ -593,6 +603,27 @@ clean_local_setup() { #{{{
   return 0
 }
 #}}}: clean_local_setup
+
+detect_private_ip() { #{{{
+  local ip_addr
+  # Ask the kernel which source address it would use for outbound traffic.
+  # This is a local route lookup (no packet is sent) and works whether the
+  # default route is dhcp, static or a pod's (no "src" on the default route).
+  # Pick the token after "src" by name: its position varies between setups.
+  ip_addr=$(ip -4 route get 1.1.1.1 2>/dev/null |
+    awk '{for (i = 1; i < NF; i++) if ($i == "src") {print $(i + 1); exit}}')
+  # No usable route (e.g. no default gateway): take the first global IPv4.
+  if [[ -z "$ip_addr" ]]; then
+    ip_addr=$(ip -4 -o addr show scope global 2>/dev/null |
+      awk '{split($4, addr, "/"); print addr[1]; exit}')
+  fi
+  # Last resort for hosts where the ip queries fail; not every hostname has -I.
+  if [[ -z "$ip_addr" ]] && command -v hostname >/dev/null 2>&1; then
+    ip_addr=$(hostname -I 2>/dev/null | awk '{print $1}')
+  fi
+  printf '%s' "$ip_addr"
+}
+#}}}: detect_private_ip
 
 check_variable_value() { #{{{
   local variable_name=$1
