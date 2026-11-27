@@ -178,6 +178,19 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	return c, nil
 }
 
+// CheckWorkspacesDir checks that the broker sees WorkspacesDir, a directory:
+// mount sources are resolved there.
+func (c *Config) CheckWorkspacesDir() error {
+	fi, err := os.Stat(c.WorkspacesDir)
+	if err != nil {
+		return fmt.Errorf("WORKSPACES_DIR=%q: the broker needs the workspace volume mounted there (read-only is enough) to check mount sources: %w", c.WorkspacesDir, err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("WORKSPACES_DIR=%q: not a directory", c.WorkspacesDir)
+	}
+	return nil
+}
+
 // strictJSON decodes raw into v, rejecting unknown fields and trailing data.
 func strictJSON(raw string, v any) error {
 	dec := json.NewDecoder(bytes.NewReader([]byte(raw)))

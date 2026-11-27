@@ -275,6 +275,7 @@ EOF
   local out id
   out=$(api GET /healthz)
   [[ $(jq -r .api <<<"$out") == v1 ]] || fail "healthz: $out"
+  [[ $(jq -c .features <<<"$out") == '["claim","stop-run"]' ]] || fail "healthz features: $out"
   echo "healthz: $out"
 
   # 11 (approval required) and 12 (completed early) are outcomes: the
@@ -328,6 +329,26 @@ EOF
   expect_error InvalidMount POST /v1/steps "$(step_json '["true"]' '"mounts":[{"source":"/var/tmp/workspace","target":"/w"}]')"
   expect_error InvalidMount POST /v1/steps "$(step_json '["true"]' "\"mounts\":[{\"source\":\"$STEPS_RUN/../r2/x\",\"target\":\"/w\"}]")"
   expect_error InvalidMount POST /v1/steps "$(step_json '["true"]' '"mounts":[{"source":"/var/tmp/workspace/orgs/ci/wfruns/r2/x","target":"/w"}]')"
+  # Mount sources are resolved: a link that stays in the run is fine, one
+  # that resolves to another run's directory or above the run is refused.
+  kc mkdir -p /var/tmp/workspace/orgs/ci/wfruns/r2/x
+  kc ln -s "$STEPS_RUN/shared-workspace" "$STEPS_RUN/inside"
+  kc ln -s /var/tmp/workspace/orgs/ci/wfruns/r2/x "$STEPS_RUN/sibling"
+  kc ln -s .. "$STEPS_RUN/parent"
+  expect_error InvalidMount POST /v1/steps "$(step_json '["true"]' "\"mounts\":[{\"source\":\"$STEPS_RUN/sibling\",\"target\":\"/w\"}]")"
+  expect_error InvalidMount POST /v1/steps "$(step_json '["true"]' "\"mounts\":[{\"source\":\"$STEPS_RUN/parent\",\"target\":\"/w\"}]")"
+  expect_error InvalidMount POST /v1/steps "$(step_json '["true"]' "\"mounts\":[{\"source\":\"$STEPS_RUN/parent/r2/x\",\"target\":\"/w\"}]")"
+  kc ln -s shared-workspace "$STEPS_RUN/inside-relative"
+  # Links inside the run, with an absolute and a relative target: the step
+  # pod's subPath is the resolved path.
+  local link
+  for link in inside inside-relative; do
+    id=$(create_step '["cat","/w/out.txt"]' "\"mounts\":[{\"source\":\"$STEPS_RUN/$link\",\"target\":\"/w\"}]")
+    expect_state "$id" exited 0
+    [[ $(k get "pod/$id" -o jsonpath='{.spec.containers[0].volumeMounts[0].subPath}') == orgs/ci/wfruns/r1/shared-workspace ]] \
+      || fail "step $id: subPath isn't the resolved path"
+  done
+  echo "mount sources linked inside the run accepted, subPath resolved"
   expect_error InvalidEnv POST /v1/steps "$(step_json '["true"]' '"env":{"BAD KEY":"x"}')"
   expect_error NotFound GET "/v1/steps/kube-apiserver-$CLUSTER-control-plane"
 
@@ -335,6 +356,32 @@ EOF
   expect_state "$id" failed "" 'ErrImagePull|ImagePullBackOff'
   id=$(create_step '["true"]' '"memoryMiB":9999999')
   expect_state "$id" failed "" Unschedulable
+
+  # Stopped while still pending (unschedulable, before SCHEDULING_TIMEOUT).
+  id=$(create_step '["true"]' '"memoryMiB":9999999')
+  [[ $(api GET "/v1/steps/$id" | jq -r .state) == pending ]] || fail "step $id isn't pending"
+  api POST "/v1/steps/$id/stop" '{"graceSeconds":0}' >/dev/null
+  expect_state "$id" exited 137 Stopped
+
+  # Every step of a run, by claim, then the rest; steps of other runs stay.
+  local a b c other
+  a=$(create_step '["sleep","600"]' '"run":"/wfruns/r3","mounts":[],"claim":"c1"')
+  b=$(create_step '["sleep","600"]' '"run":"/wfruns/r3","mounts":[],"claim":"c2"')
+  c=$(create_step '["sleep","600"]' '"run":"/wfruns/r3","mounts":[]')
+  other=$(create_step '["sleep","600"]' '"run":"/wfruns/r4","mounts":[],"claim":"c1"')
+  out=$(api POST /v1/runs/stop '{"org":"/orgs/ci","run":"/wfruns/r3","claim":"c1","graceSeconds":0}')
+  [[ $(jq -c .stopped <<<"$out") == "[\"$a\"]" ]] || fail "stop run r3 claim c1: want [$a], got $out"
+  out=$(api POST /v1/runs/stop '{"org":"/orgs/ci","run":"/wfruns/r3","graceSeconds":0}')
+  [[ $(jq -c '.stopped | sort' <<<"$out") == "$(jq -nc --arg b "$b" --arg c "$c" '[$b, $c] | sort')" ]] \
+    || fail "stop run r3: want $b and $c, got $out"
+  for id in "$a" "$b" "$c"; do
+    expect_state "$id" exited ""
+  done
+  [[ $(api GET "/v1/steps/$other" | jq -r .state) =~ ^(pending|running)$ ]] || fail "step $other of run r4 was stopped"
+  out=$(api POST /v1/runs/stop '{"org":"/orgs/ci","run":"/wfruns/r3"}')
+  [[ $(jq -c .stopped <<<"$out") == '[]' ]] || fail "stop run r3 again: want [], got $out"
+  api POST "/v1/steps/$other/stop" '{"graceSeconds":0}' >/dev/null
+  echo "run r3 stopped by claim and as a whole, run r4 untouched"
 
   # TERM trapped: the step exits 143 itself within the grace.
   id=$(create_step '["sh","-c","trap \"echo got TERM; exit 143\" TERM; while true; do sleep 1; done"]')
@@ -346,6 +393,28 @@ EOF
   until_ok "step pod $first deleted after FINISHED_TTL" step_gone "$first"
   [[ $(api GET "/v1/steps/$first" | jq -r .exitCode) == 0 ]] || fail "deleted step $first lost its exit code"
   echo "step $first deleted after FINISHED_TTL, exit code still served"
+
+  # The broker restarts while a client follows a step's log: the stream
+  # ends, the step keeps running, and the new broker serves it to the end.
+  local restarts
+  # shellcheck disable=SC2016 # $(seq ...) and $i for the step's shell
+  id=$(create_step '["sh","-c","for i in $(seq 1 30); do echo line $i; sleep 1; done"]')
+  until_ok "step $id running" step_running "$id"
+  kc sh -c "nohup curl -sS --unix-socket $STEPS_SOCK 'http://broker/v1/steps/$id/logs?follow=1' \
+    >/tmp/follow.log 2>&1 </dev/null & echo \$! >/tmp/follow.pid"
+  sleep 3
+  restarts=$(broker_restarts)
+  # The broker's full command line: BusyBox's pkill -x doesn't match its
+  # name, and this can't match the client's shell, curl or a healthcheck.
+  kc pkill -f '^/sg-runner-steps serve$'
+  until_ok "broker restarted" broker_restarted "$restarts"
+  until_ok "broker answers again" broker_healthy
+  until_ok "the followed log stream ended" follow_ended
+  kc grep -q 'line 1$' /tmp/follow.log || fail "the followed log had no lines before the restart: $(kc cat /tmp/follow.log)"
+  out=$(api GET "/v1/steps/$id/logs?follow=1" | cut -d' ' -f2- | tail -n1)
+  [[ $out == 'line 30' ]] || fail "logs after the restart: want 'line 30' last, got '$out'"
+  expect_state "$id" exited 0
+  echo "broker restarted during a followed log; the step ran to the end"
   endstep
 
   step "native steps: dockerd guard"
@@ -394,6 +463,8 @@ spec:
   serviceAccountName: $STS
   automountServiceAccountToken: false
   terminationGracePeriodSeconds: 120
+  # The client restarts the broker (a broker restart check).
+  shareProcessNamespace: true
   containers:
     - name: steps
       image: $SCALER_IMAGE
@@ -437,6 +508,8 @@ spec:
         - { name: socket, mountPath: /run/sg-steps }
         - { name: guard, mountPath: /run/sg-guard }
         - { name: api-access, mountPath: /var/run/secrets/kubernetes.io/serviceaccount, readOnly: true }
+        # As the chart's steps container: mount sources are checked here.
+        - { name: workspace, mountPath: /var/tmp/workspace, readOnly: true }
     - name: client
       image: python:3.11-alpine
       # PID 1 ignores SIGTERM without a handler: trap it, or deleting the pod
@@ -559,6 +632,26 @@ pod_outcome() { # <id> -> "phase reason outcome wrapped"
     [.status.phase,
      ((.status.containerStatuses // [])[] | select(.name == "step") | .state.terminated.reason // ""),
      .metadata.labels[$l] // "", .metadata.annotations[$a] // ""] | join(" ")'
+}
+
+# The steps container's restart count, a regular container or a native
+# sidecar.
+broker_restarts() {
+  k get "pod/$STEPS_POD" -o json | jq '[.status.containerStatuses[]?, .status.initContainerStatuses[]?]
+    | map(select(.name == "steps"))[0].restartCount // 0'
+}
+
+broker_healthy() {
+  api GET /healthz 2>/dev/null | jq -e '.api == "v1"' >/dev/null
+}
+
+broker_restarted() { # <restart count before>
+  (($(broker_restarts) > $1))
+}
+
+follow_ended() {
+  # shellcheck disable=SC2016 # expanded by the client's shell
+  ! kc sh -c 'kill -0 "$(cat /tmp/follow.pid)" 2>/dev/null'
 }
 
 steps_all_gone() {

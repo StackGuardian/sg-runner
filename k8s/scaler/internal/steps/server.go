@@ -20,12 +20,18 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
 )
 
 // APIVersion is what GET /healthz reports.
 const APIVersion = "v1"
+
+// Features are the additions to v1 this broker has, which GET /healthz lists
+// (older brokers answer 404 on routes they don't know): "claim" on
+// POST /v1/steps, and POST /v1/runs/stop.
+var Features = []string{"claim", "stop-run"}
 
 // maxBody caps a request body: the env's 1 MB, JSON-escaped, with room.
 const maxBody = 8 << 20
@@ -131,13 +137,14 @@ func (s *Server) now() time.Time {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"api": APIVersion})
+		writeJSON(w, http.StatusOK, map[string]any{"api": APIVersion, "features": Features})
 	})
 	mux.HandleFunc("POST /v1/steps", s.create)
 	mux.HandleFunc("GET /v1/steps/{id}", s.get)
 	mux.HandleFunc("GET /v1/steps/{id}/logs", s.logs)
 	mux.HandleFunc("POST /v1/steps/{id}/stop", s.stop)
 	mux.HandleFunc("DELETE /v1/steps/{id}", s.delete)
+	mux.HandleFunc("POST /v1/runs/stop", s.stopRun)
 	// Every error is JSON, unknown routes too.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, &Error{Status: http.StatusNotFound, Reason: ReasonNotFound, Message: "no route " + r.Method + " " + r.URL.Path})
@@ -340,6 +347,23 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, st)
 }
 
+// graceSeconds reads a stop request's graceSeconds: 30 when absent, 1 for 0.
+func graceSeconds(v *int64) (int64, error) {
+	grace := int64(30)
+	if v != nil {
+		grace = *v
+	}
+	if grace < 0 {
+		return 0, badRequest(ReasonInvalidRequest, "graceSeconds must not be negative")
+	}
+	// 0 would remove the pod object before the kubelet killed the container;
+	// 1 still kills right away and keeps the pod (and the exit code) until then.
+	if grace == 0 {
+		grace = 1
+	}
+	return grace, nil
+}
+
 func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
 	id, err := s.stepID(r)
 	if err != nil {
@@ -353,25 +377,32 @@ func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest(ReasonInvalidRequest, "body: %v", err))
 		return
 	}
-	grace := int64(30)
-	if body.GraceSeconds != nil {
-		grace = *body.GraceSeconds
-	}
-	if grace < 0 {
-		writeError(w, badRequest(ReasonInvalidRequest, "graceSeconds must not be negative"))
-		return
-	}
-	// 0 would remove the pod object before the kubelet killed the container;
-	// 1 still kills right away and keeps the pod (and the exit code) until then.
-	if grace == 0 {
-		grace = 1
-	}
-
-	ctx := r.Context()
-	st, err := s.state(ctx, id)
+	grace, err := graceSeconds(body.GraceSeconds)
 	if err != nil {
 		writeError(w, err)
 		return
+	}
+	if err := s.stopStep(r.Context(), id, grace, false); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"id": id})
+}
+
+// errTerminal is stopStep's answer for a step that already ended, when asked
+// to skip those.
+var errTerminal = errors.New("step already ended")
+
+// stopStep stops a step: it deletes its pod with the grace period and
+// follows it until it's gone. With skipTerminal, a step that already ended
+// is left alone (errTerminal).
+func (s *Server) stopStep(ctx context.Context, id string, grace int64, skipTerminal bool) error {
+	st, err := s.state(ctx, id)
+	if err != nil {
+		return err
+	}
+	if skipTerminal && st.Terminal() {
+		return errTerminal
 	}
 	s.mu.Lock()
 	rec := s.recordLocked(id)
@@ -386,14 +417,74 @@ func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		rec.following = false
 		s.mu.Unlock()
-		writeError(w, kubeError("delete Pod "+id, err))
-		return
+		return kubeError("delete Pod "+id, err)
 	}
 	if follow {
 		go s.followStop(id, time.Duration(grace)*time.Second+30*time.Second)
 	}
 	s.Log.Info("step stopped", "id", id, "graceSeconds", grace, "state", st.State)
-	writeJSON(w, http.StatusAccepted, map[string]string{"id": id})
+	return nil
+}
+
+// StopRunRequest is POST /v1/runs/stop.
+type StopRunRequest struct {
+	Org          string `json:"org"`
+	Run          string `json:"run"`
+	Claim        string `json:"claim"`
+	GraceSeconds *int64 `json:"graceSeconds"`
+}
+
+// stopRun stops every step of a run that hasn't ended (only those with the
+// claim, when given) and answers the ids it stopped.
+func (s *Server) stopRun(w http.ResponseWriter, r *http.Request) {
+	var req StopRunRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, badRequest(ReasonInvalidRequest, "body: %v", err))
+		return
+	}
+	if err := validateRun(req.Org, req.Run, req.Claim); err != nil {
+		writeError(w, err)
+		return
+	}
+	grace, err := graceSeconds(req.GraceSeconds)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	set := labels.Set{LabelComponent: ComponentStep, LabelRunner: s.Config.RunnerPodName, LabelRun: RunLabel(req.Org, req.Run)}
+	if req.Claim != "" {
+		set[LabelClaim] = req.Claim
+	}
+	ctx := r.Context()
+	pods, err := s.Client.CoreV1().Pods(s.Config.Namespace).List(ctx, metav1.ListOptions{LabelSelector: set.String()})
+	if err != nil {
+		writeError(w, kubeError("list step pods", err))
+		return
+	}
+	stopped := []string{}
+	var failed error
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		// The run label is a hash: the annotations tell runs apart for good.
+		if !s.idRE.MatchString(p.Name) || p.Annotations[AnnotationOrg] != req.Org || p.Annotations[AnnotationRun] != req.Run {
+			continue
+		}
+		err := s.stopStep(ctx, p.Name, grace, true)
+		var e *Error
+		switch {
+		case err == nil:
+			stopped = append(stopped, p.Name)
+		case errors.Is(err, errTerminal), errors.As(err, &e) && e.Status == http.StatusNotFound:
+		case failed == nil:
+			failed = err
+		}
+	}
+	if failed != nil {
+		writeError(w, failed)
+		return
+	}
+	s.Log.Info("run stopped", "org", req.Org, "run", req.Run, "claim", req.Claim, "steps", len(stopped))
+	writeJSON(w, http.StatusOK, map[string][]string{"stopped": stopped})
 }
 
 // followStop reads a stopped step's pod until it's gone (or for at most

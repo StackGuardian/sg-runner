@@ -5,9 +5,13 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -24,7 +28,9 @@ const (
 	LabelComponent = "app.kubernetes.io/component"
 	LabelRunner    = "sg-runner.stackguardian.io/runner"
 	LabelRun       = "sg-runner.stackguardian.io/run"
-	ComponentStep  = "step"
+	// LabelClaim is the request's claim, when it has one.
+	LabelClaim    = "sg-runner.stackguardian.io/claim"
+	ComponentStep = "step"
 )
 
 // Annotations on step pods: the request's raw values.
@@ -80,6 +86,11 @@ type Mount struct {
 	Source   string `json:"source"`
 	Target   string `json:"target"`
 	ReadOnly bool   `json:"readOnly"`
+
+	// resolved is Source with its symbolic links resolved, below
+	// WorkspacesDir, once Validate checked it ("" before, or when the
+	// workspace isn't there yet): the pod's subPath.
+	resolved string
 }
 
 // RegistryAuth is the credential for pulling a step's image.
@@ -103,6 +114,9 @@ type Request struct {
 	MemoryMiB      int64             `json:"memoryMiB"`
 	RegistryAuth   *RegistryAuth     `json:"registryAuth"`
 	TimeoutSeconds int64             `json:"timeoutSeconds"`
+	// Claim is optional: a label value the step pod carries, which
+	// POST /v1/runs/stop can narrow a run's steps by.
+	Claim string `json:"claim"`
 }
 
 // Error is an API error: the response's status, reason and message.
@@ -132,11 +146,8 @@ var envKeyRE = regexp.MustCompile(`^[-._a-zA-Z0-9]+$`)
 
 // Validate checks a request against the contract; the error is an *Error.
 func (c *Config) Validate(r *Request) error {
-	if r.Org == "" || r.Run == "" {
-		return badRequest(ReasonInvalidRequest, "org and run are required")
-	}
-	if hasDotDot(r.Org) || hasDotDot(r.Run) {
-		return badRequest(ReasonInvalidRequest, "org and run must not contain ..")
+	if err := validateRun(r.Org, r.Run, r.Claim); err != nil {
+		return err
 	}
 	if r.Image == "" || strings.ContainsAny(r.Image, " \t\r\n") {
 		return badRequest(ReasonInvalidRequest, "image %q: want an image reference", r.Image)
@@ -179,12 +190,98 @@ func (c *Config) Validate(r *Request) error {
 		}
 		targets[dst] = true
 	}
+	for i := range r.Mounts {
+		resolved, err := c.resolveMount(ws, path.Clean(r.Mounts[i].Source))
+		if err != nil {
+			return err
+		}
+		r.Mounts[i].resolved = resolved
+	}
 	return nil
+}
+
+// validateRun checks a request's org, run and optional claim.
+func validateRun(org, run, claim string) error {
+	if org == "" || run == "" {
+		return badRequest(ReasonInvalidRequest, "org and run are required")
+	}
+	if hasDotDot(org) || hasDotDot(run) {
+		return badRequest(ReasonInvalidRequest, "org and run must not contain ..")
+	}
+	if msgs := validation.IsValidLabelValue(claim); len(msgs) > 0 {
+		return badRequest(ReasonInvalidRequest, "claim %q: want a label value: %s", claim, strings.Join(msgs, "; "))
+	}
+	return nil
+}
+
+// resolveMount resolves a mount source's symbolic links on the broker's view
+// of the workspace and refuses one that ends up outside the run's workspace
+// ws (resolved the same way); links that stay inside it are fine. Of a source
+// that doesn't exist yet, its longest existing parent is resolved and the
+// rest appended. It returns the resolved source below WorkspacesDir, for the
+// pod's subPath: the kubelet then gets a path without links. Nothing is
+// resolved ("") while ws doesn't exist.
+func (c *Config) resolveMount(ws, source string) (string, error) {
+	outside := func() error {
+		return badRequest(ReasonInvalidMount, "mount source %s resolves outside the run's workspace %s", source, ws)
+	}
+	cannot := func(p string, err error) error {
+		return badRequest(ReasonInvalidMount, "mount source %s: resolving %s: %v", source, p, err)
+	}
+	root, err := filepath.EvalSymlinks(filepath.FromSlash(c.WorkspacesDir))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	} else if err != nil {
+		return "", cannot(c.WorkspacesDir, err)
+	}
+	run, err := filepath.EvalSymlinks(filepath.FromSlash(ws))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	} else if err != nil {
+		return "", cannot(ws, err)
+	}
+	within := func(p, dir string) bool { return p == dir || strings.HasPrefix(p, dir+string(filepath.Separator)) }
+	if !within(run, root) {
+		return "", outside()
+	}
+	p, rest := source, ""
+	for {
+		resolved, err := filepath.EvalSymlinks(filepath.FromSlash(p))
+		if err == nil {
+			full := filepath.Join(resolved, filepath.FromSlash(rest))
+			if !within(full, run) {
+				return "", outside()
+			}
+			rel, err := filepath.Rel(root, full)
+			if err != nil {
+				return "", cannot(p, err)
+			}
+			return path.Join(c.WorkspacesDir, filepath.ToSlash(rel)), nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", cannot(p, err)
+		}
+		// A symbolic link whose target is missing can't be resolved.
+		if fi, lerr := os.Lstat(filepath.FromSlash(p)); lerr == nil && fi.Mode()&fs.ModeSymlink != 0 {
+			return "", badRequest(ReasonInvalidMount, "mount source %s: %s is a symbolic link to a missing path", source, p)
+		}
+		// ws exists: the walk ends there at the latest.
+		rest, p = path.Join(path.Base(p), rest), path.Dir(p)
+	}
 }
 
 // RunWorkspace is a request's run directory, as the controllers see it.
 func (c *Config) RunWorkspace(r *Request) string {
 	return path.Join(c.WorkspacesDir, r.Org, r.Run)
+}
+
+// mountSubPath is a validated mount's subPath: of its resolved source when
+// Validate resolved it.
+func (c *Config) mountSubPath(m Mount) string {
+	if m.resolved != "" {
+		return c.subPath(m.resolved)
+	}
+	return c.subPath(m.Source)
 }
 
 // subPath is where a validated mount source is inside the workspace claim.
@@ -261,6 +358,11 @@ func (c *Config) labels(r *Request) map[string]string {
 	out[LabelComponent] = ComponentStep
 	out[LabelRunner] = c.RunnerPodName
 	out[LabelRun] = RunLabel(r.Org, r.Run)
+	if r.Claim != "" {
+		out[LabelClaim] = r.Claim
+	} else {
+		delete(out, LabelClaim)
+	}
 	return out
 }
 
@@ -385,7 +487,7 @@ func (c *Config) Pod(id string, r *Request, withPullSecret bool, wrap Wrap) *cor
 	var volumes []corev1.Volume
 	for _, m := range r.Mounts {
 		mounts = append(mounts, corev1.VolumeMount{
-			Name: "workspace", MountPath: path.Clean(m.Target), SubPath: c.subPath(m.Source), ReadOnly: m.ReadOnly,
+			Name: "workspace", MountPath: path.Clean(m.Target), SubPath: c.mountSubPath(m), ReadOnly: m.ReadOnly,
 		})
 	}
 	if len(mounts) > 0 {

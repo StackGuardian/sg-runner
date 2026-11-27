@@ -71,6 +71,9 @@ func serve(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	if err := cfg.CheckWorkspacesDir(); err != nil {
+		return err
+	}
 	client, err := kubeClient(15 * time.Second)
 	if err != nil {
 		return err

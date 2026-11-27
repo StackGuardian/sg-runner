@@ -161,6 +161,9 @@ spec:
             - { name: steps-socket, mountPath: /run/sg-steps }
             - { name: docker-plugins, mountPath: /run/sg-guard }
             - { name: steps-api-access, mountPath: /var/run/secrets/kubernetes.io/serviceaccount, readOnly: true }
+            # Read-only, at WORKSPACES_DIR: the broker checks mount sources, links
+            # resolved, before it creates a step pod.
+            - { name: workspace, mountPath: /var/tmp/workspace, readOnly: true }
       containers:
         - name: dockerd
           image: {{ $image }}

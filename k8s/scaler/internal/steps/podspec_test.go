@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -103,6 +105,119 @@ func TestValidate(t *testing.T) {
 		if !errors.As(err, &e) || e.Reason != c.reason || e.Status != 400 {
 			t.Errorf("%s: got %v, want %s", name, err, c.reason)
 		}
+	}
+}
+
+func TestValidateMountLinks(t *testing.T) {
+	cfg := testConfig()
+	cfg.WorkspacesDir = filepath.ToSlash(t.TempDir())
+	ws := cfg.WorkspacesDir + "/orgs/example-org/wfgrps/x/wfs/y/wfruns/z"
+	sibling := cfg.WorkspacesDir + "/orgs/example-org/wfgrps/x/wfs/y/wfruns/zz"
+	for _, d := range []string{ws + "/shared/sub", sibling + "/shared"} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for link, to := range map[string]string{
+		ws + "/inside":          ws + "/shared",
+		ws + "/shared/relative": "sub",
+		ws + "/self":            ws,
+		ws + "/sibling":         sibling + "/shared",
+		ws + "/parent":          "..",
+		ws + "/root":            cfg.WorkspacesDir,
+		ws + "/dangling":        sibling + "/missing",
+	} {
+		if err := os.Symlink(to, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for source, reason := range map[string]string{
+		ws + "/shared/sub":              "",
+		ws + "/shared/sub/":             "",
+		ws + "/shared/missing":          "",
+		ws + "/missing/a/b":             "",
+		ws + "/inside":                  "",
+		ws + "/inside/sub":              "",
+		ws + "/inside/missing/a":        "",
+		ws + "/shared/relative":         "",
+		ws + "/self":                    "",
+		ws + "/sibling":                 ReasonInvalidMount,
+		ws + "/sibling/":                ReasonInvalidMount,
+		ws + "/sibling/missing":         ReasonInvalidMount,
+		ws + "/parent":                  ReasonInvalidMount,
+		ws + "/parent/zz/shared":        ReasonInvalidMount,
+		ws + "/root":                    ReasonInvalidMount,
+		ws + "/dangling":                ReasonInvalidMount,
+		ws + "/dangling/a":              ReasonInvalidMount,
+		ws + "/shared/sub/../../../zz/": ReasonInvalidMount, // lexical check
+	} {
+		r := testRequest()
+		r.Mounts = []Mount{{Source: source, Target: "/mnt/a"}}
+		err := cfg.Validate(&r)
+		var e *Error
+		switch {
+		case reason == "" && err != nil:
+			t.Errorf("%s: %v", source, err)
+		case reason != "" && (!errors.As(err, &e) || e.Reason != reason || e.Status != 400):
+			t.Errorf("%s: got %v, want %s", source, err, reason)
+		}
+	}
+}
+
+func TestValidateMountSubPath(t *testing.T) {
+	cfg := testConfig()
+	cfg.WorkspacesDir = filepath.ToSlash(t.TempDir())
+	cfg.WorkspaceSubPathPrefix = "shared/r0"
+	ws := cfg.WorkspacesDir + "/orgs/example-org/wfgrps/x/wfs/y/wfruns/z"
+	const rel = "shared/r0/orgs/example-org/wfgrps/x/wfs/y/wfruns/z"
+	if err := os.MkdirAll(ws+"/repo/real/sub", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for link, to := range map[string]string{ws + "/absolute": ws + "/repo/real", ws + "/repo/relative": "real"} {
+		if err := os.Symlink(to, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for source, want := range map[string]string{
+		ws + "/repo/real":         rel + "/repo/real",
+		ws + "/repo/real/sub/":    rel + "/repo/real/sub",
+		ws + "/absolute":          rel + "/repo/real",
+		ws + "/repo/relative":     rel + "/repo/real",
+		ws + "/absolute/sub":      rel + "/repo/real/sub",
+		ws + "/absolute/new/a":    rel + "/repo/real/new/a",
+		ws + "/repo/relative/new": rel + "/repo/real/new",
+		ws + "/new/a":             rel + "/new/a",
+	} {
+		r := testRequest()
+		r.Mounts = []Mount{{Source: source, Target: "/mnt/a"}}
+		if err := cfg.Validate(&r); err != nil {
+			t.Errorf("%s: %v", source, err)
+			continue
+		}
+		p := cfg.Pod(testID, &r, false, Wrap{Reason: "test"})
+		if got := p.Spec.Containers[0].VolumeMounts[0].SubPath; got != want {
+			t.Errorf("%s: subPath %s, want %s", source, got, want)
+		}
+	}
+}
+
+// The workspace root may itself be behind a symbolic link (macOS's /var).
+func TestValidateMountLinksResolvedRoot(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Symlink(dir, dir+"-link"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Remove(dir + "-link") })
+	cfg := testConfig()
+	cfg.WorkspacesDir = filepath.ToSlash(dir + "-link")
+	ws := cfg.WorkspacesDir + "/orgs/example-org/wfgrps/x/wfs/y/wfruns/z"
+	if err := os.MkdirAll(ws+"/shared", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := testRequest()
+	r.Mounts = []Mount{{Source: ws + "/shared", Target: "/mnt/a"}}
+	if err := cfg.Validate(&r); err != nil {
+		t.Error(err)
 	}
 }
 

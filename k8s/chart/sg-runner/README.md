@@ -214,7 +214,7 @@ older than `SG_PRUNE_UNTIL`.
 | `runner.dockerd.securityContext` | `{privileged: true}` | Nested Docker needs privileged. |
 | `runner.dockerd.extraEnv` | `[]` | Extra env vars for the `dockerd` container (advanced/testing, e.g. `SG_PRUNE_INTERVAL_SECONDS=0` turns off the nested Docker prune loop). |
 | `runner.ecsAgent.extraEnv` | `[]` | Extra env vars for the `ecs-agent` container (advanced/testing, e.g. `ECS_IMAGE_PULL_BEHAVIOR=prefer-cached`). |
-| `runner.steps.workspace.size` / `.storageClassName` / `.accessModes` | `20Gi` / `""` / `[ReadWriteOnce]` | Workspace PVC per pod (`<pod>-workspace`) at `/var/tmp/workspace` on dockerd, mounted by step pods. Empty class = cluster default. |
+| `runner.steps.workspace.size` / `.storageClassName` / `.accessModes` | `20Gi` / `""` / `[ReadWriteOnce]` | Workspace PVC per pod (`<pod>-workspace`) at `/var/tmp/workspace` on dockerd (read-only on the steps broker), mounted by step pods. Empty class = cluster default. |
 | `runner.steps.schedulingTimeout` / `startTimeout` / `finishedTTL` | `5m` / `30m` / `1h` | Step pod fails if unschedulable / still pending this long. Finished step pods are kept for `finishedTTL`, then deleted; their Secrets go when they finish. |
 | `runner.steps.step.nodeSelector` / `.tolerations` | empty | Step pod scheduling; empty = `runner.nodeSelector` / `runner.tolerations`. |
 | `runner.steps.step.imagePullPolicy` | `""` | `STEP_IMAGE_PULL_POLICY`. Empty = automatic (`Always` for `latest` or no tag, else `IfNotPresent`); `IfNotPresent` / `Never` for air-gapped clusters or preloaded images. |

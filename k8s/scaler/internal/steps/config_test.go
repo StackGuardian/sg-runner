@@ -1,6 +1,8 @@
 package steps
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -91,6 +93,20 @@ func TestConfigInvalid(t *testing.T) {
 	} {
 		if _, err := LoadConfig(env(required(m))); err == nil || !strings.Contains(err.Error(), "invalid configuration") {
 			t.Errorf("%s: want an error, got %v", name, err)
+		}
+	}
+}
+
+func TestCheckWorkspacesDir(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for path, ok := range map[string]bool{dir: true, filepath.Join(dir, "missing"): false, file: false} {
+		err := (&Config{WorkspacesDir: path}).CheckWorkspacesDir()
+		if (err == nil) != ok {
+			t.Errorf("%s: %v", path, err)
 		}
 	}
 }

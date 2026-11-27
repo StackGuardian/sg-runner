@@ -170,6 +170,14 @@ if ! init_containers defaults | grep -q -- '- name: steps' \
   echo "::error title=helm template::scenario 'defaults': the steps broker isn't a native sidecar with a healthcheck"
   failed=1
 fi
+# The broker sees the workspace read-only at WORKSPACES_DIR, to resolve mount
+# sources; dockerd has it read-write.
+if ! init_containers defaults | grep -qF '{ name: WORKSPACES_DIR, value: /var/tmp/workspace }' \
+  || ! init_containers defaults | grep -qF '{ name: workspace, mountPath: /var/tmp/workspace, readOnly: true }'; then
+  echo "::error title=helm template::scenario 'defaults': the steps broker doesn't mount the workspace read-only at WORKSPACES_DIR"
+  failed=1
+fi
+expect_text defaults '{ name: workspace, mountPath: /var/tmp/workspace }'
 if grep -q 'workflow-logs' "$OUT/defaults.yaml"; then
   echo "::error title=helm template::scenario 'defaults' still has workflow-logs"
   failed=1

@@ -12,6 +12,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -24,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+	"k8s.io/utils/ptr"
 )
 
 type harness struct {
@@ -96,8 +99,143 @@ func requestJSON(t *testing.T, edit func(*Request)) string {
 
 func TestHealthz(t *testing.T) {
 	rec := newHarness(t).do("GET", "/healthz", "")
-	if rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != `{"api":"v1"}` {
+	if rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != `{"api":"v1","features":["claim","stop-run"]}` {
 		t.Errorf("healthz %d %s", rec.Code, rec.Body)
+	}
+}
+
+// createStep creates a step of a run through the API, its id from seed.
+func (hs *harness) createStep(seed byte, edit func(*Request)) string {
+	hs.t.Helper()
+	hs.s.Random = bytes.NewReader(bytes.Repeat([]byte{seed}, 16))
+	rec := hs.do("POST", "/v1/steps", requestJSON(hs.t, edit))
+	var out map[string]string
+	if rec.Code != 201 || json.Unmarshal(rec.Body.Bytes(), &out) != nil {
+		hs.t.Fatalf("create %d %s", rec.Code, rec.Body)
+	}
+	// The fake clientset leaves creationTimestamp unset: the step would read
+	// as past START_TIMEOUT.
+	pods := hs.client.CoreV1().Pods("sg")
+	p, err := pods.Get(context.Background(), out["id"], metav1.GetOptions{})
+	if err != nil {
+		hs.t.Fatal(err)
+	}
+	p.CreationTimestamp = metav1.NewTime(t0)
+	if _, err := pods.Update(context.Background(), p, metav1.UpdateOptions{}); err != nil {
+		hs.t.Fatal(err)
+	}
+	return out["id"]
+}
+
+func TestCreateClaimLabel(t *testing.T) {
+	hs := newHarness(t)
+	with := hs.createStep(1, func(r *Request) { r.Claim = "claim-1" })
+	without := hs.createStep(2, nil)
+	got := map[string]map[string]string{}
+	for _, p := range hs.pods() {
+		got[p.Name] = p.Labels
+	}
+	if got[with][LabelClaim] != "claim-1" {
+		t.Errorf("labels with a claim %v", got[with])
+	}
+	if _, ok := got[without][LabelClaim]; ok {
+		t.Errorf("labels without a claim %v", got[without])
+	}
+	wantError(t, hs.do("POST", "/v1/steps", requestJSON(t, func(r *Request) { r.Claim = "not a label" })), 400, ReasonInvalidRequest)
+	wantError(t, hs.do("POST", "/v1/steps", requestJSON(t, func(r *Request) { r.Claim = strings.Repeat("a", 64) })), 400, ReasonInvalidRequest)
+}
+
+func stopRunJSON(t *testing.T, org, run, claim string, grace *int64) string {
+	b, err := json.Marshal(StopRunRequest{Org: org, Run: run, Claim: claim, GraceSeconds: grace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func stoppedIDs(t *testing.T, rec *httptest.ResponseRecorder) []string {
+	t.Helper()
+	var out struct{ Stopped []string }
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &out) != nil || out.Stopped == nil {
+		t.Fatalf("stop run %d %s", rec.Code, rec.Body)
+	}
+	return out.Stopped
+}
+
+func TestStopRun(t *testing.T) {
+	hs := newHarness(t)
+	g := graces(hs)
+	a1 := hs.createStep(1, func(r *Request) { r.Claim = "c1" })
+	a2 := hs.createStep(2, func(r *Request) { r.Claim = "c2" })
+	a3 := hs.createStep(3, nil)
+	other := hs.createStep(4, func(r *Request) { r.Run = testRun + "x"; r.Mounts = nil; r.Claim = "c1" })
+
+	// With a claim: only that claim's steps of the run.
+	if got := stoppedIDs(t, hs.do("POST", "/v1/runs/stop", stopRunJSON(t, testOrg, testRun, "c1", ptr.To[int64](5)))); !reflect.DeepEqual(got, []string{a1}) {
+		t.Errorf("stopped %v, want %s", got, a1)
+	}
+	if got := hs.podNames(); !reflect.DeepEqual(got, []string{a2, a3, other}) {
+		t.Errorf("pods left %v", got)
+	}
+	// The stopped step reads as stopped, like after POST /v1/steps/{id}/stop.
+	var st State
+	rec := hs.do("GET", "/v1/steps/"+a1, "")
+	if json.Unmarshal(rec.Body.Bytes(), &st) != nil || st.Reason != ReasonStopped {
+		t.Errorf("after stop %d %s", rec.Code, rec.Body)
+	}
+
+	// Without a claim: every step of the run, the other run's stays.
+	got := stoppedIDs(t, hs.do("POST", "/v1/runs/stop", stopRunJSON(t, testOrg, testRun, "", nil)))
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, []string{a2, a3}) {
+		t.Errorf("stopped %v, want %s %s", got, a2, a3)
+	}
+	if got := hs.podNames(); !reflect.DeepEqual(got, []string{other}) {
+		t.Errorf("pods left %v", got)
+	}
+	if !reflect.DeepEqual(*g, []int64{5, 30, 30}) {
+		t.Errorf("grace periods %v", *g)
+	}
+
+	// Nothing left to stop is a success.
+	if got := stoppedIDs(t, hs.do("POST", "/v1/runs/stop", stopRunJSON(t, testOrg, testRun, "", nil))); len(got) != 0 {
+		t.Errorf("stopped %v", got)
+	}
+	if strings.TrimSpace(hs.do("POST", "/v1/runs/stop", stopRunJSON(t, testOrg, "/none", "", nil)).Body.String()) != `{"stopped":[]}` {
+		t.Error("want an empty list for a run without steps")
+	}
+}
+
+func TestStopRunSkipsEndedSteps(t *testing.T) {
+	ended := pod(corev1.PodSucceeded, terminated(0, "Completed", t0, t0.Add(time.Minute)), func(p *corev1.Pod) {
+		p.Labels = map[string]string{LabelComponent: ComponentStep, LabelRunner: "sg-runner-0", LabelRun: RunLabel(testOrg, testRun)}
+		p.Annotations = map[string]string{AnnotationOrg: testOrg, AnnotationRun: testRun}
+	})
+	hs := newHarness(t, ended)
+	if got := stoppedIDs(t, hs.do("POST", "/v1/runs/stop", stopRunJSON(t, testOrg, testRun, "", nil))); len(got) != 0 {
+		t.Errorf("stopped %v", got)
+	}
+	if len(hs.pods()) != 1 {
+		t.Error("the ended step's pod is gone")
+	}
+}
+
+func TestStopRunRejects(t *testing.T) {
+	hs := newHarness(t)
+	for name, body := range map[string]string{
+		"no org":         stopRunJSON(t, "", testRun, "", nil),
+		"no run":         stopRunJSON(t, testOrg, "", "", nil),
+		"empty body":     "",
+		"dotdot run":     stopRunJSON(t, testOrg, "/../x", "", nil),
+		"bad claim":      stopRunJSON(t, testOrg, testRun, "a/b", nil),
+		"negative grace": stopRunJSON(t, testOrg, testRun, "", ptr.To[int64](-1)),
+		"not JSON":       "{",
+	} {
+		rec := hs.do("POST", "/v1/runs/stop", body)
+		var e Error
+		if rec.Code != 400 || json.Unmarshal(rec.Body.Bytes(), &e) != nil || e.Reason != ReasonInvalidRequest {
+			t.Errorf("%s: %d %s", name, rec.Code, rec.Body)
+		}
 	}
 }
 
@@ -499,7 +637,7 @@ func TestOverTheSocket(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 || strings.TrimSpace(string(b)) != `{"api":"v1"}` {
+	if resp.StatusCode != 200 || strings.TrimSpace(string(b)) != `{"api":"v1","features":["claim","stop-run"]}` {
 		t.Errorf("healthz over the socket %d %s", resp.StatusCode, b)
 	}
 }
