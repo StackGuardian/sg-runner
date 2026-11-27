@@ -371,6 +371,8 @@ EOF
   other=$(create_step '["sleep","600"]' '"run":"/wfruns/r4","mounts":[],"claim":"c1"')
   out=$(api POST /v1/runs/stop '{"org":"/orgs/ci","run":"/wfruns/r3","claim":"c1","graceSeconds":0}')
   [[ $(jq -c .stopped <<<"$out") == "[\"$a\"]" ]] || fail "stop run r3 claim c1: want [$a], got $out"
+  # A step that is still stopping is stopped again and listed: wait until it ended.
+  expect_state "$a" exited ""
   out=$(api POST /v1/runs/stop '{"org":"/orgs/ci","run":"/wfruns/r3","graceSeconds":0}')
   [[ $(jq -c '.stopped | sort' <<<"$out") == "$(jq -nc --arg b "$b" --arg c "$c" '[$b, $c] | sort')" ]] \
     || fail "stop run r3: want $b and $c, got $out"
